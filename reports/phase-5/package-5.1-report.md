@@ -7,9 +7,10 @@
 | **Package ID** | 5.1 |
 | **Phase** | 5 — MCP Server & Integration |
 | **Branch** | `phase-5-mcp-server` |
+| **Commit Hash** | `68c2807` (initial), `0097ced` (hardening) |
 | **Difficulty** | 🔴 Critical |
 | **Model** | Claude Opus 4.6 |
-| **Timestamp** | 2026-11-18T21:53:30+05:30 |
+| **Timestamp** | 2026-11-18T21:58:30+05:30 |
 | **Commit Message** | `feat: MCP SDK v2 (MCPServer) with signal-filtered transcript chunking` |
 
 ## 2. Files Created / Modified
@@ -18,7 +19,7 @@
 | :--- | :--- | :---: | :--- |
 | `src/streamclipper/mcp_server/server.py` | **Created & Hardened** | 1,463 | Implements the MCP SDK v2 `MCPServer("streamclipper")` server (`from mcp.server.mcpserver import MCPServer`) with all 11 `@mcp.tool()` functions (`discover_streams`, `download_stream_audio`, `transcribe_audio`, `analyze_signals`, `get_transcript_chunks`, `submit_highlights`, `render_clip`, `render_all_selected`, `get_pipeline_status`, `generate_post_metadata`, `cleanup_temp`), zero-Ollama `_MCPScorer(Scorer)` signal-filtered candidate chunking & dynamic tri-modal fusion, `StepCache` resolution by `url` OR `StepCache.find_by_audio_path(audio_path)`, per-loop shared GPU lock & per-URL cache locks with reload-before-save merge semantics, incremental `render_all_selected` persistence, output collision avoidance for uncached `render_clip`, glob-injection/path-traversal-safe temp cleanup, and structured JSON error handling (`{"error": "..."}`). |
 | `src/streamclipper/mcp_server/__init__.py` | **Modified** | 11 | Replaces the Phase 1 placeholder with the `streamclipper-mcp` entry point exposing `main()` calling `mcp.run()`. |
-| `tests/test_mcp_server.py` | **Created & Expanded** | 1,771 | 20 unit/async/integration tests covering `MCPServer` registration and `tool.input_schema` verification for all 11 tools, `main()` delegation to `mcp.run()`, `CallToolResult` invocation via `await mcp.call_tool(...)`, `StepCache.find_by_audio_path()` linkage, signal-filtered chunking (`only_with_signals=True` vs `False`), YPP `submit_highlights` parsing/fusion/cache persistence (including MM:SS timestamps, fenced JSON, explicit `peak_time`, and empty-list status reset), `render_clip` & `render_all_selected` across `auto`/`narrative`/`story`/`raw` + voiceover validation & collision avoidance, parallel `transcribe_audio` + `analyze_signals` cache-merge safety, shared GPU lock serialization, `cleanup_temp` glob-injection & path-traversal protection, mid-batch partial-progress persistence, real MoviePy/FFmpeg/ASS/Narrator end-to-end assembly via MCP, offline & opt-in Ollama `generate_post_metadata`, and structured JSON error handling across all 11 tools. |
+| `tests/test_mcp_server.py` | **Created & Expanded** | 1,770 | 20 unit/async/integration tests covering `MCPServer` registration and `tool.input_schema` verification for all 11 tools, `main()` delegation to `mcp.run()`, `CallToolResult` invocation via `await mcp.call_tool(...)`, `StepCache.find_by_audio_path()` linkage, signal-filtered chunking (`only_with_signals=True` vs `False`), YPP `submit_highlights` parsing/fusion/cache persistence (including MM:SS timestamps, fenced JSON, explicit `peak_time`, and empty-list status reset), `render_clip` & `render_all_selected` across `auto`/`narrative`/`story`/`raw` + voiceover validation & collision avoidance, parallel `transcribe_audio` + `analyze_signals` cache-merge safety, shared GPU lock serialization, `cleanup_temp` glob-injection & path-traversal protection, mid-batch partial-progress persistence, real MoviePy/FFmpeg/ASS/Narrator end-to-end assembly via MCP, offline & opt-in Ollama `generate_post_metadata`, and structured JSON error handling across all 11 tools. |
 | `reports/phase-5/package-5.1-report.md` | **Updated** | — | This report. |
 
 ## 3. Acceptance Criteria Verification
@@ -68,7 +69,7 @@ tests/test_mcp_server.py::test_submit_highlights_empty_resets_status_and_parses_
 tests/test_mcp_server.py::test_render_clip_nonexistent_voice_path_and_uncached_collision_avoidance PASSED [ 95%]
 tests/test_mcp_server.py::test_render_clip_real_assembly_end_to_end_narrative_and_story PASSED [100%]
 
-====================== 20 passed, 229 warnings in 22.60s ======================
+====================== 20 passed, 229 warnings in 21.81s ======================
 ```
 
 ### Full Repository Test Suite (`D:\GTA6-Clipper\.venv\Scripts\pytest.exe -v`)

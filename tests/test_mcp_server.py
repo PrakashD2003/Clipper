@@ -21,7 +21,6 @@ from streamclipper.mcp_server import main as mcp_main
 from streamclipper.mcp_server import server as mcp_server
 from streamclipper.mcp_server.server import mcp
 from streamclipper.models import (
-    ClipMetadata,
     ClipResult,
     Highlight,
     PipelineState,
