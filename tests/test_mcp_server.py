@@ -259,7 +259,7 @@ async def test_download_transcribe_analyze_via_audio_path_linkage(
     mcp_env: tuple[Config, StepCache, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Verify download -> transcribe (by audio_path) -> analyze (by audio_path) -> chunks (by audio_path)."""
-    config, cache, tmp_path = mcp_env
+    _, cache, tmp_path = mcp_env
     url = "https://www.youtube.com/watch?v=abc12345678"
     wav_path = tmp_path / "temp" / "abc12345678.wav"
     wav_path.parent.mkdir(parents=True, exist_ok=True)
@@ -541,7 +541,7 @@ async def test_submit_highlights_invalid_json_returns_error(
 async def test_render_clip_story_narrative_raw_and_voice_overrides(
     mcp_env: tuple[Config, StepCache, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    config, cache, tmp_path = mcp_env
+    _, _, tmp_path = mcp_env
     url = "https://www.youtube.com/watch?v=rnd12345678"
 
     # Ensure OllamaScorer is NEVER instantiated during MCP rendering
@@ -1766,5 +1766,217 @@ async def test_render_clip_real_assembly_end_to_end_narrative_and_story(
     assert story_video.is_file() and story_video.stat().st_size > 1000
     assert story_video != narr_video
     assert abs(story["clip"]["duration_seconds"] - 10.0) <= 1.0
+
+
+@pytest.mark.asyncio
+async def test_analyze_signals_without_transcript_keeps_transcribing_status(
+    mcp_env: tuple[Config, StepCache, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Running analyze_signals before transcribe_audio must not advance status to SCORING."""
+    _, cache, tmp_path = mcp_env
+    url = "https://www.youtube.com/watch?v=ord12345678"
+    wav_path = tmp_path / "temp" / "ord12345678.wav"
+    wav_path.parent.mkdir(parents=True, exist_ok=True)
+    wav_path.write_bytes(b"RIFF0000WAVE")
+
+    cache.save_state(
+        PipelineState(
+            stream_info=StreamInfo(
+                url=url,
+                title="Order Test",
+                platform=Platform.YOUTUBE,
+                streamer="Tim",
+                game="GTA 6",
+                duration_seconds=3600,
+                video_id="ord12345678",
+            ),
+            status=PipelineStatus.TRANSCRIBING,
+            audio_path=wav_path,
+        )
+    )
+
+    class FakeLoudness:
+        def __init__(self, cfg: Config) -> None:
+            pass
+
+        def detect(self, path: Path) -> list[TimeRange]:
+            return [
+                TimeRange(
+                    start=100.0,
+                    end=115.0,
+                    score=9.0,
+                    signal_type=SignalType.LOUDNESS,
+                    metadata={"peak_time": 108.0},
+                )
+            ]
+
+    class FakeChatScraper:
+        def load_cache(self, path: Path):
+            return None
+
+        def scrape(self, stream_url: str, temp_dir: Path) -> pd.DataFrame:
+            return pd.DataFrame(columns=["offset_seconds", "author", "message"])
+
+        def save_cache(self, df: pd.DataFrame, path: Path) -> None:
+            pass
+
+    class FakeChatAnalyzer:
+        def __init__(self, cfg: Config) -> None:
+            pass
+
+        def analyze(self, df: pd.DataFrame) -> list[TimeRange]:
+            return []
+
+    class FakeTranscriber:
+        def __init__(self, cfg: Config) -> None:
+            pass
+
+        def transcribe(self, path: Path) -> TranscriptionResult:
+            return _make_sample_transcript()
+
+    monkeypatch.setattr(mcp_server, "LoudnessDetector", FakeLoudness)
+    monkeypatch.setattr(mcp_server, "ChatScraper", FakeChatScraper)
+    monkeypatch.setattr(mcp_server, "ChatVelocityAnalyzer", FakeChatAnalyzer)
+    monkeypatch.setattr(mcp_server, "Transcriber", FakeTranscriber)
+
+    # 1) analyze_signals before transcribe_audio preserves TRANSCRIBING status
+    sig = _extract_json(await mcp.call_tool("analyze_signals", {"url": url}))
+    assert sig["status"] == "transcribing"
+    after_sig = cache.load_state(url)
+    assert after_sig is not None
+    assert after_sig.analysis_complete is True
+    assert after_sig.transcript is None
+    assert after_sig.status == PipelineStatus.TRANSCRIBING
+
+    # 2) Subsequent transcribe_audio promotes status cleanly to SCORING
+    tr = _extract_json(await mcp.call_tool("transcribe_audio", {"url": url}))
+    assert tr["status"] == "scoring"
+    after_tr = cache.load_state(url)
+    assert after_tr is not None
+    assert after_tr.transcript is not None
+    assert after_tr.analysis_complete is True
+    assert after_tr.status == PipelineStatus.SCORING
+
+
+@pytest.mark.asyncio
+async def test_cleanup_temp_prevents_prefix_collision_across_streams(
+    mcp_env: tuple[Config, StepCache, Path],
+) -> None:
+    """cleanup_temp must not delete another stream's chat/segment files on ID prefix overlap."""
+    _, cache, tmp_path = mcp_env
+    temp_dir = tmp_path / "temp"
+    seg_dir = temp_dir / "segments"
+    seg_dir.mkdir(parents=True, exist_ok=True)
+
+    url_a = "https://example.com/stream-a"
+    stream_a_chat = temp_dir / "stream.live_chat.json"
+    stream_a_lang_chat = temp_dir / "stream.en.live_chat.json"
+    stream_b_chat = temp_dir / "stream2.live_chat.json"
+    stream_c_chat = temp_dir / "stream_2.live_chat.json"
+    stream_a_seg = seg_dir / "stream_10_40.mp4"
+    stream_a_sidecar = seg_dir / "stream_10_40.json"
+    stream_b_seg = seg_dir / "stream_2_10_40.mp4"
+
+    for f in (
+        stream_a_chat,
+        stream_a_lang_chat,
+        stream_b_chat,
+        stream_c_chat,
+        stream_a_seg,
+        stream_a_sidecar,
+        stream_b_seg,
+    ):
+        f.write_bytes(b"DATA")
+
+    cache.save_state(
+        PipelineState(
+            stream_info=StreamInfo(
+                url=url_a,
+                title="Stream A",
+                platform=Platform.YOUTUBE,
+                streamer="A",
+                game="GTA 6",
+                duration_seconds=600,
+                video_id="stream",
+            ),
+            status=PipelineStatus.COMPLETE,
+        )
+    )
+
+    res = _extract_json(await mcp.call_tool("cleanup_temp", {"url": url_a}))
+    assert "error" not in res
+    assert res["deleted_count"] == 4
+    assert not stream_a_chat.exists()
+    assert not stream_a_lang_chat.exists()
+    assert not stream_a_seg.exists()
+    assert not stream_a_sidecar.exists()
+    # Other streams whose IDs share the "stream" prefix must remain untouched
+    assert stream_b_chat.is_file()
+    assert stream_c_chat.is_file()
+    assert stream_b_seg.is_file()
+
+
+@pytest.mark.asyncio
+async def test_submit_highlights_preserves_explicit_peak_time_for_quiet_highlight(
+    mcp_env: tuple[Config, StepCache, Path],
+) -> None:
+    """Explicit peak_time must be preserved when stream has loudness spikes only outside the clip."""
+    _, cache, _ = mcp_env
+    url = "https://www.youtube.com/watch?v=pek12345678"
+    cache.save_state(
+        PipelineState(
+            stream_info=StreamInfo(
+                url=url,
+                title="Peak Test",
+                platform=Platform.YOUTUBE,
+                streamer="Tim",
+                game="GTA 6",
+                duration_seconds=3600,
+                video_id="pek12345678",
+            ),
+            status=PipelineStatus.SCORING,
+            loudness_spikes=[
+                TimeRange(
+                    start=10.0,
+                    end=20.0,
+                    score=9.4,
+                    signal_type=SignalType.LOUDNESS,
+                    metadata={"peak_time": 15.0},
+                )
+            ],
+            analysis_complete=True,
+        )
+    )
+
+    payload = json.dumps(
+        [
+            {
+                "start": 500.0,
+                "end": 530.0,
+                "score": 9.0,
+                "title": "Quiet Punchline",
+                "moment_type": "funny",
+                "peak_time": 524.0,
+            },
+            {
+                "start": 5.0,
+                "end": 35.0,
+                "score": 8.8,
+                "title": "Loud Reaction",
+                "moment_type": "hype",
+                "peak_time": 29.0,
+            },
+        ]
+    )
+    res = _extract_json(
+        await mcp.call_tool("submit_highlights", {"url": url, "highlights": payload})
+    )
+    assert res["accepted_count"] == 2
+    by_title = {h["title"]: h for h in res["highlights"]}
+    # Quiet highlight has no overlapping loudness spike -> honors explicit peak_time
+    assert by_title["Quiet Punchline"]["peak_time"] == 524.0
+    # Loud highlight overlaps spike at [10, 20] -> uses measured loudness peak_time
+    assert by_title["Loud Reaction"]["peak_time"] == 15.0
+
 
 

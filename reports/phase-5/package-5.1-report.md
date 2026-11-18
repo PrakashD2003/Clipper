@@ -7,19 +7,19 @@
 | **Package ID** | 5.1 |
 | **Phase** | 5 — MCP Server & Integration |
 | **Branch** | `phase-5-mcp-server` |
-| **Commit Hash** | `68c2807` (initial), `0097ced` (hardening) |
+| **Commit Hash** | `68c2807` (initial), `0097ced` (hardening), `4d51001` (polish) |
 | **Difficulty** | 🔴 Critical |
 | **Model** | Claude Opus 4.6 |
-| **Timestamp** | 2026-11-18T21:58:30+05:30 |
+| **Timestamp** | 2026-11-18T22:05:10+05:30 |
 | **Commit Message** | `feat: MCP SDK v2 (MCPServer) with signal-filtered transcript chunking` |
 
 ## 2. Files Created / Modified
 
 | File | Action | Lines | Summary |
 | :--- | :--- | :---: | :--- |
-| `src/streamclipper/mcp_server/server.py` | **Created & Hardened** | 1,463 | Implements the MCP SDK v2 `MCPServer("streamclipper")` server (`from mcp.server.mcpserver import MCPServer`) with all 11 `@mcp.tool()` functions (`discover_streams`, `download_stream_audio`, `transcribe_audio`, `analyze_signals`, `get_transcript_chunks`, `submit_highlights`, `render_clip`, `render_all_selected`, `get_pipeline_status`, `generate_post_metadata`, `cleanup_temp`), zero-Ollama `_MCPScorer(Scorer)` signal-filtered candidate chunking & dynamic tri-modal fusion, `StepCache` resolution by `url` OR `StepCache.find_by_audio_path(audio_path)`, per-loop shared GPU lock & per-URL cache locks with reload-before-save merge semantics, incremental `render_all_selected` persistence, output collision avoidance for uncached `render_clip`, glob-injection/path-traversal-safe temp cleanup, and structured JSON error handling (`{"error": "..."}`). |
+| `src/streamclipper/mcp_server/server.py` | **Created & Hardened** | 1,480 | Implements the MCP SDK v2 `MCPServer("streamclipper")` server (`from mcp.server.mcpserver import MCPServer`) with all 11 `@mcp.tool()` functions (`discover_streams`, `download_stream_audio`, `transcribe_audio`, `analyze_signals`, `get_transcript_chunks`, `submit_highlights`, `render_clip`, `render_all_selected`, `get_pipeline_status`, `generate_post_metadata`, `cleanup_temp`), zero-Ollama `_MCPScorer(Scorer)` signal-filtered candidate chunking & dynamic tri-modal fusion, `StepCache` resolution by `url` OR `StepCache.find_by_audio_path(audio_path)`, per-loop shared GPU lock & per-URL cache locks with reload-before-save merge semantics, transcript-gated status promotion in `analyze_signals`, overlap-aware `peak_time` fallback in `submit_highlights`, incremental `render_all_selected` persistence, output collision avoidance for uncached `render_clip`, prefix-collision & glob-injection/path-traversal-safe temp cleanup, and structured JSON error handling (`{"error": "..."}`). |
 | `src/streamclipper/mcp_server/__init__.py` | **Modified** | 11 | Replaces the Phase 1 placeholder with the `streamclipper-mcp` entry point exposing `main()` calling `mcp.run()`. |
-| `tests/test_mcp_server.py` | **Created & Expanded** | 1,770 | 20 unit/async/integration tests covering `MCPServer` registration and `tool.input_schema` verification for all 11 tools, `main()` delegation to `mcp.run()`, `CallToolResult` invocation via `await mcp.call_tool(...)`, `StepCache.find_by_audio_path()` linkage, signal-filtered chunking (`only_with_signals=True` vs `False`), YPP `submit_highlights` parsing/fusion/cache persistence (including MM:SS timestamps, fenced JSON, explicit `peak_time`, and empty-list status reset), `render_clip` & `render_all_selected` across `auto`/`narrative`/`story`/`raw` + voiceover validation & collision avoidance, parallel `transcribe_audio` + `analyze_signals` cache-merge safety, shared GPU lock serialization, `cleanup_temp` glob-injection & path-traversal protection, mid-batch partial-progress persistence, real MoviePy/FFmpeg/ASS/Narrator end-to-end assembly via MCP, offline & opt-in Ollama `generate_post_metadata`, and structured JSON error handling across all 11 tools. |
+| `tests/test_mcp_server.py` | **Created & Expanded** | 1,982 | 23 unit/async/integration tests covering `MCPServer` registration and `tool.input_schema` verification for all 11 tools, `main()` delegation to `mcp.run()`, `CallToolResult` invocation via `await mcp.call_tool(...)`, `StepCache.find_by_audio_path()` linkage, signal-filtered chunking (`only_with_signals=True` vs `False`), YPP `submit_highlights` parsing/fusion/cache persistence (including MM:SS timestamps, fenced JSON, explicit `peak_time` preservation for quiet highlights, and empty-list status reset), `render_clip` & `render_all_selected` across `auto`/`narrative`/`story`/`raw` + voiceover validation & collision avoidance, parallel & out-of-order `transcribe_audio` + `analyze_signals` cache/status safety, shared GPU lock serialization, `cleanup_temp` glob-injection/path-traversal/prefix-collision protection, mid-batch partial-progress persistence, real MoviePy/FFmpeg/ASS/Narrator end-to-end assembly via MCP, offline & opt-in Ollama `generate_post_metadata`, and structured JSON error handling across all 11 tools. |
 | `reports/phase-5/package-5.1-report.md` | **Updated** | — | This report. |
 
 ## 3. Acceptance Criteria Verification
@@ -46,36 +46,39 @@ rootdir: D:\GTA6-Clipper
 configfile: pyproject.toml
 plugins: anyio-4.16.0, platformdirs-4.14.7, asyncio-1.5.0
 asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=function, asyncio_default_test_loop_scope=function
-collecting ... collected 20 items
+collecting ... collected 23 items
 
-tests/test_mcp_server.py::test_mcp_server_registration_and_schemas PASSED [  5%]
-tests/test_mcp_server.py::test_mcp_main_invokes_mcp_run PASSED           [ 10%]
-tests/test_mcp_server.py::test_discover_streams_success_and_error PASSED [ 15%]
-tests/test_mcp_server.py::test_download_transcribe_analyze_via_audio_path_linkage PASSED [ 20%]
-tests/test_mcp_server.py::test_submit_highlights_parses_ypp_and_persists_cache PASSED [ 25%]
-tests/test_mcp_server.py::test_submit_highlights_invalid_json_returns_error PASSED [ 30%]
-tests/test_mcp_server.py::test_render_clip_story_narrative_raw_and_voice_overrides PASSED [ 35%]
-tests/test_mcp_server.py::test_render_all_selected_renders_and_completes_cache PASSED [ 40%]
-tests/test_mcp_server.py::test_get_pipeline_status_empty_and_populated PASSED [ 45%]
-tests/test_mcp_server.py::test_generate_post_metadata_offline_default_and_ollama_opt_in PASSED [ 50%]
-tests/test_mcp_server.py::test_cleanup_temp_stream_and_all_completed_safety PASSED [ 55%]
-tests/test_mcp_server.py::test_unexpected_exception_returns_structured_json_error PASSED [ 60%]
-tests/test_mcp_server.py::test_edge_cases_validation_and_cache_hydration PASSED [ 65%]
-tests/test_mcp_server.py::test_parallel_transcribe_and_analyze_preserve_both_cache_updates PASSED [ 70%]
-tests/test_mcp_server.py::test_gpu_lock_serializes_concurrent_transcribe_and_render PASSED [ 75%]
-tests/test_mcp_server.py::test_cleanup_temp_blocks_glob_injection_and_path_traversal PASSED [ 80%]
-tests/test_mcp_server.py::test_render_all_selected_persists_partial_progress_on_mid_batch_failure PASSED [ 85%]
-tests/test_mcp_server.py::test_submit_highlights_empty_resets_status_and_parses_string_timestamps PASSED [ 90%]
-tests/test_mcp_server.py::test_render_clip_nonexistent_voice_path_and_uncached_collision_avoidance PASSED [ 95%]
-tests/test_mcp_server.py::test_render_clip_real_assembly_end_to_end_narrative_and_story PASSED [100%]
+tests/test_mcp_server.py::test_mcp_server_registration_and_schemas PASSED [  4%]
+tests/test_mcp_server.py::test_mcp_main_invokes_mcp_run PASSED           [  8%]
+tests/test_mcp_server.py::test_discover_streams_success_and_error PASSED [ 13%]
+tests/test_mcp_server.py::test_download_transcribe_analyze_via_audio_path_linkage PASSED [ 17%]
+tests/test_mcp_server.py::test_submit_highlights_parses_ypp_and_persists_cache PASSED [ 21%]
+tests/test_mcp_server.py::test_submit_highlights_invalid_json_returns_error PASSED [ 26%]
+tests/test_mcp_server.py::test_render_clip_story_narrative_raw_and_voice_overrides PASSED [ 30%]
+tests/test_mcp_server.py::test_render_all_selected_renders_and_completes_cache PASSED [ 34%]
+tests/test_mcp_server.py::test_get_pipeline_status_empty_and_populated PASSED [ 39%]
+tests/test_mcp_server.py::test_generate_post_metadata_offline_default_and_ollama_opt_in PASSED [ 43%]
+tests/test_mcp_server.py::test_cleanup_temp_stream_and_all_completed_safety PASSED [ 47%]
+tests/test_mcp_server.py::test_unexpected_exception_returns_structured_json_error PASSED [ 52%]
+tests/test_mcp_server.py::test_edge_cases_validation_and_cache_hydration PASSED [ 56%]
+tests/test_mcp_server.py::test_parallel_transcribe_and_analyze_preserve_both_cache_updates PASSED [ 60%]
+tests/test_mcp_server.py::test_gpu_lock_serializes_concurrent_transcribe_and_render PASSED [ 65%]
+tests/test_mcp_server.py::test_cleanup_temp_blocks_glob_injection_and_path_traversal PASSED [ 69%]
+tests/test_mcp_server.py::test_render_all_selected_persists_partial_progress_on_mid_batch_failure PASSED [ 73%]
+tests/test_mcp_server.py::test_submit_highlights_empty_resets_status_and_parses_string_timestamps PASSED [ 78%]
+tests/test_mcp_server.py::test_render_clip_nonexistent_voice_path_and_uncached_collision_avoidance PASSED [ 82%]
+tests/test_mcp_server.py::test_render_clip_real_assembly_end_to_end_narrative_and_story PASSED [ 86%]
+tests/test_mcp_server.py::test_analyze_signals_without_transcript_keeps_transcribing_status PASSED [ 91%]
+tests/test_mcp_server.py::test_cleanup_temp_prevents_prefix_collision_across_streams PASSED [ 95%]
+tests/test_mcp_server.py::test_submit_highlights_preserves_explicit_peak_time_for_quiet_highlight PASSED [100%]
 
-====================== 20 passed, 229 warnings in 21.81s ======================
+====================== 23 passed, 229 warnings in 22.31s ======================
 ```
 
 ### Full Repository Test Suite (`D:\GTA6-Clipper\.venv\Scripts\pytest.exe -v`)
 
 ```text
-================ 516 passed, 351 warnings in 65.32s (0:01:05) =================
+================ 519 passed, 351 warnings in 65.48s (0:01:05) =================
 ```
 
 ### `streamclipper-mcp` Live Stdio JSON-RPC Handshake & Tool Call Smoke Test
@@ -94,6 +97,7 @@ LIVE STDIO CHECK PASSED
 
 - **Zero-Ollama MCP Rendering Path**: Both `render_clip` and `render_all_selected` construct `ClipMetadata` offline via `_build_offline_post_metadata()` and reuse `Pipeline._resolve_base_mode()`, `Pipeline._resolve_highlight_mode()`, and `Pipeline._assemble_highlight()` directly rather than calling `Pipeline._step_assemble()`, which invokes `OllamaScorer.generate_metadata()`. Verified end-to-end against real MoviePy v2, FFmpeg, `AssCaptionBurner`, and `TransformativeNarrator` in `test_render_clip_real_assembly_end_to_end_narrative_and_story`.
 - **Concurrency & 6 GB GPU Serialization**: Per-event-loop `WeakKeyDictionary` locks (`_get_gpu_lock()` and `_get_url_lock(cache_key)`) serialize concurrent GPU-heavy operations (`transcribe_audio`, `_render_single_highlight`, and `generate_post_metadata(use_ollama=True)`) and wrap all `StepCache` read-modify-write updates with reload-before-save semantics so parallel `transcribe_audio` + `analyze_signals` tool calls from MCP hosts never clobber each other's cached fields.
-- **Hardened `cleanup_temp` Containment**: `_collect_temp_files_for_stream()` rejects unsafe path prefixes (`/`, `\`, `:`, `..`), replaces `Path.glob()` wildcard interpolation with exact `iterdir()` prefix/suffix matching (preventing `**` crashes and `[a-z]*` cross-stream deletion), and enforces `_is_within_directory(p, temp_dir)` on every candidate path.
+- **Hardened `cleanup_temp` Containment**: `_collect_temp_files_for_stream()` rejects unsafe path prefixes (`/`, `\`, `:`, `..`), replaces `Path.glob()` wildcard interpolation with exact `iterdir()` delimited matching (`f"{vid}."` for `.live_chat.json` and `f"{vid}_"` + `^\d+_\d+\.` for `segments/`, preventing cross-stream prefix-collision deletion, `**` crashes, and `[a-z]*` cross-stream deletion), and enforces `_is_within_directory(p, temp_dir)` on every candidate path.
+- **Transcript-Gated `analyze_signals` Status & Overlap-Aware `peak_time`**: `analyze_signals` only promotes cached status to `PipelineStatus.SCORING` when `state.transcript is not None` (otherwise keeping `PipelineStatus.TRANSCRIBING` so out-of-order analysis never causes `Pipeline.process_stream()` to skip WhisperX transcription); `submit_highlights` checks loudness spikes overlapping `[start, end]` before falling back to explicit LLM-provided `peak_time` so quiet funny/detail highlights retain their punchline zoom timestamp even when loudness spikes exist elsewhere in the VOD.
 - **Partial Batch Persistence & Output Collision Avoidance**: `render_all_selected` persists `state.clips` incrementally after each clip (recording `PipelineStatus.FAILED` plus partial clips in both cache and JSON error output if a later clip fails). `render_clip` validates explicit `voice_intro_path`/`voice_outro_path` files exist and allocates the next non-colliding `clip_XX.mp4` index inside `_get_gpu_lock()` so repeated uncached renders never overwrite `clip_01.mp4`.
 - **`analyze_signals` Optional `url` Default**: `analyze_signals(url: str = "", audio_path: str = "")` defaults `url` to `""` so MCP clients invoking `analyze_signals` with only `audio_path` pass MCP SDK v2 schema validation and resolve the linked stream state cleanly through `StepCache.find_by_audio_path()`.

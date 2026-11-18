@@ -310,6 +310,9 @@ def _is_safe_id_prefix(value: str) -> bool:
     return True
 
 
+_SEGMENT_RANGE_SUFFIX_RE = re.compile(r"^\d+_\d+\.")
+
+
 def _collect_temp_files_for_stream(
     temp_dir: Path,
     cache: StepCache,
@@ -352,7 +355,7 @@ def _collect_temp_files_for_stream(
                 if not entry.is_file() or not _is_within_directory(entry, temp_dir):
                     continue
                 if entry.name.endswith(".live_chat.json") and any(
-                    entry.name.startswith(vid) for vid in video_ids
+                    entry.name.startswith(f"{vid}.") for vid in video_ids
                 ):
                     candidates.append(entry)
 
@@ -363,14 +366,16 @@ def _collect_temp_files_for_stream(
 
         segments_dir = temp_dir / "segments"
         if segments_dir.is_dir() and video_ids:
-            seg_prefixes = tuple(f"{vid}_" for vid in video_ids)
             for seg_file in segments_dir.iterdir():
-                if (
-                    seg_file.is_file()
-                    and _is_within_directory(seg_file, temp_dir)
-                    and seg_file.name.startswith(seg_prefixes)
-                ):
-                    candidates.append(seg_file)
+                if not seg_file.is_file() or not _is_within_directory(seg_file, temp_dir):
+                    continue
+                for vid in video_ids:
+                    prefix = f"{vid}_"
+                    if seg_file.name.startswith(prefix) and _SEGMENT_RANGE_SUFFIX_RE.match(
+                        seg_file.name[len(prefix) :]
+                    ):
+                        candidates.append(seg_file)
+                        break
 
     unique: list[Path] = []
     seen: set[str] = set()
@@ -768,7 +773,7 @@ async def analyze_signals(url: str = "", audio_path: str = "") -> str:
                             duration_seconds=0,
                             video_id=_extract_youtube_id_from_url(target_url) or "",
                         ),
-                        status=PipelineStatus.SCORING,
+                        status=PipelineStatus.TRANSCRIBING,
                         audio_path=target_audio,
                         loudness_spikes=loudness_spikes,
                         chat_spikes=chat_spikes,
@@ -786,7 +791,11 @@ async def analyze_signals(url: str = "", audio_path: str = "") -> str:
                         fresh_state.status < PipelineStatus.SCORING
                         or fresh_state.status == PipelineStatus.FAILED
                     ):
-                        fresh_state.status = PipelineStatus.SCORING
+                        fresh_state.status = (
+                            PipelineStatus.SCORING
+                            if fresh_state.transcript is not None
+                            else PipelineStatus.TRANSCRIBING
+                        )
                 cache.save_state(fresh_state)
                 state = fresh_state
 
@@ -802,7 +811,7 @@ async def analyze_signals(url: str = "", audio_path: str = "") -> str:
                 "chat_spikes": [s.to_dict() for s in chat_spikes],
                 "overlap_moments": overlaps,
                 "cached": state is not None,
-                "status": state.status.name.lower() if state is not None else "scoring",
+                "status": state.status.name.lower() if state is not None else "transcribing",
             }
         )
     except Exception as exc:
@@ -1007,14 +1016,22 @@ async def submit_highlights(url: str, highlights: str) -> str:
                     if scoped_text:
                         highlight.transcript_chunk = scoped_text
 
-                if state.loudness_spikes:
+                overlapping_loudness = [
+                    s
+                    for s in state.loudness_spikes
+                    if s.end > highlight.start and s.start < highlight.end
+                ]
+                explicit_peak = _parse_seconds(item.get("peak_time"))
+                if overlapping_loudness:
+                    highlight.peak_time = scorer._extract_peak_time(
+                        highlight, overlapping_loudness
+                    )
+                elif explicit_peak is not None and start <= explicit_peak <= end:
+                    highlight.peak_time = explicit_peak
+                elif state.loudness_spikes:
                     highlight.peak_time = scorer._extract_peak_time(
                         highlight, state.loudness_spikes
                     )
-                else:
-                    explicit_peak = _parse_seconds(item.get("peak_time"))
-                    if explicit_peak is not None and start <= explicit_peak <= end:
-                        highlight.peak_time = explicit_peak
                 highlight.chat_burst = scorer._extract_chat_burst(
                     highlight, state.chat_spikes
                 )
