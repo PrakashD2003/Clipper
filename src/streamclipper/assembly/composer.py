@@ -126,18 +126,23 @@ class VideoComposer:
         peak_offset: float | None = None,
     ) -> CompositeVideoClip:
         """Create a 9:16 vertical CompositeVideoClip using MoviePy v2 methods."""
-        clip = (
-            VideoFileClip(str(video_path))
-            if isinstance(video_path, (str, Path))
-            else video_path
-        )
-        result = (
-            self._compose_with_facecam(clip, facecam)
-            if facecam is not None
-            else self._compose_gameplay_only(clip)
-        )
-        if peak_offset is not None and self.punch_in_zoom > 1.0:
-            result = self.apply_spike_zoom(result, peak_offset)
+        opened_by_us = isinstance(video_path, (str, Path))
+        clip = VideoFileClip(str(video_path)) if opened_by_us else video_path
+        try:
+            result = (
+                self._compose_with_facecam(clip, facecam)
+                if facecam is not None
+                else self._compose_gameplay_only(clip)
+            )
+            if peak_offset is not None and self.punch_in_zoom > 1.0:
+                result = self.apply_spike_zoom(result, peak_offset)
+        except Exception:
+            if opened_by_us:
+                try:
+                    clip.close()
+                except Exception:
+                    pass
+            raise
         result._source_clip = clip  # ensure Windows file handles can be closed cleanly
         result._source_clips = [clip]
         return result
@@ -152,8 +157,8 @@ class VideoComposer:
         target_ratio: float,
     ) -> Any:
         """Crop a region to match target_ratio (width/height) around its center without stretching."""
-        x1 = max(0, min(int(x1), clip.w))
-        y1 = max(0, min(int(y1), clip.h))
+        x1 = max(0, min(int(x1), max(0, clip.w - 1)))
+        y1 = max(0, min(int(y1), max(0, clip.h - 1)))
         x2 = max(x1 + 1, min(int(x2), clip.w))
         y2 = max(y1 + 1, min(int(y2), clip.h))
 
@@ -265,36 +270,45 @@ class VideoComposer:
             return self.compose(segment_paths[0], facecam, peak_offset=peak_offset)
 
         all_source_clips: list[Any] = []
+        opened_clips: list[Any] = []
         beat_clips: list[CompositeVideoClip] = []
 
-        for i, item in enumerate(segment_paths):
-            raw_clip = (
-                VideoFileClip(str(item))
-                if isinstance(item, (str, Path))
-                else item
-            )
-            all_source_clips.append(raw_clip)
+        try:
+            for i, item in enumerate(segment_paths):
+                if isinstance(item, (str, Path)):
+                    raw_clip = VideoFileClip(str(item))
+                    opened_clips.append(raw_clip)
+                else:
+                    raw_clip = item
+                all_source_clips.append(raw_clip)
 
-            if beat_trim_ranges and i < len(beat_trim_ranges):
-                t_start = max(0.0, float(beat_trim_ranges[i][0]))
-                t_end = min(float(raw_clip.duration), float(beat_trim_ranges[i][1]))
-                if t_end > t_start:
-                    trimmed = raw_clip.subclipped(t_start, t_end)
+                if beat_trim_ranges and i < len(beat_trim_ranges):
+                    t_start = max(0.0, float(beat_trim_ranges[i][0]))
+                    t_end = min(float(raw_clip.duration), float(beat_trim_ranges[i][1]))
+                    if t_end > t_start:
+                        trimmed = raw_clip.subclipped(t_start, t_end)
+                    else:
+                        trimmed = raw_clip
                 else:
                     trimmed = raw_clip
-            else:
-                trimmed = raw_clip
 
-            composed_beat = (
-                self._compose_with_facecam(trimmed, facecam)
-                if facecam is not None
-                else self._compose_gameplay_only(trimmed)
-            )
-            beat_clips.append(composed_beat)
+                composed_beat = (
+                    self._compose_with_facecam(trimmed, facecam)
+                    if facecam is not None
+                    else self._compose_gameplay_only(trimmed)
+                )
+                beat_clips.append(composed_beat)
 
-        result = concatenate_videoclips(beat_clips, method="compose")
-        if peak_offset is not None and self.punch_in_zoom > 1.0:
-            result = self.apply_spike_zoom(result, peak_offset)
+            result = concatenate_videoclips(beat_clips, method="compose")
+            if peak_offset is not None and self.punch_in_zoom > 1.0:
+                result = self.apply_spike_zoom(result, peak_offset)
+        except Exception:
+            for opened in opened_clips:
+                try:
+                    opened.close()
+                except Exception:
+                    pass
+            raise
 
         result._source_clips = all_source_clips
         result._source_clip = all_source_clips[0]

@@ -200,6 +200,8 @@ class HookTitleOverlay:
         else:
             overlay_duration = self.duration
         overlay_duration = max(0.0, overlay_duration)
+        if overlay_duration <= 0.0:
+            return video_clip
 
         layers: list[Any] = [video_clip]
         hook_banner_h = 0

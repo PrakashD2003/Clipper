@@ -470,6 +470,19 @@ class TestRobustnessAndEdgeCases:
         assert detector.padding_h_ratio == 1.7
         assert detector.num_samples == 30
 
+    def test_detect_uses_configured_num_samples_by_default(self, tmp_path: Path) -> None:
+        """Verify detect(video_path) respects facecam.num_samples when num_samples is omitted."""
+        video_path = tmp_path / "ten_frames.mp4"
+        create_synthetic_video(video_path, total_frames=12, face_positions=[(180, 150)])
+
+        cfg_path = tmp_path / "zero_samples.yaml"
+        cfg_path.write_text("facecam:\n  num_samples: 0\n", encoding="utf-8")
+        detector = FacecamDetector(Config(user_config_path=cfg_path))
+        assert detector.detect(video_path) is None
+
+        # Explicit num_samples argument still overrides config
+        assert detector.detect(video_path, num_samples=6) is not None
+
     def test_facecam_region_serialization_round_trip(self) -> None:
         """Verify FacecamRegion serializes to dict and reconstructs identically."""
         region = FacecamRegion(x=50, y=80, w=350, h=280, confidence=0.85)

@@ -347,6 +347,17 @@ class TransformativeNarrator:
             intro_end = eff_intro
             delay_ms = int(round(outro_start * 1000))
 
+            intro_trim = (
+                f",atrim=0:{eff_intro:.2f},asetpts=PTS-STARTPTS"
+                if eff_intro < intro_d - 1e-6
+                else ""
+            )
+            outro_trim = (
+                f",atrim=0:{eff_outro:.2f},asetpts=PTS-STARTPTS"
+                if eff_outro < outro_d - 1e-6
+                else ""
+            )
+
             vol_expr = (
                 f"if(between(t,0,{intro_end:.2f})+"
                 f"between(t,{outro_start:.2f},{outro_end:.2f}),"
@@ -354,8 +365,8 @@ class TransformativeNarrator:
             )
             filter_complex = (
                 f"[0:a]volume='{vol_expr}':eval=frame,aresample=48000,aformat=channel_layouts=stereo[a0];"
-                f"[1:a]aresample=48000,aformat=channel_layouts=stereo[a1];"
-                f"[2:a]aresample=48000,aformat=channel_layouts=stereo,adelay={delay_ms}|{delay_ms}[a2];"
+                f"[1:a]aresample=48000,aformat=channel_layouts=stereo{intro_trim}[a1];"
+                f"[2:a]aresample=48000,aformat=channel_layouts=stereo{outro_trim},adelay={delay_ms}|{delay_ms}[a2];"
                 f"[a0][a1][a2]amix=inputs=3:duration=first:normalize=0[aout]"
             )
             return filter_complex, 3
@@ -364,11 +375,16 @@ class TransformativeNarrator:
             intro_d = float(intro_dur)  # type: ignore[arg-type]
             eff_intro = min(intro_d, clip_dur * 0.75)
             intro_end = eff_intro
+            intro_trim = (
+                f",atrim=0:{eff_intro:.2f},asetpts=PTS-STARTPTS"
+                if eff_intro < intro_d - 1e-6
+                else ""
+            )
 
             vol_expr = f"if(between(t,0,{intro_end:.2f}),{duck_vol_str},1.0)"
             filter_complex = (
                 f"[0:a]volume='{vol_expr}':eval=frame,aresample=48000,aformat=channel_layouts=stereo[a0];"
-                f"[1:a]aresample=48000,aformat=channel_layouts=stereo[a1];"
+                f"[1:a]aresample=48000,aformat=channel_layouts=stereo{intro_trim}[a1];"
                 f"[a0][a1]amix=inputs=2:duration=first:normalize=0[aout]"
             )
             return filter_complex, 2
@@ -379,13 +395,18 @@ class TransformativeNarrator:
         outro_start = max(0.0, clip_dur - eff_outro)
         outro_end = clip_dur
         delay_ms = int(round(outro_start * 1000))
+        outro_trim = (
+            f",atrim=0:{eff_outro:.2f},asetpts=PTS-STARTPTS"
+            if eff_outro < outro_d - 1e-6
+            else ""
+        )
 
         vol_expr = (
             f"if(between(t,{outro_start:.2f},{outro_end:.2f}),{duck_vol_str},1.0)"
         )
         filter_complex = (
             f"[0:a]volume='{vol_expr}':eval=frame,aresample=48000,aformat=channel_layouts=stereo[a0];"
-            f"[1:a]aresample=48000,aformat=channel_layouts=stereo,adelay={delay_ms}|{delay_ms}[a1];"
+            f"[1:a]aresample=48000,aformat=channel_layouts=stereo{outro_trim},adelay={delay_ms}|{delay_ms}[a1];"
             f"[a0][a1]amix=inputs=2:duration=first:normalize=0[aout]"
         )
         return filter_complex, 2

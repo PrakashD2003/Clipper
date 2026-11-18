@@ -381,3 +381,11 @@ class TestFadeInEffect:
         # At t=0, mask should already be at full alpha (>0.5)
         m0 = hook_clip.mask.get_frame(0.0)
         assert float(m0.max()) > 0.5
+
+    def test_zero_duration_overlay_returns_video_unchanged(self) -> None:
+        cfg = DummyConfig({"hook_title.enabled": True, "hook_title.duration_seconds": 0.0})
+        overlay = HookTitleOverlay(cfg)  # type: ignore[arg-type]
+
+        base = ColorClip((720, 1280), color=(0, 0, 0)).with_duration(4.0)
+        result = overlay.add_hook(base, "SHOULD SKIP", "🔥 Badge")
+        assert result is base

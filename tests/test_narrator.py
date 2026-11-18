@@ -516,6 +516,36 @@ class TestShortClipOverlapClamping:
         assert input_count == 3
         assert "between(t,0,3.00)+between(t,17.00,20.00)" in filtergraph
         assert "adelay=17000|17000" in filtergraph
+        assert "atrim=" not in filtergraph
+
+    def test_clamped_narrator_tracks_are_atrimmed_to_prevent_climax_bleed_and_overlap(
+        self, base_config: Config, tmp_path: Path
+    ) -> None:
+        """Short-clip clamping must atrim [1:a]/[2:a] so intro never bleeds into climax or outro."""
+        narrator = TransformativeNarrator(base_config)
+        # Clip 6.0s -> max combined = 4.5s; intro=4.0s, outro=4.0s -> eff_intro=2.25s, eff_outro=2.25s
+        fg, input_count = narrator._build_ducking_filtergraph(
+            intro_dur=4.0, outro_dur=4.0, clip_duration=6.0
+        )
+        assert input_count == 3
+        assert "[1:a]aresample=48000,aformat=channel_layouts=stereo,atrim=0:2.25,asetpts=PTS-STARTPTS[a1]" in fg
+        assert "[2:a]aresample=48000,aformat=channel_layouts=stereo,atrim=0:2.25,asetpts=PTS-STARTPTS,adelay=3750|3750[a2]" in fg
+
+        # Verify FFmpeg executes the clamped filtergraph cleanly on real media
+        in_video = create_synthetic_mp4(tmp_path / "short_clip.mp4", duration_sec=3.0)
+        intro_wav = create_synthetic_wav(tmp_path / "long_intro.wav", duration_sec=2.0, freq=440.0)
+        outro_wav = create_synthetic_wav(tmp_path / "long_outro.wav", duration_sec=2.0, freq=880.0)
+        out_video = tmp_path / "short_clamped_out.mp4"
+
+        res = narrator.mix_narration_with_ducking(
+            input_video=in_video,
+            output_video=out_video,
+            intro_wav=intro_wav,
+            outro_wav=outro_wav,
+            clip_duration=3.0,
+        )
+        assert res == out_video
+        assert out_video.is_file() and out_video.stat().st_size > 0
 
 
 class TestMixNarrationWithDucking:

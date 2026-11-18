@@ -117,12 +117,12 @@ class FacecamDetector:
 
         return final_x, final_y, final_w, final_h
 
-    def detect(self, video_path: Path | str, num_samples: int = 50) -> FacecamRegion | None:
+    def detect(self, video_path: Path | str, num_samples: int | None = None) -> FacecamRegion | None:
         """Detect facecam position in video by sampling frames evenly across its duration.
 
         Args:
             video_path: Path to video segment file.
-            num_samples: Number of frames to sample evenly across video (default 50).
+            num_samples: Number of frames to sample evenly across video (defaults to config facecam.num_samples, 50).
 
         Returns:
             FacecamRegion with padded coordinates if consistent corner face detected in >= 30%
@@ -137,7 +137,8 @@ class FacecamDetector:
             logger.warning("Haar cascade classifier is empty; cannot detect facecam.")
             return None
 
-        if num_samples <= 0:
+        requested_samples = self.num_samples if num_samples is None else num_samples
+        if requested_samples <= 0:
             return None
 
         cap = cv2.VideoCapture(str(path))
@@ -155,7 +156,7 @@ class FacecamDetector:
                 return None
 
             # Sample evenly across the video
-            sample_count = min(num_samples, total_frames)
+            sample_count = min(requested_samples, total_frames)
             if sample_count <= 1:
                 frame_indices = [0]
             else:

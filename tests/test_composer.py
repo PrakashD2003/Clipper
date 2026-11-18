@@ -492,3 +492,31 @@ class TestRealFileHandlingAndWindowsCleanup:
         p2.unlink()
         assert not p1.exists()
         assert not p2.exists()
+
+    def test_compose_story_beats_closes_opened_handles_on_partial_failure(
+        self, tmp_path: Path
+    ):
+        """If beat 2 fails to open, beat 1's VideoFileClip handle is closed so Windows can delete it."""
+        cfg = _make_config(tmp_path)
+        composer = VideoComposer(cfg)
+
+        p1 = tmp_path / "beat1_ok.mp4"
+        c1 = ColorClip(size=(320, 180), color=(0, 128, 255), duration=1.0)
+        c1.write_videofile(str(p1), fps=15, logger=None)
+
+        missing_p2 = tmp_path / "beat2_missing.mp4"
+        with pytest.raises(Exception):
+            composer.compose_story_beats([p1, missing_p2], facecam=None)
+
+        # Unlinking p1 proves beat 1's MoviePy handle was closed on exception
+        p1.unlink()
+        assert not p1.exists()
+
+    def test_crop_to_aspect_out_of_bounds_box_stays_within_frame(self):
+        """Out-of-bounds x1 >= clip.w or y1 >= clip.h must never produce x2 > clip.w / y2 > clip.h."""
+        clip = ColorClip(size=(640, 360), color=(10, 20, 30), duration=1.0)
+        cropped = VideoComposer._crop_to_aspect(
+            clip, x1=900, y1=500, x2=1000, y2=600, target_ratio=1.5
+        )
+        assert cropped.w >= 1 and cropped.h >= 1
+        assert cropped.w <= clip.w and cropped.h <= clip.h
