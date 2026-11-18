@@ -1,8 +1,12 @@
-"""Unit tests for Package 3.1 — Scorer Interface, YPP Adaptive Narrative Models & Prompt Templates."""
+"""Unit tests for Phase 3 Scorer Interface, YPP Narrative Models, Prompt Templates & OllamaScorer."""
+import json
 import math
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
+import ollama
+from ollama._types import GenerateResponse, ListResponse
 import pytest
 
 from streamclipper.models import (
@@ -14,8 +18,9 @@ from streamclipper.models import (
     WordTimestamp,
     SignalType,
 )
+from streamclipper.scoring.ollama_scorer import OllamaConnectionError, OllamaScorer
 from streamclipper.scoring.scorer import Scorer, TranscriptChunk
-from streamclipper.config import Config
+from streamclipper.config import Config, HardwareProfile
 
 
 # ---------------------------------------------------------------------------
@@ -723,3 +728,499 @@ class TestPromptTemplates:
             "{description}", "{hashtag_count}",
         ]:
             assert placeholder in content, f"Missing placeholder {placeholder}"
+
+
+# ===========================================================================
+# Package 3.2 — OllamaScorer (Standalone Mode)
+# ===========================================================================
+
+
+def _make_hw_profile(tier: str, llm_model: str) -> HardwareProfile:
+    """Create a deterministic HardwareProfile for testing auto model resolution."""
+    return HardwareProfile(
+        tier=tier,
+        gpu_name="Test GPU",
+        vram_gb=6.0,
+        compute_capability="8.9" if tier == "cuda_mid_tensor" else "7.5",
+        has_tensor_cores=(tier == "cuda_mid_tensor"),
+        has_nvenc=True,
+        device="cuda",
+        model_size="large-v2" if tier == "cuda_mid_tensor" else "medium",
+        compute_type="int8_float16" if tier == "cuda_mid_tensor" else "int8",
+        batch_size=8 if tier == "cuda_mid_tensor" else 4,
+        llm_model=llm_model,
+        video_codec="h264_nvenc",
+    )
+
+
+class TestOllamaScorerInit:
+    """Verify OllamaScorer wires HardwareProfile-resolved model and ollama.Client."""
+
+    @pytest.mark.parametrize(
+        "tier,expected_model",
+        [
+            ("cuda_mid_tensor", "qwen3:8b"),
+            ("cuda_mid_no_tensor", "qwen3:4b"),
+        ],
+    )
+    def test_uses_hardware_resolved_llm_model_and_client_args(
+        self, tmp_path: Path, tier: str, expected_model: str
+    ):
+        """Auto llm.model resolves via HardwareProfile and passes host/timeout to ollama.Client."""
+        cfg = Config(
+            user_config_path=tmp_path / "nonexistent.yaml",
+            hardware_profile=_make_hw_profile(tier, expected_model),
+        )
+        with patch("streamclipper.scoring.ollama_scorer.ollama.Client") as mock_client_cls:
+            scorer = OllamaScorer(cfg)
+
+        assert scorer.model == expected_model
+        assert scorer.base_url == "http://localhost:11434"
+        assert scorer.timeout == 120.0
+        mock_client_cls.assert_called_once_with(
+            host="http://localhost:11434", timeout=120.0
+        )
+
+    def test_respects_user_llm_override(self, tmp_path: Path):
+        """Explicit user llm.model and base_url override HardwareProfile defaults."""
+        user_cfg = tmp_path / "config.yaml"
+        user_cfg.write_text(
+            "llm:\n  model: 'mistral:7b'\n  base_url: 'http://127.0.0.1:11435'\n  timeout_seconds: 60\n",
+            encoding="utf-8",
+        )
+        cfg = Config(
+            user_config_path=user_cfg,
+            hardware_profile=_make_hw_profile("cuda_mid_tensor", "qwen3:8b"),
+        )
+        with patch("streamclipper.scoring.ollama_scorer.ollama.Client") as mock_client_cls:
+            scorer = OllamaScorer(cfg)
+
+        assert scorer.model == "mistral:7b"
+        assert scorer.base_url == "http://127.0.0.1:11435"
+        assert scorer.timeout == 60.0
+        mock_client_cls.assert_called_once_with(
+            host="http://127.0.0.1:11435", timeout=60.0
+        )
+
+
+class TestOllamaScorerResponseParsing:
+    """Verify _parse_response handles lists, wrapper objects, YPP fields, and edge cases."""
+
+    @pytest.fixture()
+    def scorer(self, config: Config) -> OllamaScorer:
+        with patch("streamclipper.scoring.ollama_scorer.ollama.Client"):
+            return OllamaScorer(config)
+
+    def test_parses_raw_json_list_with_ypp_fields_and_sub_clips(self, scorer: OllamaScorer):
+        """Raw JSON list populates moment_type, narrative fields, context_badge, and sub_clips."""
+        payload = [
+            {
+                "start": 120.0,
+                "end": 180.0,
+                "score": 9,
+                "moment_type": "graphics_detail",
+                "title": "Streamer spots insane water reflection",
+                "reason": "Stops mid-chase to zoom in on dynamic puddle physics.",
+                "best_quote": "WAIT LOOK AT THE REFLECTION IN THAT PUDDLE!",
+                "narration_intro": "Watch the street reflection closely as he pulls around this corner.",
+                "narration_outro": "Even mid-chase, that real-time ray-traced puddle stopped the whole stream.",
+                "context_badge": "🎨 Insane Detail",
+                "sub_clips": [
+                    {"start": 120.0, "end": 135.0, "label": "Setup"},
+                    {"start": 155.0, "end": 180.0, "label": "Payoff"},
+                ],
+            }
+        ]
+        highlights = scorer._parse_response(json.dumps(payload), chunk_offset=0.0)
+        assert len(highlights) == 1
+        h = highlights[0]
+        assert h.start == 120.0
+        assert h.end == 180.0
+        assert h.score == 9.0
+        assert h.moment_type == "graphics_detail"
+        assert h.narration_intro.startswith("Watch the street reflection")
+        assert h.narration_outro.startswith("Even mid-chase")
+        assert h.context_badge == "🎨 Insane Detail"
+        assert len(h.sub_clips) == 2
+        assert h.sub_clips[0] == {"start": 120.0, "end": 135.0, "label": "Setup"}
+
+    def test_parses_wrapped_highlights_object_with_think_tags_and_fences(
+        self, scorer: OllamaScorer
+    ):
+        """Wrapped {'highlights': [...]} payload with Qwen3 <think> and markdown fences parses cleanly."""
+        wrapped = {
+            "highlights": [
+                {
+                    "start": 400.0,
+                    "end": 455.0,
+                    "score": 8.5,
+                    "moment_type": "fail",
+                    "title": "Instant karma after bragging on stream",
+                    "reason": "Claims he never crashes right before flipping the car.",
+                    "best_quote": "I literally cannot crash this thing—",
+                    "narration_intro": "He really said he never crashes two seconds before this turn.",
+                    "narration_outro": "Classic streamer jinx delivered in under three seconds flat.",
+                    "context_badge": "💀 Instant Karma",
+                    "sub_clips": [],
+                }
+            ]
+        }
+        raw = f"<think>Analyzing spikes at 430s...</think>\n```json\n{json.dumps(wrapped)}\n```"
+        highlights = scorer._parse_response(raw, chunk_offset=0.0)
+        assert len(highlights) == 1
+        assert highlights[0].moment_type == "fail"
+        assert highlights[0].context_badge == "💀 Instant Karma"
+        assert highlights[0].sub_clips == []
+
+    def test_normalizes_invalid_moment_type_and_clamps_score(self, scorer: OllamaScorer):
+        """Unknown moment_type falls back to 'hype' and scores clamp to [0, 10]."""
+        payload = [
+            {
+                "start": 10.0,
+                "end": 50.0,
+                "score": 15.0,
+                "moment_type": "totally_made_up",
+                "title": "Wild Moment",
+                "reason": "Something wild happened",
+            }
+        ]
+        highlights = scorer._parse_response(json.dumps(payload), chunk_offset=0.0)
+        assert len(highlights) == 1
+        assert highlights[0].moment_type == "hype"
+        assert highlights[0].score == 10.0
+
+    def test_shifts_relative_timestamps_when_chunk_offset_positive(
+        self, scorer: OllamaScorer
+    ):
+        """Chunk-relative timestamps (end <= chunk_offset) are shifted to absolute stream time."""
+        payload = {
+            "highlights": [
+                {
+                    "start": 20.0,
+                    "end": 75.0,
+                    "score": 8.0,
+                    "moment_type": "clutch",
+                    "title": "Last second escape",
+                    "reason": "Dodges 5 cops with 1 HP",
+                    "sub_clips": [
+                        {"start": 20.0, "end": 35.0, "label": "Setup"},
+                        {"start": 50.0, "end": 75.0, "label": "Payoff"},
+                    ],
+                }
+            ]
+        }
+        highlights = scorer._parse_response(json.dumps(payload), chunk_offset=660.0)
+        assert len(highlights) == 1
+        assert highlights[0].start == 680.0
+        assert highlights[0].end == 735.0
+        assert highlights[0].sub_clips[0]["start"] == 680.0
+        assert highlights[0].sub_clips[1]["end"] == 735.0
+
+    def test_empty_responses_and_invalid_ranges(self, scorer: OllamaScorer):
+        """Empty list/object returns [] and inverted ranges are skipped."""
+        assert scorer._parse_response("[]", chunk_offset=0.0) == []
+        assert scorer._parse_response("{}", chunk_offset=0.0) == []
+        bad_range = [{"start": 60.0, "end": 40.0, "score": 8, "title": "Bad", "reason": "x"}]
+        assert scorer._parse_response(json.dumps(bad_range), chunk_offset=0.0) == []
+
+
+class TestOllamaScorerScoreChunkAndRetries:
+    """Verify _score_chunk retries on malformed JSON and integrates with Scorer pipeline."""
+
+    def test_retries_on_malformed_json_and_recovers(
+        self, config: Config, loudness_spikes: list[TimeRange], chat_spikes: list[TimeRange]
+    ):
+        """Malformed JSON on attempts 1 & 2 recovers cleanly on attempt 3."""
+        valid_payload = json.dumps(
+            {
+                "highlights": [
+                    {
+                        "start": 115.0,
+                        "end": 165.0,
+                        "score": 9,
+                        "moment_type": "funny",
+                        "title": "Streamer loses it at NPC dialogue",
+                        "reason": "Unexpected NPC roast triggers 20-second laugh attack.",
+                        "best_quote": "Did he really just say that?!",
+                        "narration_intro": "Wait until you hear what this random NPC says next.",
+                        "narration_outro": "Chat could not stop replaying that roast for five minutes.",
+                        "context_badge": "😂 NPC Roast",
+                        "sub_clips": [],
+                    }
+                ]
+            }
+        )
+        with patch("streamclipper.scoring.ollama_scorer.ollama.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            mock_client.generate.side_effect = [
+                GenerateResponse(response="{not valid json"),
+                {"response": '{"unexpected_key": 123}'},
+                GenerateResponse(response=valid_payload),
+            ]
+            scorer = OllamaScorer(config)
+            chunk = TranscriptChunk(start=0.0, end=720.0, text="Did he really just say that?!")
+            highlights = scorer._score_chunk(chunk, loudness_spikes[:1], chat_spikes[:1])
+
+        assert mock_client.generate.call_count == 3
+        assert len(highlights) == 1
+        assert highlights[0].moment_type == "funny"
+        assert highlights[0].context_badge == "😂 NPC Roast"
+        # Verify format="json" and temperature were forwarded
+        first_kwargs = mock_client.generate.call_args_list[0].kwargs
+        assert first_kwargs["format"] == "json"
+        assert first_kwargs["model"] == scorer.model
+        assert first_kwargs["options"]["temperature"] == scorer.temperature
+
+    def test_returns_empty_after_three_malformed_attempts(self, config: Config):
+        """Exhausting all 3 retries on malformed JSON degrades gracefully to []."""
+        with patch("streamclipper.scoring.ollama_scorer.ollama.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            mock_client.generate.return_value = {"response": "sorry I cannot output JSON"}
+            scorer = OllamaScorer(config)
+            chunk = TranscriptChunk(start=0.0, end=720.0, text="Some transcript text")
+            result = scorer._score_chunk(chunk, [], [])
+
+        assert result == []
+        assert mock_client.generate.call_count == 3
+
+    def test_connection_error_during_generate_propagates_with_model_hint(self, config: Config):
+        """Model-not-found / connection errors raise OllamaConnectionError without JSON retries."""
+        with patch("streamclipper.scoring.ollama_scorer.ollama.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            mock_client.generate.side_effect = ollama.ResponseError(
+                "model not found", status_code=404
+            )
+            scorer = OllamaScorer(config)
+            chunk = TranscriptChunk(start=0.0, end=720.0, text="Hello stream")
+            with pytest.raises(OllamaConnectionError) as exc_info:
+                scorer._score_chunk(chunk, [], [])
+
+        assert mock_client.generate.call_count == 1
+        assert scorer.model in str(exc_info.value)
+        assert f"ollama pull {scorer.model}" in str(exc_info.value)
+
+    def test_end_to_end_score_and_select_with_ollama(
+        self,
+        config: Config,
+        long_transcript: TranscriptionResult,
+        loudness_spikes: list[TimeRange],
+        chat_spikes: list[TimeRange],
+    ):
+        """OllamaScorer inherits score_and_select and attaches peak_time, chat_burst, validated sub_clips."""
+        chunk_response = json.dumps(
+            [
+                {
+                    "start": 115.0,
+                    "end": 165.0,
+                    "score": 9.0,
+                    "moment_type": "hype",
+                    "title": "Massive explosion sends car flying",
+                    "reason": "Huge reaction paired with chat burst.",
+                    "best_quote": "NO WAY!",
+                    "narration_intro": "Watch the highway intersection closely right before chaos erupts.",
+                    "narration_outro": "That physics launch had the entire lobby screaming.",
+                    "context_badge": "🔥 Pure Chaos",
+                    "sub_clips": [
+                        {"start": 115.0, "end": 128.0, "label": "Setup"},
+                        {"start": 140.0, "end": 165.0, "label": "Payoff"},
+                    ],
+                }
+            ]
+        )
+
+        def _fake_generate(**kwargs: Any) -> dict[str, str]:
+            # Only return highlight on first chunk containing 0..720s
+            if "(0.0s)" in kwargs["prompt"]:
+                return {"response": chunk_response}
+            return {"response": "[]"}
+
+        with patch("streamclipper.scoring.ollama_scorer.ollama.Client") as mock_client_cls:
+            mock_client_cls.return_value.generate.side_effect = _fake_generate
+            scorer = OllamaScorer(config)
+            selected = scorer.score_and_select(long_transcript, loudness_spikes, chat_spikes)
+
+        assert len(selected) == 1
+        h = selected[0]
+        assert h.peak_time == 130.0
+        assert len(h.chat_burst) == 3
+        assert len(h.sub_clips) == 2
+        assert h.final_score >= config.get("analysis.min_highlight_score", 7.0)
+
+
+class TestOllamaScorerNarrativeAndMetadata:
+    """Verify generate_narrative() and generate_metadata() prompt workflows."""
+
+    def test_generate_narrative_uses_moment_type_and_retries(self, config: Config):
+        """generate_narrative sends moment_type in prompt and recovers from malformed JSON."""
+        narrative_json = json.dumps(
+            {
+                "narration_intro": "Look closely at the neon reflections on the wet sidewalk here.",
+                "narration_outro": "Rockstar really modeled individual ripples for every passing headlight.",
+                "context_badge": "🎨 Insane Detail",
+            }
+        )
+        with patch("streamclipper.scoring.ollama_scorer.ollama.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            mock_client.generate.side_effect = [
+                {"response": "not json"},
+                GenerateResponse(response=narrative_json),
+            ]
+            scorer = OllamaScorer(config)
+            h = _make_highlight(
+                100.0, 150.0, 9.0,
+                title="He freezes over puddle graphics",
+                reason="Zooms in on dynamic street reflections.",
+                best_quote="Bro look at that water!",
+                moment_type="graphics_detail",
+            )
+            intro, outro, badge = scorer.generate_narrative(h, "Tim", "GTA 6")
+
+        assert mock_client.generate.call_count == 2
+        sent_prompt = mock_client.generate.call_args_list[0].kwargs["prompt"]
+        assert "graphics_detail" in sent_prompt
+        assert "Tim" in sent_prompt
+        assert intro == "Look closely at the neon reflections on the wet sidewalk here."
+        assert outro == "Rockstar really modeled individual ripples for every passing headlight."
+        assert badge == "🎨 Insane Detail"
+
+    def test_generate_metadata_backfills_missing_narrative_fields(self, config: Config):
+        """When highlight lacks narrative fields, generate_metadata calls hook, narrative, and caption prompts."""
+        narrative_json = json.dumps(
+            {
+                "narration_intro": "He swore he had this getaway completely under control.",
+                "narration_outro": "Instant karma hit him before he even finished the sentence.",
+                "context_badge": "💀 Instant Karma",
+            }
+        )
+        caption_json = json.dumps(
+            {
+                "caption": "Tim really jinxed himself in record time on this heist. Drop a comment if you saw that coming!",
+                "hashtags": ["#GTA6", "Tim", "#GamingClips"],
+            }
+        )
+        with patch("streamclipper.scoring.ollama_scorer.ollama.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            mock_client.generate.side_effect = [
+                GenerateResponse(response='"Tim instantly regrets saying this in GTA 6"'),
+                GenerateResponse(response=narrative_json),
+                GenerateResponse(response=caption_json),
+            ]
+            scorer = OllamaScorer(config)
+            h = _make_highlight(
+                200.0, 250.0, 8.8,
+                title="Fallback title",
+                reason="Brags about driving skills right before crashing into a pole.",
+                best_quote="I am literally the best driver in Vice City.",
+                moment_type="fail",
+            )
+            h.final_score = 8.9
+            meta = scorer.generate_metadata(
+                h, streamer="Tim", game="GTA 6", source_url="https://youtu.be/abc123"
+            )
+
+        assert mock_client.generate.call_count == 3
+        assert meta.hook_title == "Tim instantly regrets saying this in GTA 6"
+        assert meta.narration_intro.startswith("He swore he had this getaway")
+        assert meta.narration_outro.startswith("Instant karma hit him")
+        assert meta.context_badge == "💀 Instant Karma"
+        assert meta.hashtags == ["GTA6", "Tim", "GamingClips"]
+        assert meta.moment_type == "fail"
+        assert meta.highlight_score == 8.9
+        assert meta.transformation_mode == "narrative"
+
+    def test_generate_metadata_preserves_existing_narrative_without_extra_call(
+        self, config: Config
+    ):
+        """When intro, outro, and badge are already present, narrative_writer is skipped."""
+        caption_json = json.dumps(
+            {
+                "caption": "Chat went completely feral during this chase. Follow for daily clips!",
+                "hashtags": ["GTA6", "xQc"],
+            }
+        )
+        with patch("streamclipper.scoring.ollama_scorer.ollama.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            mock_client.generate.side_effect = [
+                GenerateResponse(response="xQc cannot believe chat tricked him"),
+                GenerateResponse(response=caption_json),
+            ]
+            scorer = OllamaScorer(config)
+            h = _make_highlight(
+                300.0, 350.0, 8.5,
+                reason="Chat convinces xQc to press eject mid-flight.",
+                moment_type="chat_chaos",
+                narration_intro="Chat told him this button activates turbo boost.",
+                narration_outro="Five thousand viewers trolled him at the exact same second.",
+                context_badge="💬 Chat Trolled Him",
+            )
+            meta = scorer.generate_metadata(
+                h, streamer="xQc", game="GTA 6", source_url="https://youtu.be/xyz789"
+            )
+
+        assert mock_client.generate.call_count == 2
+        assert meta.narration_intro == "Chat told him this button activates turbo boost."
+        assert meta.narration_outro == "Five thousand viewers trolled him at the exact same second."
+        assert meta.context_badge == "💬 Chat Trolled Him"
+
+
+class TestOllamaScorerCheckConnection:
+    """Verify check_connection() checks server reachability and resolved model availability."""
+
+    def test_check_connection_succeeds_with_ollama_list_response(self, tmp_path: Path):
+        """check_connection returns True when resolved model is in ListResponse."""
+        cfg = Config(
+            user_config_path=tmp_path / "nonexistent.yaml",
+            hardware_profile=_make_hw_profile("cuda_mid_tensor", "qwen3:8b"),
+        )
+        list_resp = ListResponse(models=[ListResponse.Model(model="qwen3:8b")])
+        with patch("streamclipper.scoring.ollama_scorer.ollama.Client") as mock_client_cls:
+            mock_client_cls.return_value.list.return_value = list_resp
+            scorer = OllamaScorer(cfg)
+            assert scorer.check_connection() is True
+
+    def test_check_connection_succeeds_with_dict_response_and_latest_tag(self, tmp_path: Path):
+        """check_connection accepts dict list payload and implicit :latest tag equivalence."""
+        user_cfg = tmp_path / "config.yaml"
+        user_cfg.write_text("llm:\n  model: 'llama3'\n", encoding="utf-8")
+        cfg = Config(user_config_path=user_cfg)
+        with patch("streamclipper.scoring.ollama_scorer.ollama.Client") as mock_client_cls:
+            mock_client_cls.return_value.list.return_value = {
+                "models": [{"name": "llama3:latest"}]
+            }
+            scorer = OllamaScorer(cfg)
+            assert scorer.check_connection() is True
+
+    def test_check_connection_raises_when_model_missing(self, tmp_path: Path):
+        """Missing resolved model raises OllamaConnectionError with exact `ollama pull` command."""
+        cfg = Config(
+            user_config_path=tmp_path / "nonexistent.yaml",
+            hardware_profile=_make_hw_profile("cuda_mid_tensor", "qwen3:8b"),
+        )
+        list_resp = ListResponse(models=[ListResponse.Model(model="qwen3:4b")])
+        with patch("streamclipper.scoring.ollama_scorer.ollama.Client") as mock_client_cls:
+            mock_client_cls.return_value.list.return_value = list_resp
+            scorer = OllamaScorer(cfg)
+            with pytest.raises(OllamaConnectionError) as exc_info:
+                scorer.check_connection()
+
+        msg = str(exc_info.value)
+        assert "qwen3:8b" in msg
+        assert "ollama pull qwen3:8b" in msg
+
+    def test_check_connection_raises_when_server_unreachable(self, tmp_path: Path):
+        """Unreachable Ollama server raises OllamaConnectionError mentioning model and URL."""
+        cfg = Config(
+            user_config_path=tmp_path / "nonexistent.yaml",
+            hardware_profile=_make_hw_profile("cuda_mid_no_tensor", "qwen3:4b"),
+        )
+        with patch("streamclipper.scoring.ollama_scorer.ollama.Client") as mock_client_cls:
+            mock_client_cls.return_value.list.side_effect = ConnectionError("Connection refused")
+            scorer = OllamaScorer(cfg)
+            with pytest.raises(OllamaConnectionError) as exc_info:
+                scorer.check_connection()
+
+        msg = str(exc_info.value)
+        assert "qwen3:4b" in msg
+        assert "http://localhost:11434" in msg
+        assert "ollama serve" in msg
+
