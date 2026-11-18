@@ -1,8 +1,9 @@
 # AGENTS.md — StreamClipper AI Agent Instructions
 
 > **Repository:** `D:\GTA6-Clipper` (`streamclipper`)  
-> **Primary Blueprint:** `streamclipper-implementation-guide-v2.md` (v2.2 — Patched + Auto-Hardware + YPP Transformative Engine)  
-> **Prompt Runbook:** `streamclipper-agent-prompts.md`  
+> **Primary Blueprint:** `docs/streamclipper-implementation-guide-v2.md` (v2.2 — Patched + Auto-Hardware + YPP Transformative Engine)  
+> **Prompt Runbook:** `docs/streamclipper-agent-prompts.md`  
+> **Documentation Folder Rule:** Store all project documentation, architecture guides, prompt runbooks, design notes, and reference files inside `docs/`. Keep only tool-required standard files (`AGENTS.md`, `README.md`, `pyproject.toml`, `config.default.yaml`, `.gitignore`) at the repository root.  
 > **Current Repository Milestone:** **Phase 1 (`phase-1-foundation`, Packages `1.1–1.3` + Review `1.R`) is ✅ COMPLETE (`36/36` tests passing) and MERGED into `main`.** Do NOT redo Phase 1; branch `phase-2-core-pipeline` from `main` and proceed from **Package 2.1**.
 
 This file defines the mandatory workspace conventions, multi-device hardware auto-configuration rules, YouTube Partner Program (YPP) transformative content guardrails, technical requirements, git workflow, and reporting standards for all AI coding agents (**Gemini 3.8 (high)** and **Claude Opus 4.6**) working in this repository.
@@ -93,6 +94,6 @@ Every package implementation turn MUST produce a structured Markdown report befo
 - **Required Report Sections**:
   1. **Metadata**: Package ID, Phase, Branch name, Commit hash, Timestamp, and Model used.
   2. **Files Created / Modified**: File paths, line counts, and summary of classes/functions.
-  3. **Acceptance Criteria Verification**: Table mapping every acceptance criterion from `streamclipper-implementation-guide-v2.md` to the exact test or command output that proved it passed.
+  3. **Acceptance Criteria Verification**: Table mapping every acceptance criterion from `docs/streamclipper-implementation-guide-v2.md` to the exact test or command output that proved it passed.
   4. **Test & CLI Output**: Verbatim terminal output from `D:\GTA6-Clipper\.venv\Scripts\pytest.exe -v` and relevant CLI checks.
   5. **Architectural Notes & Edge Cases**: Proactive fixes, Windows/CUDA considerations, and handoff notes for the next package.

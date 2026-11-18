@@ -37,10 +37,10 @@
 Use this template if you ever want to run a custom package or re-run a single package by changing only the 4 variables at the top:
 
 ```markdown
-You are implementing **Package {PACKAGE_ID}** of **Phase {PHASE_NUM}** from `streamclipper-implementation-guide-v2.md`.
+You are implementing **Package {PACKAGE_ID}** of **Phase {PHASE_NUM}** from `docs/streamclipper-implementation-guide-v2.md`.
 
 ### 1. Context & Source of Truth
-- Read `AGENTS.md` and `streamclipper-implementation-guide-v2.md` first, specifically the **Dynamic Hardware Auto-Configuration Policy**, **Mandatory v2.2 Guardrails**, and **Package {PACKAGE_ID}**.
+- Read `AGENTS.md` and `docs/streamclipper-implementation-guide-v2.md` first, specifically the **Dynamic Hardware Auto-Configuration Policy**, **Mandatory v2.2 Guardrails**, and **Package {PACKAGE_ID}**.
 - Always execute Python and tests via `D:\GTA6-Clipper\.venv\Scripts\python.exe` and `D:\GTA6-Clipper\.venv\Scripts\pytest.exe -v`.
 - Remember that **Phase 1 (`1.1–1.3`) is already complete and merged into `main`** — never break the 36 existing Phase 1 unit tests.
 - If previous package reports exist in `reports/`, review the latest report to understand current repository state.
@@ -59,11 +59,11 @@ You are implementing **Package {PACKAGE_ID}** of **Phase {PHASE_NUM}** from `str
 Before finishing your turn, create a detailed implementation report at `reports/phase-{PHASE_NUM}/package-{PACKAGE_ID}-report.md` (and also output it in chat) containing:
 1. **Metadata**: Package ID, Phase, Branch name, Commit hash, Timestamp, and Model used.
 2. **Files Created / Modified**: Exact file paths, line counts, and summary of functions/classes implemented.
-3. **Acceptance Criteria Verification**: A checklist table mapping every acceptance criterion from `streamclipper-implementation-guide-v2.md` for Package {PACKAGE_ID} to the exact test or command output that proved it passed.
+3. **Acceptance Criteria Verification**: A checklist table mapping every acceptance criterion from `docs/streamclipper-implementation-guide-v2.md` for Package {PACKAGE_ID} to the exact test or command output that proved it passed.
 4. **Test & CLI Output**: Verbatim terminal output of `D:\GTA6-Clipper\.venv\Scripts\pytest.exe -v` and any CLI verification commands.
 5. **Architectural Notes / Edge Cases / Reviewer Handoff**: Any edge cases handled, assumptions made, or items for the reviewer to inspect.
 
-Finally, stage all implementation files, tests, and the report file, and commit them to `{BRANCH_NAME}` using the exact commit message from `streamclipper-implementation-guide-v2.md`.
+Finally, stage all implementation files, tests, and the report file, and commit them to `{BRANCH_NAME}` using the exact commit message from `docs/streamclipper-implementation-guide-v2.md`.
 ```
 
 ### 2B. Universal Phase Review & Merge Prompt Template (For Opus / Reviewer)
@@ -71,12 +71,12 @@ Finally, stage all implementation files, tests, and the report file, and commit 
 Use this prompt at the end of each phase before merging `{BRANCH_NAME}` into `main`:
 
 ```markdown
-You are the Lead Architect & Code Reviewer reviewing **Phase {PHASE_NUM}** on branch `{BRANCH_NAME}` against `AGENTS.md` and `streamclipper-implementation-guide-v2.md`.
+You are the Lead Architect & Code Reviewer reviewing **Phase {PHASE_NUM}** on branch `{BRANCH_NAME}` against `AGENTS.md` and `docs/streamclipper-implementation-guide-v2.md`.
 
 1. Checkout `{BRANCH_NAME}` and read all package reports in `reports/phase-{PHASE_NUM}/`.
 2. Run `git log main..{BRANCH_NAME} --stat` and `git diff main...{BRANCH_NAME}` to inspect all code changes across Phase {PHASE_NUM}.
 3. Run the full test suite (`D:\GTA6-Clipper\.venv\Scripts\pytest.exe -v`) and verify zero regressions.
-4. Audit the implementation against all v2.2 guardrails in `AGENTS.md` and `streamclipper-implementation-guide-v2.md`:
+4. Audit the implementation against all v2.2 guardrails in `AGENTS.md` and `docs/streamclipper-implementation-guide-v2.md`:
    - Confirm no v1 regressions exist (no string `PipelineStatus`, no `pytchat`, no MoviePy v1 `.crop()`/`.resize()`, no `total_mem` typo, no low-level `mcp.server.Server`).
    - Confirm Windows/edge-case patches, 5-tier `HardwareProfile` / NVENC rules, and YPP Transformative Engine features are implemented cleanly.
    - Confirm every acceptance criterion across all packages in Phase {PHASE_NUM} is met.
@@ -92,7 +92,7 @@ You are the Lead Architect & Code Reviewer reviewing **Phase {PHASE_NUM}** on br
 **Assigned Model:** Gemini 3.8 (high) | **Branch:** `phase-1-foundation` (Create from `main`)
 
 ```markdown
-You are implementing **Package 1.1 — Project Scaffolding** (Phase 1) from `streamclipper-implementation-guide-v2.md`.
+You are implementing **Package 1.1 — Project Scaffolding** (Phase 1) from `docs/streamclipper-implementation-guide-v2.md`.
 
 ### 1. Git Branch Setup
 - Check your current git state. Ensure `main` exists (initialize git with `git init -b main` and make an initial commit if the repository is not yet initialized).
@@ -100,7 +100,7 @@ You are implementing **Package 1.1 — Project Scaffolding** (Phase 1) from `str
   `git checkout -b phase-1-foundation`
 
 ### 2. What to Build (Strictly Scoped to Package 1.1)
-Read **Package 1.1** in `streamclipper-implementation-guide-v2.md` and create:
+Read **Package 1.1** in `docs/streamclipper-implementation-guide-v2.md` and create:
 1. `pyproject.toml`:
    - MUST use `build-backend = "setuptools.build_meta"` (never `setuptools.backends._legacy:_Backend`).
    - Include dependencies from the v2 guide (`yt-dlp>=2024.8.0`, `faster-whisper>=1.0.0`, `librosa>=0.10.0`, `soundfile>=0.12.1`, `opencv-python>=4.8.0`, `moviepy>=2.0.0`, `ollama>=0.3.0`, `numpy>=1.24.0`, `scipy>=1.11.0`, `pandas>=2.0.0`, `Pillow>=10.0.0`, `pyyaml>=6.0`, `click>=8.1.0`, `rich>=13.0.0`, `tqdm>=4.65.0`). Do NOT include `pytchat`.
@@ -130,19 +130,19 @@ Stage all files (including `reports/phase-1/package-1.1-report.md`) and commit w
 **Assigned Model:** Gemini 3.8 (high) | **Branch:** `phase-1-foundation`
 
 ```markdown
-You are implementing **Package 1.2 — Data Models & Dynamic Hardware-Aware Config System** (Phase 1) from `streamclipper-implementation-guide-v2.md`.
+You are implementing **Package 1.2 — Data Models & Dynamic Hardware-Aware Config System** (Phase 1) from `docs/streamclipper-implementation-guide-v2.md`.
 
 ### 1. Git Branch Verification
 - Verify you are on branch `phase-1-foundation` (`git checkout phase-1-foundation`).
 - Read `reports/phase-1/package-1.1-report.md` to confirm Package 1.1 is complete.
 
 ### 2. What to Build (Strictly Scoped to Package 1.2)
-Read the **Dynamic Hardware Auto-Configuration Policy**, **Data Models** section, and **Package 1.2** in `streamclipper-implementation-guide-v2.md` and create:
+Read the **Dynamic Hardware Auto-Configuration Policy**, **Data Models** section, and **Package 1.2** in `docs/streamclipper-implementation-guide-v2.md` and create:
 1. `src/streamclipper/models.py`:
    - Implement `Platform`, `SignalType`, and `PipelineStatus(IntEnum)` (`PENDING = 1` through `COMPLETE = 7`, `FAILED = 99`). `PipelineStatus` MUST be an `IntEnum` so numeric stage comparisons work properly.
    - Implement `SerializableModel` with recursive `_serialize_value()` (iterating `dataclasses.fields(val)` with `is_dataclass(val) and not isinstance(val, type)`), handling `Path`, `Enum`, `list`, and `dict`, plus `from_dict()` classmethods on `StreamInfo`, `TimeRange`, `WordTimestamp`, `TranscriptSegment`, `TranscriptionResult`, `Highlight`, `FacecamRegion`, `ClipMetadata`, `ClipResult`, and `PipelineState`.
 2. `config.default.yaml`:
-   - Exact default YAML configuration from Package 1.2 in `streamclipper-implementation-guide-v2.md`, with `"auto"` defaults for `transcription.model_size`, `transcription.device`, `transcription.compute_type`, `transcription.batch_size`, `llm.model`, and `video.codec`.
+   - Exact default YAML configuration from Package 1.2 in `docs/streamclipper-implementation-guide-v2.md`, with `"auto"` defaults for `transcription.model_size`, `transcription.device`, `transcription.compute_type`, `transcription.batch_size`, `llm.model`, and `video.codec`.
 3. `src/streamclipper/config.py`:
    - Implement `HardwareProfile`, `_detect_nvenc_support()`, `detect_hardware_profile()`, and `resolve_hardware_config()` using `torch.cuda.get_device_properties(0)` (`total_memory`, `major`, `minor`, `name`):
      - `>= 10 GB` VRAM → `cuda`, `large-v2`, `float16`, `batch_size=16`, `llm.model="qwen3:8b"`, `video.codec="h264_nvenc"` (else `libx264`)
@@ -175,14 +175,14 @@ Stage all files (including `reports/phase-1/package-1.2-report.md`) and commit w
 **Assigned Model:** Gemini 3.8 (high) | **Branch:** `phase-1-foundation`
 
 ```markdown
-You are implementing **Package 1.3 — CLI Skeleton & Step Cache** (Phase 1) from `streamclipper-implementation-guide-v2.md`.
+You are implementing **Package 1.3 — CLI Skeleton & Step Cache** (Phase 1) from `docs/streamclipper-implementation-guide-v2.md`.
 
 ### 1. Git Branch Verification
 - Verify you are on branch `phase-1-foundation` (`git checkout phase-1-foundation`).
 - Read `reports/phase-1/package-1.2-report.md` to confirm Package 1.2 is complete.
 
 ### 2. What to Build (Strictly Scoped to Package 1.3)
-Read **Package 1.3** in `streamclipper-implementation-guide-v2.md` and implement:
+Read **Package 1.3** in `docs/streamclipper-implementation-guide-v2.md` and implement:
 1. `src/streamclipper/cli.py`:
    - Implement `cli` group (`--config`, `--verbose`) and commands: `clip` (with `--max-clips`, `--game`, `--streamer`, `--interactive/--no-interactive`), `auto`, `setup`, and `status`.
    - In `_check_gpu()`, use `torch.cuda.get_device_properties(0).total_memory / 1e9` and compute capability (`major.minor`) (NEVER `.total_mem`).
@@ -212,7 +212,7 @@ Stage all files (including `reports/phase-1/package-1.3-report.md`) and commit w
 **Assigned Model:** Claude Opus 4.6 | **Branch:** `phase-1-foundation` -> `main`
 
 ```markdown
-You are the Lead Reviewer auditing **Phase 1 (`phase-1-foundation`)** against `streamclipper-implementation-guide-v2.md`.
+You are the Lead Reviewer auditing **Phase 1 (`phase-1-foundation`)** against `docs/streamclipper-implementation-guide-v2.md`.
 
 1. Read `reports/phase-1/package-1.1-report.md`, `package-1.2-report.md`, and `package-1.3-report.md`.
 2. Inspect `git diff main...phase-1-foundation` and run `pytest -v`.
@@ -231,14 +231,14 @@ You are the Lead Reviewer auditing **Phase 1 (`phase-1-foundation`)** against `s
 **Assigned Model:** Gemini 3.8 (high) | **Branch:** `phase-2-core-pipeline` (Create from `main`)
 
 ```markdown
-You are implementing **Package 2.1 — Audio Downloader** (Phase 2) from `streamclipper-implementation-guide-v2.md`.
+You are implementing **Package 2.1 — Audio Downloader** (Phase 2) from `docs/streamclipper-implementation-guide-v2.md`.
 
 ### 1. Git Branch Setup
 - Ensure Phase 1 is merged into `main`, then create and switch to the Phase 2 branch:
   `git checkout main && git checkout -b phase-2-core-pipeline`
 
 ### 2. What to Build (Strictly Scoped to Package 2.1)
-Read **Package 2.1** in `streamclipper-implementation-guide-v2.md` and create:
+Read **Package 2.1** in `docs/streamclipper-implementation-guide-v2.md` and create:
 1. `src/streamclipper/download/audio.py`:
    - Implement `download_audio(url, output_dir, progress_callback=None) -> tuple[Path, StreamInfo]` and `extract_stream_info(url) -> StreamInfo` using the `yt_dlp.YoutubeDL` Python API.
    - Configure `FFmpegExtractAudio` with `preferredcodec: "wav"` AND `postprocessor_args: {"extractaudio": ["-ar", "16000", "-ac", "1"]}` so extracted WAV files are **16kHz mono PCM** (~460 MB for 4 hours, matching WhisperX's native sample rate).
@@ -265,14 +265,14 @@ Stage all files (including `reports/phase-2/package-2.1-report.md`) and commit w
 **Assigned Model:** Gemini 3.8 (high) | **Branch:** `phase-2-core-pipeline`
 
 ```markdown
-You are implementing **Package 2.2 — Video Segment Downloader** (Phase 2) from `streamclipper-implementation-guide-v2.md`.
+You are implementing **Package 2.2 — Video Segment Downloader** (Phase 2) from `docs/streamclipper-implementation-guide-v2.md`.
 
 ### 1. Git Branch Verification
 - Verify you are on branch `phase-2-core-pipeline` (`git checkout phase-2-core-pipeline`).
 - Read `reports/phase-2/package-2.1-report.md` to confirm Package 2.1 is complete.
 
 ### 2. What to Build (Strictly Scoped to Package 2.2)
-Read **Package 2.2** in `streamclipper-implementation-guide-v2.md` and create:
+Read **Package 2.2** in `docs/streamclipper-implementation-guide-v2.md` and create:
 1. `src/streamclipper/download/video.py`:
    - Implement `download_segment(url, start_seconds, end_seconds, output_dir, buffer_seconds=3.0) -> Path` and `download_multiple_segments(url, segments, output_dir, buffer_seconds=3.0) -> list[Path]`.
    - Clamp `actual_start = max(0.0, start_seconds - buffer_seconds)` and `actual_end = end_seconds + buffer_seconds`.
@@ -298,14 +298,14 @@ Stage all files (including `reports/phase-2/package-2.2-report.md`) and commit w
 **Assigned Model:** Gemini 3.8 (high) | **Branch:** `phase-2-core-pipeline`
 
 ```markdown
-You are implementing **Package 2.3 — WhisperX Transcriber** (Phase 2) from `streamclipper-implementation-guide-v2.md`.
+You are implementing **Package 2.3 — WhisperX Transcriber** (Phase 2) from `docs/streamclipper-implementation-guide-v2.md`.
 
 ### 1. Git Branch Verification
 - Verify you are on branch `phase-2-core-pipeline` (`git checkout phase-2-core-pipeline`).
 - Read `reports/phase-2/package-2.2-report.md` to confirm Package 2.2 is complete.
 
 ### 2. What to Build (Strictly Scoped to Package 2.3)
-Read **Package 2.3** in `streamclipper-implementation-guide-v2.md` and create:
+Read **Package 2.3** in `docs/streamclipper-implementation-guide-v2.md` and create:
 1. `src/streamclipper/analysis/transcriber.py`:
    - Implement `Transcriber(config)` reading the hardware-resolved `transcription.device`, `transcription.model_size`, `transcription.compute_type`, and `transcription.batch_size` from `Config` (logging the active `config.hardware_profile` tier and resolved parameters).
    - Enforce safety guard: if `device == "cpu"` and `compute_type in ("float16", "int8_float16")`, automatically downgrade `compute_type` to `"int8"`.
@@ -339,14 +339,14 @@ Stage all files (including `reports/phase-2/package-2.3-report.md`) and commit w
 **Assigned Model:** Gemini 3.8 (high) | **Branch:** `phase-2-core-pipeline`
 
 ```markdown
-You are implementing **Package 2.4 — Loudness Spike Detector** (Phase 2) from `streamclipper-implementation-guide-v2.md`.
+You are implementing **Package 2.4 — Loudness Spike Detector** (Phase 2) from `docs/streamclipper-implementation-guide-v2.md`.
 
 ### 1. Git Branch Verification
 - Verify you are on branch `phase-2-core-pipeline` (`git checkout phase-2-core-pipeline`).
 - Read `reports/phase-2/package-2.3-report.md` to confirm Package 2.3 is complete.
 
 ### 2. What to Build (Strictly Scoped to Package 2.4)
-Read **Package 2.4** in `streamclipper-implementation-guide-v2.md` and create:
+Read **Package 2.4** in `docs/streamclipper-implementation-guide-v2.md` and create:
 1. `src/streamclipper/analysis/loudness.py`:
    - Implement `LoudnessDetector(config)` with `detect(audio_path) -> list[TimeRange]`, `_compute_rms_db(audio_path)`, `_find_spikes(rms_db, hop_duration)`, and `_merge_nearby(spikes)`.
    - **CRITICAL MEMORY & TAIL-BLOCK GUARDRAIL**: Use `soundfile.info()` and `librosa.stream(..., block_length=120, frame_length=hop_length*2, hop_length=hop_length, mono=True, fill_value=0.0)` with `center=False` instead of `librosa.load()`. Always pass `fill_value=0.0` (and skip any block shorter than `frame_length`) so non-aligned tail blocks never raise `ParameterError`.
@@ -372,14 +372,14 @@ Stage all files (including `reports/phase-2/package-2.4-report.md`) and commit w
 **Assigned Model:** Gemini 3.8 (high) | **Branch:** `phase-2-core-pipeline`
 
 ```markdown
-You are implementing **Package 2.5 — Chat Scraper & Velocity Analyzer** (Phase 2) from `streamclipper-implementation-guide-v2.md`.
+You are implementing **Package 2.5 — Chat Scraper & Velocity Analyzer** (Phase 2) from `docs/streamclipper-implementation-guide-v2.md`.
 
 ### 1. Git Branch Verification
 - Verify you are on branch `phase-2-core-pipeline` (`git checkout phase-2-core-pipeline`).
 - Read `reports/phase-2/package-2.4-report.md` to confirm Package 2.4 is complete.
 
 ### 2. What to Build (Strictly Scoped to Package 2.5)
-Read **Package 2.5** in `streamclipper-implementation-guide-v2.md` and create:
+Read **Package 2.5** in `docs/streamclipper-implementation-guide-v2.md` and create:
 1. `src/streamclipper/download/chat.py`:
    - Implement `ChatScraper` using `yt_dlp.YoutubeDL` (`skip_download=True`, `writesubtitles=True`, `subtitleslangs=["live_chat"]`) to download `{video_id}.live_chat.json` and parse YouTube's JSONLines `replayChatItemAction` records (supporting both `liveChatTextMessageRenderer` and `liveChatPaidMessageRenderer`) into a `pandas.DataFrame` with columns `["offset_seconds", "author", "message"]`. Do NOT use `pytchat`.
    - **NON-NEGATIVE OFFSET GUARD**: Skip pre-stream messages where `videoOffsetTimeMsec < 0` so binning never creates negative time bins.
@@ -409,14 +409,14 @@ Stage all files (including `reports/phase-2/package-2.5-report.md`) and commit w
 **Assigned Model:** Gemini 3.8 (high) | **Branch:** `phase-2-core-pipeline`
 
 ```markdown
-You are implementing **Package 2.6 — Stream Discovery** (Phase 2) from `streamclipper-implementation-guide-v2.md`.
+You are implementing **Package 2.6 — Stream Discovery** (Phase 2) from `docs/streamclipper-implementation-guide-v2.md`.
 
 ### 1. Git Branch Verification
 - Verify you are on branch `phase-2-core-pipeline` (`git checkout phase-2-core-pipeline`).
 - Read `reports/phase-2/package-2.5-report.md` to confirm Package 2.5 is complete.
 
 ### 2. What to Build (Strictly Scoped to Package 2.6)
-Read **Package 2.6** in `streamclipper-implementation-guide-v2.md` and create:
+Read **Package 2.6** in `docs/streamclipper-implementation-guide-v2.md` and create:
 1. `src/streamclipper/discovery/youtube.py`:
    - Implement `YouTubeDiscovery(config)` with `discover(game=None) -> list[StreamInfo]`, `_search_youtube(query, max_results=20)`, and `_filter_streams(results, game)`.
    - Search via `yt_dlp.YoutubeDL` (`f"ytsearch{max_results}:{query} live stream"`), filter out entries with `duration < self.min_duration` or `view_count < self.min_viewers`, deduplicate by `video_id`, sort by `view_count` descending, and limit to `self.max_streams`.
@@ -441,7 +441,7 @@ Stage all files (including `reports/phase-2/package-2.6-report.md`) and commit w
 **Assigned Model:** Claude Opus 4.6 | **Branch:** `phase-2-core-pipeline` -> `main`
 
 ```markdown
-You are the Lead Reviewer auditing **Phase 2 (`phase-2-core-pipeline`)** against `streamclipper-implementation-guide-v2.md`.
+You are the Lead Reviewer auditing **Phase 2 (`phase-2-core-pipeline`)** against `docs/streamclipper-implementation-guide-v2.md`.
 
 1. Read all reports in `reports/phase-2/` (`package-2.1-report.md` through `package-2.6-report.md`).
 2. Inspect `git diff main...phase-2-core-pipeline` and run `D:\GTA6-Clipper\.venv\Scripts\pytest.exe -v`.
@@ -460,14 +460,14 @@ You are the Lead Reviewer auditing **Phase 2 (`phase-2-core-pipeline`)** against
 **Assigned Model:** Claude Opus 4.6 | **Branch:** `phase-3-ai-scoring` (Create from `main`)
 
 ```markdown
-You are implementing **Package 3.1 — Scorer Interface, YPP Adaptive Narrative Models & Prompt Templates** (Phase 3, 🔴 Critical) from `streamclipper-implementation-guide-v2.md`.
+You are implementing **Package 3.1 — Scorer Interface, YPP Adaptive Narrative Models & Prompt Templates** (Phase 3, 🔴 Critical) from `docs/streamclipper-implementation-guide-v2.md`.
 
 ### 1. Git Branch Setup
 - Ensure Phase 2 is merged into `main`, then create and switch to the Phase 3 branch:
   `git checkout main && git checkout -b phase-3-ai-scoring`
 
 ### 2. What to Build (Strictly Scoped to Package 3.1)
-Read `AGENTS.md` and **Package 3.1** in `streamclipper-implementation-guide-v2.md` and implement:
+Read `AGENTS.md` and **Package 3.1** in `docs/streamclipper-implementation-guide-v2.md` and implement:
 1. **Backward-Compatible Model & Config Extensions (`src/streamclipper/models.py` & `config.default.yaml`)**:
    - Add default-valued YPP fields to `Highlight` (`moment_type: str = "hype"`, `narration_intro: str = ""`, `narration_outro: str = ""`, `context_badge: str = ""`, `peak_time: float = 0.0`, `chat_burst: list[dict[str, Any]] = field(default_factory=list)`, `sub_clips: list[dict[str, Any]] = field(default_factory=list)`) and `ClipMetadata` (`moment_type`, `narration_intro`, `narration_outro`, `context_badge`, `transformation_mode: str = "narrative"`), updating `from_dict()` with `.get(...)` defaults so all 36 Phase 1 tests remain 100% green without modification.
    - Add the `transformation:` block (`enabled`, `mode`, `tts_engine`, `tts_voice`, `elevenlabs_voice_id`, `elevenlabs_model_id`, `duck_stream_volume`, `punch_in_zoom`, `zoom_duration_seconds`, `show_chat_ticker`) to `config.default.yaml`.
@@ -507,14 +507,14 @@ Stage all files (including `reports/phase-3/package-3.1-report.md`) and commit w
 **Assigned Model:** Gemini 3.8 (high) | **Branch:** `phase-3-ai-scoring`
 
 ```markdown
-You are implementing **Package 3.2 — Ollama Scorer (Standalone Mode)** (Phase 3) from `streamclipper-implementation-guide-v2.md`.
+You are implementing **Package 3.2 — Ollama Scorer (Standalone Mode)** (Phase 3) from `docs/streamclipper-implementation-guide-v2.md`.
 
 ### 1. Git Branch Verification
 - Verify you are on branch `phase-3-ai-scoring` (`git checkout phase-3-ai-scoring`).
 - Read `reports/phase-3/package-3.1-report.md` to confirm Package 3.1 is complete.
 
 ### 2. What to Build (Strictly Scoped to Package 3.2)
-Read **Package 3.2** in `streamclipper-implementation-guide-v2.md` and create:
+Read **Package 3.2** in `docs/streamclipper-implementation-guide-v2.md` and create:
 1. `src/streamclipper/scoring/ollama_scorer.py`:
    - Implement `OllamaScorer(Scorer)` using resolved `llm.model` from `Config` (auto-tuned to `qwen3:8b` or `qwen3:4b` based on `HardwareProfile`, or user override) and `ollama.Client(host=self.base_url, timeout=self.timeout)`.
    - Implement `_score_chunk(chunk, loudness, chat) -> list[Highlight]` with up to 3 retries on malformed JSON (supporting both raw list `[...]` and wrapper `{"highlights": [...]}`), parsing `moment_type`, `narration_intro`, `narration_outro`, `context_badge`, and `sub_clips`.
@@ -541,14 +541,14 @@ Stage all files (including `reports/phase-3/package-3.2-report.md`) and commit w
 **Assigned Model:** Claude Opus 4.6 | **Branch:** `phase-3-ai-scoring`
 
 ```markdown
-You are implementing **Package 3.3 — Pipeline Orchestrator** (Phase 3, 🔴 Critical) from `streamclipper-implementation-guide-v2.md`.
+You are implementing **Package 3.3 — Pipeline Orchestrator** (Phase 3, 🔴 Critical) from `docs/streamclipper-implementation-guide-v2.md`.
 
 ### 1. Git Branch Verification
 - Verify you are on branch `phase-3-ai-scoring` (`git checkout phase-3-ai-scoring`).
 - Read `reports/phase-3/package-3.2-report.md` to confirm Package 3.2 is complete.
 
 ### 2. What to Build (Strictly Scoped to Package 3.3)
-Read **Package 3.3** in `streamclipper-implementation-guide-v2.md` and create:
+Read **Package 3.3** in `docs/streamclipper-implementation-guide-v2.md` and create:
 1. `src/streamclipper/pipeline.py`:
    - Implement `Pipeline(config)` with `_recover_failed_state(state)`, `process_stream(url, max_clips=None, game=None, streamer=None, interactive=False, mode=None, voice_intro_path=None, voice_outro_path=None) -> list[ClipResult]`, and `process_streams_parallel(urls, max_concurrent=2)`.
    - **CRITICAL STATE & RETRY GUARDRAIL**: Compare `IntEnum` status ranks directly (`if state.status < PipelineStatus.TRANSCRIBING:`, etc.), save state to `StepCache` after every step, mark `state.status = PipelineStatus.FAILED` on exception, AND call `_recover_failed_state(state)` on resume so a `FAILED (99)` cached state resets to the last completed artifact stage instead of skipping every step!
@@ -576,7 +576,7 @@ Stage all files (including `reports/phase-3/package-3.3-report.md`) and commit w
 **Assigned Model:** Claude Opus 4.6 | **Branch:** `phase-3-ai-scoring` -> `main`
 
 ```markdown
-You are the Lead Reviewer auditing **Phase 3 (`phase-3-ai-scoring`)** against `AGENTS.md` and `streamclipper-implementation-guide-v2.md`.
+You are the Lead Reviewer auditing **Phase 3 (`phase-3-ai-scoring`)** against `AGENTS.md` and `docs/streamclipper-implementation-guide-v2.md`.
 
 1. Read all reports in `reports/phase-3/` (`package-3.1-report.md` through `package-3.3-report.md`).
 2. Inspect `git diff main...phase-3-ai-scoring` and run `D:\GTA6-Clipper\.venv\Scripts\pytest.exe -v`.
@@ -596,14 +596,14 @@ You are the Lead Reviewer auditing **Phase 3 (`phase-3-ai-scoring`)** against `A
 **Assigned Model:** Gemini 3.8 (high) | **Branch:** `phase-4-video-assembly` (Create from `main`)
 
 ```markdown
-You are implementing **Package 4.1 — Facecam Detector** (Phase 4) from `streamclipper-implementation-guide-v2.md`.
+You are implementing **Package 4.1 — Facecam Detector** (Phase 4) from `docs/streamclipper-implementation-guide-v2.md`.
 
 ### 1. Git Branch Setup
 - Ensure Phase 3 is merged into `main`, then create and switch to the Phase 4 branch:
   `git checkout main && git checkout -b phase-4-video-assembly`
 
 ### 2. What to Build (Strictly Scoped to Package 4.1)
-Read **Package 4.1** in `streamclipper-implementation-guide-v2.md` and create:
+Read **Package 4.1** in `docs/streamclipper-implementation-guide-v2.md` and create:
 1. `src/streamclipper/assembly/facecam.py`:
    - Implement `FacecamDetector(config)` with `detect(video_path, num_samples=50) -> FacecamRegion | None` and `_is_in_corner(x, y, w, h, frame_w, frame_h) -> bool`.
    - Sample `num_samples` frames evenly across the video using `cv2.VideoCapture`.
@@ -629,14 +629,14 @@ Stage all files (including `reports/phase-4/package-4.1-report.md`) and commit w
 **Assigned Model:** Gemini 3.8 (high) | **Branch:** `phase-4-video-assembly`
 
 ```markdown
-You are implementing **Package 4.2 — 9:16 Video Composer** (Phase 4) from `streamclipper-implementation-guide-v2.md`.
+You are implementing **Package 4.2 — 9:16 Video Composer** (Phase 4) from `docs/streamclipper-implementation-guide-v2.md`.
 
 ### 1. Git Branch Verification
 - Verify you are on branch `phase-4-video-assembly` (`git checkout phase-4-video-assembly`).
 - Read `reports/phase-4/package-4.1-report.md` to confirm Package 4.1 is complete.
 
 ### 2. What to Build (Strictly Scoped to Package 4.2)
-Read `AGENTS.md` and **Package 4.2** in `streamclipper-implementation-guide-v2.md` and create:
+Read `AGENTS.md` and **Package 4.2** in `docs/streamclipper-implementation-guide-v2.md` and create:
 1. `src/streamclipper/assembly/composer.py`:
    - **CRITICAL MOVIEPY V2 API GUARDRAIL**: Import directly from `moviepy` (`from moviepy import VideoFileClip, CompositeVideoClip, concatenate_videoclips`, NEVER `from moviepy.editor`) and use `.cropped()`, `.resized()`, `.subclipped()`, `.with_position()`, and `.with_audio()` (NEVER v1 `.crop()` or `.resize()`).
    - Implement `VideoComposer(config)` with `compose(video_path, facecam, peak_offset=None) -> CompositeVideoClip`, `_crop_to_aspect(...)` (aspect-preserving center crop so square/4:3 facecams are NEVER stretched horizontally!), `_compose_with_facecam(clip, facecam)` (Layout A: top 35% aspect-correct facecam, bottom 65% gameplay), and `_compose_gameplay_only(clip)` (Layout B: full 1080×1920 center-cropped gameplay).
@@ -664,14 +664,14 @@ Stage all files (including `reports/phase-4/package-4.2-report.md`) and commit w
 **Assigned Model:** Claude Opus 4.6 | **Branch:** `phase-4-video-assembly`
 
 ```markdown
-You are implementing **Package 4.3 — Hormozi-Style Captions & Live Chat Burst Ticker** (Phase 4, 🔴 Critical) from `streamclipper-implementation-guide-v2.md`.
+You are implementing **Package 4.3 — Hormozi-Style Captions & Live Chat Burst Ticker** (Phase 4, 🔴 Critical) from `docs/streamclipper-implementation-guide-v2.md`.
 
 ### 1. Git Branch Verification
 - Verify you are on branch `phase-4-video-assembly` (`git checkout phase-4-video-assembly`).
 - Read `reports/phase-4/package-4.2-report.md` to confirm Package 4.2 is complete.
 
 ### 2. What to Build (Strictly Scoped to Package 4.3)
-Read `AGENTS.md` and **Package 4.3** in `streamclipper-implementation-guide-v2.md` and create:
+Read `AGENTS.md` and **Package 4.3** in `docs/streamclipper-implementation-guide-v2.md` and create:
 1. `src/streamclipper/assembly/captions.py`:
    - Implement `_sec_to_ass_time(seconds: float) -> str`, `_hex_to_ass_bgr(hex_color: str) -> str` (converting config `captions.highlight_color` e.g. `#FFD700` → `&H00D7FF&`), `_escape_ass_text(text: str) -> str` (escaping `\`, `{`, `}`), and `AssCaptionBurner(config)` with:
      - `generate_ass(words: list[WordTimestamp], clip_start_offset: float, ass_path: Path, chat_burst: list[dict] | None = None) -> Path`
@@ -702,14 +702,14 @@ Stage all files (including `reports/phase-4/package-4.3-report.md`) and commit w
 **Assigned Model:** Gemini 3.8 (high) | **Branch:** `phase-4-video-assembly`
 
 ```markdown
-You are implementing **Package 4.4 — Hook Title & Adaptive Context Badge Overlay** (Phase 4) from `streamclipper-implementation-guide-v2.md`.
+You are implementing **Package 4.4 — Hook Title & Adaptive Context Badge Overlay** (Phase 4) from `docs/streamclipper-implementation-guide-v2.md`.
 
 ### 1. Git Branch Verification
 - Verify you are on branch `phase-4-video-assembly` (`git checkout phase-4-video-assembly`).
 - Read `reports/phase-4/package-4.3-report.md` to confirm Package 4.3 is complete.
 
 ### 2. What to Build (Strictly Scoped to Package 4.4)
-Read **Package 4.4** in `streamclipper-implementation-guide-v2.md` and create:
+Read **Package 4.4** in `docs/streamclipper-implementation-guide-v2.md` and create:
 1. `src/streamclipper/assembly/hooks.py`:
    - Implement `HookTitleOverlay(config)` with `add_hook(video_clip: CompositeVideoClip, hook_title: str, context_badge: str = "") -> CompositeVideoClip`.
    - Render the hook banner and optional adaptive `context_badge` pill (e.g. `"💀 Instant Karma"`, `"🎨 Insane Detail"`, `"🔥 Clutch Escape"`) into RGBA numpy arrays using Pillow and wrap them in MoviePy v2 `ImageClip` layers without ImageMagick.
@@ -735,14 +735,14 @@ Stage all files (including `reports/phase-4/package-4.4-report.md`) and commit w
 **Assigned Model:** Gemini 3.8 (high) | **Branch:** `phase-4-video-assembly`
 
 ```markdown
-You are implementing **Package 4.5 — YPP Transformative Narrator & Dynamic FFmpeg Audio Ducking** (Phase 4) from `streamclipper-implementation-guide-v2.md`.
+You are implementing **Package 4.5 — YPP Transformative Narrator & Dynamic FFmpeg Audio Ducking** (Phase 4) from `docs/streamclipper-implementation-guide-v2.md`.
 
 ### 1. Git Branch Verification
 - Verify you are on branch `phase-4-video-assembly` (`git checkout phase-4-video-assembly`).
 - Read `reports/phase-4/package-4.4-report.md` to confirm Package 4.4 is complete.
 
 ### 2. What to Build (Strictly Scoped to Package 4.5)
-Read `AGENTS.md` and **Package 4.5** in `streamclipper-implementation-guide-v2.md` and create:
+Read `AGENTS.md` and **Package 4.5** in `docs/streamclipper-implementation-guide-v2.md` and create:
 1. `src/streamclipper/assembly/narrator.py`:
    - Implement `TransformativeNarrator(config)` with pluggable speech synthesis (`synthesize_speech(text, output_wav) -> Path | None`) supporting:
      - `kokoro` (local free primary in `auto` mode if installed)
@@ -774,14 +774,14 @@ Stage all files (including `reports/phase-4/package-4.5-report.md`) and commit w
 **Assigned Model:** Gemini 3.8 (high) | **Branch:** `phase-4-video-assembly`
 
 ```markdown
-You are implementing **Package 4.6 — Exporter & File Organizer** (Phase 4) from `streamclipper-implementation-guide-v2.md`.
+You are implementing **Package 4.6 — Exporter & File Organizer** (Phase 4) from `docs/streamclipper-implementation-guide-v2.md`.
 
 ### 1. Git Branch Verification
 - Verify you are on branch `phase-4-video-assembly` (`git checkout phase-4-video-assembly`).
 - Read `reports/phase-4/package-4.5-report.md` to confirm Package 4.5 is complete.
 
 ### 2. What to Build (Strictly Scoped to Package 4.6)
-Read `AGENTS.md` and **Package 4.6** in `streamclipper-implementation-guide-v2.md` and create:
+Read `AGENTS.md` and **Package 4.6** in `docs/streamclipper-implementation-guide-v2.md` and create:
 1. `src/streamclipper/output/organizer.py`:
    - Implement `OutputOrganizer(config)` with `get_clip_path(game, streamer, index, date_str=None) -> Path`, `save_metadata(clip_path, metadata) -> Path` (including `moment_type`, `narration_intro`, `narration_outro`, `context_badge`, `transformation_mode`), `save_transcript(clip_path, words) -> Path`, and `_sanitize_name(name) -> str` (stripping `<>:"/\|?*`).
 2. `src/streamclipper/output/exporter.py`:
@@ -810,7 +810,7 @@ Stage all files (including `reports/phase-4/package-4.6-report.md`) and commit w
 **Assigned Model:** Claude Opus 4.6 | **Branch:** `phase-4-video-assembly` -> `main`
 
 ```markdown
-You are the Lead Reviewer auditing **Phase 4 (`phase-4-video-assembly`)** against `AGENTS.md` and `streamclipper-implementation-guide-v2.md`.
+You are the Lead Reviewer auditing **Phase 4 (`phase-4-video-assembly`)** against `AGENTS.md` and `docs/streamclipper-implementation-guide-v2.md`.
 
 1. Read all reports in `reports/phase-4/` (`package-4.1-report.md` through `package-4.6-report.md`).
 2. Inspect `git diff main...phase-4-video-assembly` and run `D:\GTA6-Clipper\.venv\Scripts\pytest.exe -v`.
@@ -830,14 +830,14 @@ You are the Lead Reviewer auditing **Phase 4 (`phase-4-video-assembly`)** agains
 **Assigned Model:** Claude Opus 4.6 | **Branch:** `phase-5-mcp-server` (Create from `main`)
 
 ```markdown
-You are implementing **Package 5.1 — MCP Server Implementation** (Phase 5, 🔴 Critical) from `streamclipper-implementation-guide-v2.md`.
+You are implementing **Package 5.1 — MCP Server Implementation** (Phase 5, 🔴 Critical) from `docs/streamclipper-implementation-guide-v2.md`.
 
 ### 1. Git Branch Setup
 - Ensure Phase 4 is merged into `main`, then create and switch to the Phase 5 branch:
   `git checkout main && git checkout -b phase-5-mcp-server`
 
 ### 2. What to Build (Strictly Scoped to Package 5.1)
-Read **Package 5.1** in `streamclipper-implementation-guide-v2.md` and create:
+Read **Package 5.1** in `docs/streamclipper-implementation-guide-v2.md` and create:
 1. `src/streamclipper/mcp_server/server.py`:
    - **CRITICAL MCP SDK GUARDRAIL**: Use `from mcp.server.fastmcp import FastMCP` and instantiate `mcp = FastMCP("streamclipper")` (NEVER `from mcp.server import Server`).
    - Implement all 11 `@mcp.tool()` functions returning structured JSON strings (catching exceptions and returning `{"error": str(e)}` rather than raw tracebacks):
@@ -874,14 +874,14 @@ Stage all files (including `reports/phase-5/package-5.1-report.md`) and commit w
 **Assigned Model:** Gemini 3.8 (high) | **Branch:** `phase-5-mcp-server`
 
 ```markdown
-You are implementing **Package 5.2 — README & Setup Guide** (Phase 5) from `streamclipper-implementation-guide-v2.md`.
+You are implementing **Package 5.2 — README & Setup Guide** (Phase 5) from `docs/streamclipper-implementation-guide-v2.md`.
 
 ### 1. Git Branch Verification
 - Verify you are on branch `phase-5-mcp-server` (`git checkout phase-5-mcp-server`).
 - Read `reports/phase-5/package-5.1-report.md` to confirm Package 5.1 is complete.
 
 ### 2. What to Build (Strictly Scoped to Package 5.2)
-Read **Package 5.2** in `streamclipper-implementation-guide-v2.md` and create:
+Read **Package 5.2** in `docs/streamclipper-implementation-guide-v2.md` and create:
 1. `README.md`:
    - Comprehensive project overview, architecture diagram, feature list (incl. YPP Transformative Narrative & Story Engine: adaptive `moment_type` commentary, conditional multi-beat cuts, spike punch-in zoom, live chat ASS ticker, and dynamic audio ducking), system requirements (Python 3.12 `.venv` / 3.10+, FFmpeg with `libass` and optional `h264_nvenc`, NVIDIA GPU or CPU), 5-tier Dynamic Hardware Auto-Configuration table (`cuda_high_vram`, `cuda_mid_tensor`, `cuda_mid_no_tensor`, `cpu_fallback`, `cpu_only`), quick start guide (`--mode narrative`, `--mode story`, `--voice-intro`, `--voice-outro`), voiceover setup (free `Kokoro-82M` / `edge-tts`, optional **ElevenLabs API / personal voice clone** via `ELEVENLABS_API_KEY` + `elevenlabs_voice_id`, and custom mic WAVs), Claude Desktop / Antigravity MCP configuration (`streamclipper-mcp`), Ollama standalone setup, full `config.yaml` reference table, and Windows/Linux troubleshooting guide.
 
