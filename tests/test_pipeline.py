@@ -1609,3 +1609,38 @@ class TestAuditHardeningAndModes:
         assert res.metadata_path is not None
         assert res.metadata_path.name == "clip_01.json"
         assert tmp_path in res.metadata_path.resolve().parents
+
+    @pytest.mark.asyncio
+    async def test_process_stream_fails_fast_on_invalid_mode_before_cache_clear_or_download(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Invalid mode must raise ValueError immediately without wiping cache or downloading audio."""
+        call_log: list[str] = []
+        _install_mock_stage_deps(monkeypatch, tmp_path, call_log=call_log)
+        cfg = _make_config(tmp_path)
+        pipeline = Pipeline(cfg)
+
+        url = "https://youtube.com/watch?v=invalid_mode_fast_fail"
+        cached = PipelineState(
+            stream_info=StreamInfo(
+                url=url,
+                title="Cached Stream",
+                platform=Platform.YOUTUBE,
+                streamer="S",
+                game="GTA 6",
+                duration_seconds=1800,
+                video_id="vid_fast",
+            ),
+            status=PipelineStatus.ANALYZING,
+            transcript=_sample_transcript(),
+        )
+        pipeline.cache.save_state(cached)
+
+        with pytest.raises(ValueError, match="Invalid transformation mode"):
+            await pipeline.process_stream(url, mode="bogus_mode", force=True)
+
+        assert call_log == []
+        # Existing cache must remain intact (not wiped by force=True before mode validation)
+        reloaded = pipeline.cache.load_state(url)
+        assert reloaded is not None
+        assert reloaded.status is PipelineStatus.ANALYZING

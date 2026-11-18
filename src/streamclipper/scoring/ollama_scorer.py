@@ -175,10 +175,13 @@ class OllamaScorer(Scorer):
 
     def __init__(self, config: Config):
         super().__init__(config)
-        self.model: str = _as_str(config.get("llm.model", "qwen3:4b"), "qwen3:4b")
-        self.base_url: str = _as_str(
-            config.get("llm.base_url", "http://localhost:11434"),
-            "http://localhost:11434",
+        self.model: str = _as_str(config.get("llm.model", "qwen3:4b"), "qwen3:4b") or "qwen3:4b"
+        self.base_url: str = (
+            _as_str(
+                config.get("llm.base_url", "http://localhost:11434"),
+                "http://localhost:11434",
+            )
+            or "http://localhost:11434"
         )
         self.temperature: float = float(config.get("llm.temperature", 0.3))
         self.timeout: float = float(config.get("llm.timeout_seconds", 120))
@@ -452,11 +455,13 @@ class OllamaScorer(Scorer):
             if isinstance(raw_sub_clips, list):
                 for beat in raw_sub_clips:
                     if not isinstance(beat, dict):
-                        continue
+                        sub_clips = []
+                        break
                     b_start = _parse_seconds(beat.get("start"))
                     b_end = _parse_seconds(beat.get("end"))
                     if b_start is None or b_end is None or b_end <= b_start:
-                        continue
+                        sub_clips = []
+                        break
                     if applied_offset > 0.0 and b_end <= chunk_duration:
                         b_start += applied_offset
                         b_end += applied_offset

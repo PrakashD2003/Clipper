@@ -1691,4 +1691,146 @@ class TestOllamaScorerEdgeCasesAndHardening:
             assert mock_client.generate.call_count == 2
             assert "think" not in mock_client.generate.call_args_list[1].kwargs
 
+    def test_extract_chat_burst_handles_null_non_dict_and_blank_messages(
+        self, config: Config
+    ):
+        """_extract_chat_burst tolerates None/non-list sample_messages, non-dict entries, and null/blank text."""
+        scorer = _StubScorer(config)
+        h = _make_highlight(100.0, 160.0, 9.0)
+        spikes = [
+            TimeRange(
+                start=105.0,
+                end=115.0,
+                score=7.0,
+                signal_type=SignalType.CHAT_VELOCITY,
+                metadata={"sample_messages": None},
+            ),
+            TimeRange(
+                start=115.0,
+                end=125.0,
+                score=8.0,
+                signal_type=SignalType.CHAT_VELOCITY,
+                metadata={"sample_messages": "corrupt_not_a_list"},
+            ),
+            TimeRange(
+                start=125.0,
+                end=140.0,
+                score=9.0,
+                signal_type=SignalType.CHAT_VELOCITY,
+                metadata={
+                    "sample_messages": [
+                        None,
+                        "raw_string",
+                        {"message": ""},
+                        {"message": "   "},
+                        {"message": None, "text": "POG"},
+                        {"message": None, "text": "LMAO"},
+                        {"message": "POG"},  # duplicate of text-fallback entry
+                    ]
+                },
+            ),
+        ]
+        burst = scorer._extract_chat_burst(h, spikes)
+        assert burst == [
+            {"message": None, "text": "POG"},
+            {"message": None, "text": "LMAO"},
+        ]
+
+    def test_extract_peak_time_ignores_bool_and_overlap_ignores_inf_score(
+        self, config: Config
+    ):
+        """Boolean peak_time falls back to midpoint; non-finite spike score is ignored."""
+        scorer = _StubScorer(config)
+        h = _make_highlight(100.0, 160.0, 9.0)
+        spikes = [
+            TimeRange(
+                start=110.0,
+                end=130.0,
+                score=float("inf"),
+                signal_type=SignalType.LOUDNESS,
+                metadata={"peak_time": True},
+            )
+        ]
+        assert scorer._extract_peak_time(h, spikes) == 130.0
+        assert scorer._signal_overlap_score(h, spikes) == 0.0
+
+    def test_score_and_select_short_sub_clips_falls_back_to_single_cut(
+        self, config: Config
+    ):
+        """Valid 60s highlight with 16s stitched sub_clips (<30s min_clip_seconds) falls back to single cut."""
+        highlights = [
+            # 60s parent (valid) + 16s stitched sub_clips (< 30s) -> keep as single cut with sub_clips=[]
+            _make_highlight(
+                100.0,
+                160.0,
+                9.5,
+                title="Short Beats Valid Parent",
+                sub_clips=[
+                    {"start": 100.0, "end": 108.0, "label": "Setup"},
+                    {"start": 145.0, "end": 153.0, "label": "Payoff"},
+                ],
+            ),
+            # 20s parent (too short) + 16s stitched sub_clips (< 30s) -> still dropped
+            _make_highlight(
+                200.0,
+                220.0,
+                9.5,
+                title="Too Short Overall",
+                sub_clips=[
+                    {"start": 200.0, "end": 208.0, "label": "Setup"},
+                    {"start": 212.0, "end": 220.0, "label": "Payoff"},
+                ],
+            ),
+            # 120s parent + 45s stitched sub_clips (within 30..90) -> kept as multi-beat story clip
+            _make_highlight(
+                300.0,
+                420.0,
+                9.0,
+                title="Valid Story Beats",
+                sub_clips=[
+                    {"start": 300.0, "end": 320.0, "label": "Setup"},
+                    {"start": 395.0, "end": 420.0, "label": "Payoff"},
+                ],
+            ),
+        ]
+        tr = TranscriptionResult(
+            segments=[TranscriptSegment(text="clip talk", start=0.0, end=500.0)],
+            full_text="clip talk",
+        )
+        scorer = _StubScorer(config, canned=highlights)
+        selected = scorer.score_and_select(tr, [], [])
+        by_title = {h.title: h for h in selected}
+        assert "Short Beats Valid Parent" in by_title
+        assert by_title["Short Beats Valid Parent"].sub_clips == []
+        assert "Too Short Overall" not in by_title
+        assert "Valid Story Beats" in by_title
+        assert len(by_title["Valid Story Beats"].sub_clips) == 2
+
+    def test_ollama_parse_response_clears_sub_clips_on_any_malformed_beat(
+        self, config: Config
+    ):
+        """A 3-beat sub_clips list with one malformed beat clears to [] instead of silently dropping it."""
+        with patch("streamclipper.scoring.ollama_scorer.ollama.Client"):
+            scorer = OllamaScorer(config)
+            payload = json.dumps(
+                [
+                    {
+                        "start": 100.0,
+                        "end": 160.0,
+                        "score": 9.0,
+                        "title": "Corrupt Middle Beat",
+                        "reason": "test",
+                        "sub_clips": [
+                            {"start": 100.0, "end": 115.0, "label": "Setup"},
+                            {"start": "not_a_time", "end": 135.0, "label": "Mid"},
+                            {"start": 140.0, "end": 160.0, "label": "Payoff"},
+                        ],
+                    }
+                ]
+            )
+            parsed = scorer._parse_response(payload)
+            assert len(parsed) == 1
+            assert parsed[0].sub_clips == []
+
+
 

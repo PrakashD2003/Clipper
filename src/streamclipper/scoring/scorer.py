@@ -96,6 +96,13 @@ class Scorer(ABC):
                 h.end,
                 max_duration=self.max_clip_seconds,
             )
+            if validated_beats:
+                stitched_duration = sum(
+                    float(b["end"]) - float(b["start"]) for b in validated_beats
+                )
+                if stitched_duration < self.min_clip_seconds:
+                    # Stitched beats are shorter than min_clip_seconds; clear to single-cut fallback
+                    validated_beats = []
             h.sub_clips = validated_beats
 
             if validated_beats:
@@ -244,7 +251,7 @@ class Scorer(ABC):
             if overlap_start >= overlap_end:
                 continue
             spike_duration = spike.end - spike.start
-            if spike_duration <= 0:
+            if spike_duration <= 0 or not math.isfinite(spike.score):
                 continue
             overlap_fraction = (overlap_end - overlap_start) / spike_duration
             score = overlap_fraction * spike.score
@@ -407,8 +414,8 @@ class Scorer(ABC):
         for spike in loudness_spikes:
             if spike.end <= h_start or spike.start >= h_end:
                 continue
-            peak_candidate = spike.metadata.get("peak_time")
-            if peak_candidate is None:
+            peak_candidate = (spike.metadata or {}).get("peak_time")
+            if peak_candidate is None or isinstance(peak_candidate, bool):
                 continue
             try:
                 peak_val = float(peak_candidate)
@@ -437,22 +444,29 @@ class Scorer(ABC):
     ) -> list[dict[str, Any]]:
         """Return up to 5 representative chat messages from overlapping chat spikes."""
         h_start, h_end = highlight.start, highlight.end
-        messages: list[dict[str, Any]] = []
+        messages: list[Any] = []
 
         for spike in chat_spikes:
             if spike.end <= h_start or spike.start >= h_end:
                 continue
-            sample = spike.metadata.get("sample_messages", [])
-            messages.extend(sample)
+            sample = (spike.metadata or {}).get("sample_messages")
+            if isinstance(sample, list):
+                messages.extend(sample)
 
-        # Deduplicate by message text and return at most 5
+        # Deduplicate by non-empty message text and return at most 5
         seen: set[str] = set()
         unique: list[dict[str, Any]] = []
         for msg in messages:
-            text = str(msg.get("message", msg.get("text", "")))
-            if text not in seen:
-                seen.add(text)
-                unique.append(msg)
+            if not isinstance(msg, dict):
+                continue
+            raw_text = msg.get("message")
+            if raw_text is None:
+                raw_text = msg.get("text")
+            text = str(raw_text).strip() if raw_text is not None else ""
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            unique.append(msg)
         return unique[:5]
 
     @staticmethod

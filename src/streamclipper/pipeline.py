@@ -155,6 +155,9 @@ class Pipeline:
             raise ValueError("Invalid URL: stream URL must be a non-empty string.")
         clean_url = url.strip()
 
+        # Fail fast on invalid mode before clearing cache or running expensive pipeline stages
+        self._resolve_base_mode(mode)
+
         intro_path = Path(voice_intro_path) if voice_intro_path is not None else None
         outro_path = Path(voice_outro_path) if voice_outro_path is not None else None
         if intro_path is not None and not intro_path.exists():
