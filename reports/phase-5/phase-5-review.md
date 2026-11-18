@@ -193,3 +193,15 @@ README_AND_MCP_AUDIT_OK
   git checkout main && git merge --no-ff phase-5-mcp-server -m "chore: merge phase-5-mcp-server and complete StreamClipper v2.2"
   ```
 - **Release Status:** **StreamClipper v2.2 (`0.1.0`) — COMPLETE & MERGED ON `main`.**
+
+---
+
+## 6. Post-Merge Polish & Final Closeout Addendum
+
+Following the `--no-ff` merge (`e9208a9`), three final edge-case polish fixes and repository-wide milestone closeout updates were applied directly on `main`:
+
+1. **`_recover_failed_state` transcript gating (`src/streamclipper/pipeline.py`)**: Required `state.transcript is not None` before recovering a `FAILED (99)` state to `PipelineStatus.SCORING` (preventing recovery from skipping transcription when MCP `analyze_signals` ran before `transcribe_audio`), and updated `_step_transcribe` to advance directly to `SCORING` when `state.analysis_complete` is already `True`.
+2. **Unconditional midpoint `peak_time` fallback (`src/streamclipper/mcp_server/server.py`)**: Updated `submit_highlights` and `render_clip` to compute the midpoint `peak_time` fallback via `scorer._extract_peak_time(...)` unconditionally (even when `state.loudness_spikes` is empty or the URL is uncached), matching `src/streamclipper/scoring/scorer.py` while continuing to honor explicit in-range `peak_time` values on quiet highlights.
+3. **Same-URL `render_all_selected` / `render_clip` concurrency safety (`src/streamclipper/mcp_server/server.py`)**: Scoped `_get_url_lock(cache_key)` across the full `render_all_selected` batch and `render_clip` read-render-save lifecycle, using `_merge_clip_results()` and non-colliding `min_clip_index` allocation so concurrent batch and single-clip renders on the same URL never overwrite each other's cached clip entries or output files.
+4. **Milestone Closeout Sync**: Updated stale Phase 3/4/5 milestone banners and status matrices in `docs/streamclipper-agent-prompts.md` and `docs/streamclipper-implementation-guide-v2.md` to reflect all 5 phases complete and merged into `main`.
+5. **Final Verification**: Full test suite (`D:\GTA6-Clipper\.venv\Scripts\pytest.exe -v`) — **527 / 527 passed** (`66.08s`, zero failures, zero skipped).

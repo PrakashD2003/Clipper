@@ -98,7 +98,9 @@ class Pipeline:
             return state
         if state.highlights or state.selected_highlights:
             state.status = PipelineStatus.ASSEMBLING
-        elif state.analysis_complete or state.loudness_spikes or state.chat_spikes:
+        elif state.transcript is not None and (
+            state.analysis_complete or state.loudness_spikes or state.chat_spikes
+        ):
             state.status = PipelineStatus.SCORING
         elif state.transcript is not None:
             if state.audio_path is not None and not Path(state.audio_path).exists():
@@ -350,7 +352,11 @@ class Pipeline:
 
         transcriber = Transcriber(self.config)
         state.transcript = await asyncio.to_thread(transcriber.transcribe, state.audio_path)
-        state.status = PipelineStatus.ANALYZING
+        state.status = (
+            PipelineStatus.SCORING
+            if state.analysis_complete
+            else PipelineStatus.ANALYZING
+        )
         return state
 
     async def _step_analyze(self, state: PipelineState) -> PipelineState:

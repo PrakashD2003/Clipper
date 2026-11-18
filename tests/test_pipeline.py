@@ -435,6 +435,7 @@ class TestRecoverFailedState:
         state = PipelineState(
             stream_info=_sample_stream_info(),
             status=PipelineStatus.FAILED,
+            transcript=_sample_transcript(),
             chat_spikes=[
                 TimeRange(
                     start=10.0,
@@ -446,6 +447,46 @@ class TestRecoverFailedState:
         )
         recovered = Pipeline._recover_failed_state(state)
         assert recovered.status is PipelineStatus.SCORING
+
+    def test_failed_with_analysis_or_spikes_but_no_transcript_never_skips_transcription(
+        self, tmp_path: Path
+    ) -> None:
+        audio_path = tmp_path / "stream.wav"
+        audio_path.write_bytes(b"wav")
+        state_with_wav = PipelineState(
+            stream_info=_sample_stream_info(),
+            status=PipelineStatus.FAILED,
+            audio_path=audio_path,
+            transcript=None,
+            analysis_complete=True,
+            loudness_spikes=[TimeRange(start=10.0, end=20.0, score=8.0)],
+            chat_spikes=[
+                TimeRange(
+                    start=10.0,
+                    end=20.0,
+                    score=8.0,
+                    signal_type=SignalType.CHAT_VELOCITY,
+                )
+            ],
+        )
+        assert Pipeline._recover_failed_state(state_with_wav).status is PipelineStatus.TRANSCRIBING
+
+        state_without_wav = PipelineState(
+            stream_info=_sample_stream_info(),
+            status=PipelineStatus.FAILED,
+            audio_path=tmp_path / "missing.wav",
+            transcript=None,
+            analysis_complete=True,
+            chat_spikes=[
+                TimeRange(
+                    start=10.0,
+                    end=20.0,
+                    score=8.0,
+                    signal_type=SignalType.CHAT_VELOCITY,
+                )
+            ],
+        )
+        assert Pipeline._recover_failed_state(state_without_wav).status is PipelineStatus.PENDING
 
     def test_failed_with_transcript_only_resets_to_analyzing(self) -> None:
         state = PipelineState(
@@ -1678,3 +1719,49 @@ class TestAuditHardeningAndModes:
         reloaded = pipeline.cache.load_state(url)
         assert reloaded is not None
         assert reloaded.status is PipelineStatus.ANALYZING
+
+    @pytest.mark.asyncio
+    async def test_process_stream_recovers_failed_state_when_analysis_ran_before_transcription(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """FAILED state with MCP-completed analysis and no transcript must transcribe then score."""
+        call_log: list[str] = []
+        _install_mock_stage_deps(monkeypatch, tmp_path, call_log=call_log)
+        cfg = _make_config(tmp_path)
+        pipeline = Pipeline(cfg)
+
+        wav_path = tmp_path / "temp" / "pre_analyzed.wav"
+        wav_path.parent.mkdir(parents=True, exist_ok=True)
+        wav_path.write_bytes(b"RIFF")
+
+        url = "https://youtube.com/watch?v=mcp_pre_analyzed"
+        pipeline.cache.save_state(
+            PipelineState(
+                stream_info=StreamInfo(
+                    url=url,
+                    title="MCP Pre-Analyzed Stream",
+                    platform=Platform.YOUTUBE,
+                    streamer="S",
+                    game="GTA 6",
+                    duration_seconds=1800,
+                    video_id="mcp_pre_analyzed",
+                ),
+                status=PipelineStatus.FAILED,
+                audio_path=wav_path,
+                transcript=None,
+                loudness_spikes=[
+                    TimeRange(start=118.0, end=123.0, score=8.8, metadata={"peak_time": 120.5})
+                ],
+                analysis_complete=True,
+            )
+        )
+
+        clips = await pipeline.process_stream(url, max_clips=1, interactive=False)
+        assert len(clips) == 1
+        assert "download_audio" not in call_log
+        assert "transcribe" in call_log
+        assert "loudness" not in call_log  # already analysis_complete=True
+        assert "score_and_select" in call_log
+        final_state = pipeline.cache.load_state(url)
+        assert final_state is not None
+        assert final_state.status is PipelineStatus.COMPLETE

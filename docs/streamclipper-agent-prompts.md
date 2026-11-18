@@ -1,8 +1,8 @@
 # StreamClipper — Agent Execution Prompts & Audit Logging Runbook (v2.2 — Patched + Auto-Hardware + YPP Transformative Engine)
 
 > **Current Milestone Status:**  
-> **Phase 1 (`phase-1-foundation`) and Phase 2 (`phase-2-core-pipeline`) are ✅ COMPLETE and MERGED into `main`. Phase 3 (`phase-3-ai-scoring`, Packages `3.1–3.3` + pre-review audit hardening) is implemented and awaiting Phase 3 Review (`3.R`).**  
-> **Next step: run Prompt `3.R`, then branch `phase-4-video-assembly` and execute Prompts `4.1–4.6`.** Every prompt below enforces `AGENTS.md`, `.venv\Scripts\pytest.exe`, branch discipline, all v2.2 Windows & auto-hardware guardrails, and the YPP Transformative Narrative & Story Engine (`auto` | `narrative` | `story` | `raw`, adaptive `moment_type` commentary, conditional multi-beat story cuts, spike punch-in zoom, live chat ASS ticker, pluggable Kokoro/Edge-TTS/ElevenLabs/custom-mic narrator with `:eval=frame` audio ducking, `FileOrganizer`, and MCP SDK v2 `MCPServer`).
+> **All 5 Phases (`phase-1-foundation` through `phase-5-mcp-server`, Packages `1.1–5.2` + Reviews `1.R–5.R`) are ✅ COMPLETE and MERGED into `main` (StreamClipper v2.2 release).**  
+> *(This runbook is archived as the complete implementation record for StreamClipper v2.2.)* Every prompt below enforces `AGENTS.md`, `.venv\Scripts\pytest.exe`, branch discipline, all v2.2 Windows & auto-hardware guardrails, and the YPP Transformative Narrative & Story Engine (`auto` | `narrative` | `story` | `raw`, adaptive `moment_type` commentary, conditional multi-beat story cuts, spike punch-in zoom, live chat ASS ticker, pluggable Kokoro/Edge-TTS/ElevenLabs/custom-mic narrator with `:eval=frame` audio ducking, `FileOrganizer`, and MCP SDK v2 `MCPServer`).
 
 ## 1. Quick Reference Matrix: Phases, Packages, Branches & Models
 
@@ -18,17 +18,21 @@
 | **Phase 2** | `phase-2-core-pipeline` | **2.4** | Loudness Spike Detector (Streamed RMS + `peak_time`) | ✅ Merged | Gemini 3.8 (high) | `reports/phase-2/package-2.4-report.md` |
 | **Phase 2** | `phase-2-core-pipeline` | **2.5** | Chat Scraper (`yt-dlp`) & Velocity (`sample_messages`) | ✅ Merged | Gemini 3.8 (high) | `reports/phase-2/package-2.5-report.md` |
 | **Phase 2** | `phase-2-core-pipeline` | **2.6** | Stream Discovery | ✅ Merged | Gemini 3.8 (high) | `reports/phase-2/package-2.6-report.md` |
-| **Phase 3** | `phase-3-ai-scoring` | **3.1** | Scorer Interface & YPP Adaptive Narrative Prompts | ✅ Implemented | Claude Opus 4.6 | `reports/phase-3/package-3.1-report.md` |
-| **Phase 3** | `phase-3-ai-scoring` | **3.2** | Ollama Scorer (+ Adaptive Narrative Generator) | ✅ Implemented | Gemini 3.8 (high) | `reports/phase-3/package-3.2-report.md` |
-| **Phase 3** | `phase-3-ai-scoring` | **3.3** | Pipeline Orchestrator (`FAILED` Recovery + `--mode`/`--voice-intro`) | ✅ Implemented | Claude Opus 4.6 | `reports/phase-3/package-3.3-report.md` |
-| **Phase 4** | `phase-4-video-assembly` | **4.1** | Facecam Detector (OpenCV) | Pending | Gemini 3.8 (high) | `reports/phase-4/package-4.1-report.md` |
-| **Phase 4** | `phase-4-video-assembly` | **4.2** | 9:16 Composer (MoviePy v2 + Story Beats + 1.2x Zoom) | Pending | Gemini 3.8 (high) | `reports/phase-4/package-4.2-report.md` |
-| **Phase 4** | `phase-4-video-assembly` | **4.3** | Hormozi Captions + Chat Ticker (`.ass` + Windows `cwd` FFmpeg / NVENC) | Pending | Claude Opus 4.6 | `reports/phase-4/package-4.3-report.md` |
-| **Phase 4** | `phase-4-video-assembly` | **4.4** | Hook Title & Adaptive Context Badge Overlay | Pending | Gemini 3.8 (high) | `reports/phase-4/package-4.4-report.md` |
-| **Phase 4** | `phase-4-video-assembly` | **4.5** | YPP Narrator (Kokoro/Edge-TTS/ElevenLabs/Mic) & Dynamic Audio Ducking | Pending | Gemini 3.8 (high) | `reports/phase-4/package-4.5-report.md` |
-| **Phase 4** | `phase-4-video-assembly` | **4.6** | Exporter (`crf=18` Temp + Handle Cleanup) & `FileOrganizer` | Pending | Gemini 3.8 (high) | `reports/phase-4/package-4.6-report.md` |
-| **Phase 5** | `phase-5-mcp-server` | **5.1** | MCP SDK v2 (`MCPServer`) Implementation (incl. YPP Transformative Params) | Pending | Claude Opus 4.6 | `reports/phase-5/package-5.1-report.md` |
-| **Phase 5** | `phase-5-mcp-server` | **5.2** | README & Setup Guide | Pending | Gemini 3.8 (high) | `reports/phase-5/package-5.2-report.md` |
+| **Phase 2** | `phase-2-core-pipeline` -> `main` | **2.R** | Phase 2 Review & Merge to `main` | ✅ Merged | Claude Opus 4.6 | `reports/phase-2/phase-2-review.md` |
+| **Phase 3** | `phase-3-ai-scoring` | **3.1** | Scorer Interface & YPP Adaptive Narrative Prompts | ✅ Merged | Claude Opus 4.6 | `reports/phase-3/package-3.1-report.md` |
+| **Phase 3** | `phase-3-ai-scoring` | **3.2** | Ollama Scorer (+ Adaptive Narrative Generator) | ✅ Merged | Gemini 3.8 (high) | `reports/phase-3/package-3.2-report.md` |
+| **Phase 3** | `phase-3-ai-scoring` | **3.3** | Pipeline Orchestrator (`FAILED` Recovery + `--mode`/`--voice-intro`) | ✅ Merged | Claude Opus 4.6 | `reports/phase-3/package-3.3-report.md` |
+| **Phase 3** | `phase-3-ai-scoring` -> `main` | **3.R** | Phase 3 Review & Merge to `main` | ✅ Merged | Claude Opus 4.6 | `reports/phase-3/phase-3-review.md` |
+| **Phase 4** | `phase-4-video-assembly` | **4.1** | Facecam Detector (OpenCV) | ✅ Merged | Gemini 3.8 (high) | `reports/phase-4/package-4.1-report.md` |
+| **Phase 4** | `phase-4-video-assembly` | **4.2** | 9:16 Composer (MoviePy v2 + Story Beats + 1.2x Zoom) | ✅ Merged | Gemini 3.8 (high) | `reports/phase-4/package-4.2-report.md` |
+| **Phase 4** | `phase-4-video-assembly` | **4.3** | Hormozi Captions + Chat Ticker (`.ass` + Windows `cwd` FFmpeg / NVENC) | ✅ Merged | Claude Opus 4.6 | `reports/phase-4/package-4.3-report.md` |
+| **Phase 4** | `phase-4-video-assembly` | **4.4** | Hook Title & Adaptive Context Badge Overlay | ✅ Merged | Gemini 3.8 (high) | `reports/phase-4/package-4.4-report.md` |
+| **Phase 4** | `phase-4-video-assembly` | **4.5** | YPP Narrator (Kokoro/Edge-TTS/ElevenLabs/Mic) & Dynamic Audio Ducking | ✅ Merged | Gemini 3.8 (high) | `reports/phase-4/package-4.5-report.md` |
+| **Phase 4** | `phase-4-video-assembly` | **4.6** | Exporter (`crf=18` Temp + Handle Cleanup) & `FileOrganizer` | ✅ Merged | Gemini 3.8 (high) | `reports/phase-4/package-4.6-report.md` |
+| **Phase 4** | `phase-4-video-assembly` -> `main` | **4.R** | Phase 4 Review & Merge to `main` | ✅ Merged | Claude Opus 4.6 | `reports/phase-4/phase-4-review.md` |
+| **Phase 5** | `phase-5-mcp-server` | **5.1** | MCP SDK v2 (`MCPServer`) Implementation (incl. YPP Transformative Params) | ✅ Merged | Claude Opus 4.6 | `reports/phase-5/package-5.1-report.md` |
+| **Phase 5** | `phase-5-mcp-server` | **5.2** | README & Setup Guide | ✅ Merged | Gemini 3.8 (high) | `reports/phase-5/package-5.2-report.md` |
+| **Phase 5** | `phase-5-mcp-server` -> `main` | **5.R** | Phase 5 Review & Final v2.2 Merge to `main` | ✅ Merged | Claude Opus 4.6 | `reports/phase-5/phase-5-review.md` |
 
 ## 2. Universal Boilerplate Prompts (Parameterized Templates)
 

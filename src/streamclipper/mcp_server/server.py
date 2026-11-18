@@ -410,6 +410,22 @@ def _next_available_clip_index(
     return idx
 
 
+def _merge_clip_results(
+    existing: list[ClipResult], added: list[ClipResult]
+) -> list[ClipResult]:
+    """Merge newly rendered clips with existing cached clips, deduplicating by resolved video_path."""
+    merged: list[ClipResult] = []
+    seen_paths: dict[str, int] = {}
+    for clip in [*existing, *added]:
+        key = str(Path(clip.video_path).resolve()).lower()
+        if key in seen_paths:
+            merged[seen_paths[key]] = clip
+        else:
+            seen_paths[key] = len(merged)
+            merged.append(clip)
+    return merged
+
+
 async def _render_single_highlight(
     pipeline: Pipeline,
     config: Config,
@@ -1045,7 +1061,7 @@ async def submit_highlights(url: str, highlights: str) -> str:
                     )
                 elif explicit_peak is not None and start <= explicit_peak <= end:
                     highlight.peak_time = explicit_peak
-                elif state.loudness_spikes:
+                else:
                     highlight.peak_time = scorer._extract_peak_time(
                         highlight, state.loudness_spikes
                     )
@@ -1166,73 +1182,74 @@ async def render_clip(
         if outro_path is not None and not outro_path.is_file():
             return _json_error(f"voice_outro_path not found: {outro_path}")
 
-        state = cache.load_state(clean_url)
-        resolved_game = (
-            _as_str(game)
-            or (state.stream_info.game if state is not None else "")
-            or str(config.get("discovery.default_game", "GTA 6"))
-        )
-        resolved_streamer = (
-            _as_str(streamer)
-            or (state.stream_info.streamer if state is not None else "")
-            or "Unknown"
-        )
-
-        highlight = Highlight(
-            start=float(start),
-            end=float(end),
-            score=8.0,
-            title=_as_str(hook_title) or "Stream Highlight",
-            reason="",
-            moment_type=_normalize_moment_type(moment_type),
-            narration_intro=_as_str(narration_intro),
-            narration_outro=_as_str(narration_outro),
-            context_badge=_as_str(context_badge),
-            sub_clips=validated_beats,
-        )
-
-        if state is not None:
-            highlight.final_score = scorer._compute_weighted_score(
-                highlight, state.loudness_spikes, state.chat_spikes
+        cache_key = cache.get_cache_key(clean_url)
+        async with _get_url_lock(cache_key):
+            state = cache.load_state(clean_url)
+            resolved_game = (
+                _as_str(game)
+                or (state.stream_info.game if state is not None else "")
+                or str(config.get("discovery.default_game", "GTA 6"))
             )
-            if state.transcript is not None:
-                highlight.word_timestamps = scorer._extract_words_for_range(
-                    state.transcript, highlight.start, highlight.end
+            resolved_streamer = (
+                _as_str(streamer)
+                or (state.stream_info.streamer if state is not None else "")
+                or "Unknown"
+            )
+
+            highlight = Highlight(
+                start=float(start),
+                end=float(end),
+                score=8.0,
+                title=_as_str(hook_title) or "Stream Highlight",
+                reason="",
+                moment_type=_normalize_moment_type(moment_type),
+                narration_intro=_as_str(narration_intro),
+                narration_outro=_as_str(narration_outro),
+                context_badge=_as_str(context_badge),
+                sub_clips=validated_beats,
+            )
+
+            if state is not None:
+                highlight.final_score = scorer._compute_weighted_score(
+                    highlight, state.loudness_spikes, state.chat_spikes
                 )
-                scoped_text = scorer._extract_transcript_for_range(
-                    state.transcript, highlight.start, highlight.end
-                )
-                if scoped_text:
-                    highlight.transcript_chunk = scoped_text
-            if state.loudness_spikes:
+                if state.transcript is not None:
+                    highlight.word_timestamps = scorer._extract_words_for_range(
+                        state.transcript, highlight.start, highlight.end
+                    )
+                    scoped_text = scorer._extract_transcript_for_range(
+                        state.transcript, highlight.start, highlight.end
+                    )
+                    if scoped_text:
+                        highlight.transcript_chunk = scoped_text
                 highlight.peak_time = scorer._extract_peak_time(
                     highlight, state.loudness_spikes
                 )
-            highlight.chat_burst = scorer._extract_chat_burst(
-                highlight, state.chat_spikes
+                highlight.chat_burst = scorer._extract_chat_burst(
+                    highlight, state.chat_spikes
+                )
+            else:
+                highlight.final_score = highlight.score
+                highlight.peak_time = scorer._extract_peak_time(highlight, [])
+
+            min_clip_index = (len(state.clips) + 1) if state is not None else 1
+            clip_result, resolved_mode = await _render_single_highlight(
+                pipeline=pipeline,
+                config=config,
+                url=clean_url,
+                highlight=highlight,
+                streamer_name=resolved_streamer,
+                game_name=resolved_game,
+                clip_index=None,
+                base_mode=base_mode,
+                voice_intro_path=intro_path,
+                voice_outro_path=outro_path,
+                min_clip_index=min_clip_index,
             )
-        else:
-            highlight.final_score = highlight.score
 
-        min_clip_index = (len(state.clips) + 1) if state is not None else 1
-        clip_result, resolved_mode = await _render_single_highlight(
-            pipeline=pipeline,
-            config=config,
-            url=clean_url,
-            highlight=highlight,
-            streamer_name=resolved_streamer,
-            game_name=resolved_game,
-            clip_index=None,
-            base_mode=base_mode,
-            voice_intro_path=intro_path,
-            voice_outro_path=outro_path,
-            min_clip_index=min_clip_index,
-        )
-
-        async with _get_url_lock(cache.get_cache_key(clean_url)):
             fresh_state = cache.load_state(clean_url)
             if fresh_state is not None:
-                fresh_state.clips.append(clip_result)
+                fresh_state.clips = _merge_clip_results(fresh_state.clips, [clip_result])
                 cache.save_state(fresh_state)
 
         return _json_ok(
@@ -1252,7 +1269,6 @@ async def render_all_selected(url: str, mode: str = "auto") -> str:
     """Render all selected highlights stored in StepCache for a stream."""
     rendered: list[ClipResult] = []
     clean_url = ""
-    cache: StepCache | None = None
     try:
         clean_url = url.strip() if isinstance(url, str) else ""
         if not clean_url:
@@ -1262,76 +1278,79 @@ async def render_all_selected(url: str, mode: str = "auto") -> str:
         cache = _get_cache(config)
         pipeline = Pipeline(config)
         base_mode = pipeline._resolve_base_mode(mode)
-
-        state = cache.load_state(clean_url)
-        if state is None:
-            return _json_error(f"No cached pipeline state found for URL: {clean_url}")
-        if not state.selected_highlights:
-            return _json_error(
-                f"No selected highlights found in cache for {clean_url}. Run submit_highlights first."
-            )
-
-        streamer_name = state.stream_info.streamer or "Unknown"
-        game_name = state.stream_info.game or str(
-            config.get("discovery.default_game", "GTA 6")
-        )
-        selected_highlights = list(state.selected_highlights)
         cache_key = cache.get_cache_key(clean_url)
 
-        for idx, highlight in enumerate(selected_highlights, start=1):
-            clip_result, _ = await _render_single_highlight(
-                pipeline=pipeline,
-                config=config,
-                url=clean_url,
-                highlight=highlight,
-                streamer_name=streamer_name,
-                game_name=game_name,
-                clip_index=idx,
-                base_mode=base_mode,
-            )
-            rendered.append(clip_result)
-            # Persist incremental clip progress so mid-batch failures never orphan rendered files
-            async with _get_url_lock(cache_key):
-                fresh_state = cache.load_state(clean_url) or state
-                fresh_state.clips = list(rendered)
-                fresh_state.status = PipelineStatus.ASSEMBLING
-                cache.save_state(fresh_state)
-
         async with _get_url_lock(cache_key):
-            final_state = cache.load_state(clean_url) or state
-            final_state.clips = list(rendered)
-            final_state.status = PipelineStatus.COMPLETE
-            cache.save_state(final_state)
+            state = cache.load_state(clean_url)
+            if state is None:
+                return _json_error(f"No cached pipeline state found for URL: {clean_url}")
+            if not state.selected_highlights:
+                return _json_error(
+                    f"No selected highlights found in cache for {clean_url}. Run submit_highlights first."
+                )
+
+            streamer_name = state.stream_info.streamer or "Unknown"
+            game_name = state.stream_info.game or str(
+                config.get("discovery.default_game", "GTA 6")
+            )
+            selected_highlights = list(state.selected_highlights)
+            existing_clips = list(state.clips)
+            base_index = len(existing_clips)
+
+            try:
+                for idx, highlight in enumerate(selected_highlights, start=1):
+                    clip_result, _ = await _render_single_highlight(
+                        pipeline=pipeline,
+                        config=config,
+                        url=clean_url,
+                        highlight=highlight,
+                        streamer_name=streamer_name,
+                        game_name=game_name,
+                        clip_index=None,
+                        base_mode=base_mode,
+                        min_clip_index=base_index + idx,
+                    )
+                    rendered.append(clip_result)
+                    # Persist incremental clip progress so mid-batch failures never orphan rendered files
+                    state.clips = _merge_clip_results(existing_clips, rendered)
+                    state.status = PipelineStatus.ASSEMBLING
+                    cache.save_state(state)
+
+                state.clips = _merge_clip_results(existing_clips, rendered)
+                state.status = PipelineStatus.COMPLETE
+                cache.save_state(state)
+            except Exception as exc:
+                logger.exception("render_all_selected failed")
+                if rendered:
+                    try:
+                        state.clips = _merge_clip_results(existing_clips, rendered)
+                        state.status = PipelineStatus.FAILED
+                        cache.save_state(state)
+                    except Exception:
+                        logger.exception(
+                            "Failed to persist partial clips after render_all_selected error"
+                        )
+                    return _json_ok(
+                        {
+                            "error": str(exc),
+                            "url": clean_url,
+                            "rendered_count": len(rendered),
+                            "clips": [c.to_dict() for c in rendered],
+                        }
+                    )
+                return _json_error(str(exc))
 
         return _json_ok(
             {
                 "url": clean_url,
                 "mode": base_mode,
                 "rendered_count": len(rendered),
-                "status": final_state.status.name.lower(),
+                "status": state.status.name.lower(),
                 "clips": [c.to_dict() for c in rendered],
             }
         )
     except Exception as exc:
         logger.exception("render_all_selected failed")
-        if rendered and cache is not None and clean_url:
-            try:
-                async with _get_url_lock(cache.get_cache_key(clean_url)):
-                    failed_state = cache.load_state(clean_url)
-                    if failed_state is not None:
-                        failed_state.clips = list(rendered)
-                        failed_state.status = PipelineStatus.FAILED
-                        cache.save_state(failed_state)
-            except Exception:
-                logger.exception("Failed to persist partial clips after render_all_selected error")
-            return _json_ok(
-                {
-                    "error": str(exc),
-                    "url": clean_url,
-                    "rendered_count": len(rendered),
-                    "clips": [c.to_dict() for c in rendered],
-                }
-            )
         return _json_error(str(exc))
 
 

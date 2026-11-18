@@ -2196,5 +2196,201 @@ async def test_cleanup_temp_removes_orphaned_segments_after_wav_already_deleted(
     assert not orphan_chat.exists()
 
 
+@pytest.mark.asyncio
+async def test_submit_highlights_and_render_clip_midpoint_peak_time_without_loudness_spikes(
+    mcp_env: tuple[Config, StepCache, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Midpoint peak_time fallback runs unconditionally when loudness_spikes is empty or uncached."""
+    _, cache, tmp_path = mcp_env
+    url = "https://www.youtube.com/watch?v=mid12345678"
+
+    cache.save_state(
+        PipelineState(
+            stream_info=StreamInfo(
+                url=url,
+                title="Quiet Stream",
+                platform=Platform.YOUTUBE,
+                streamer="Kai",
+                game="GTA 6",
+                duration_seconds=3600,
+                video_id="mid12345678",
+            ),
+            status=PipelineStatus.SCORING,
+            loudness_spikes=[],
+            chat_spikes=[],
+            analysis_complete=True,
+        )
+    )
+
+    payload = json.dumps(
+        [
+            {
+                "start": 100.0,
+                "end": 140.0,
+                "score": 8.6,
+                "title": "No Explicit Peak",
+                "reason": "Quiet funny moment",
+            },
+            {
+                "start": 200.0,
+                "end": 260.0,
+                "score": 8.8,
+                "title": "Valid Explicit Peak",
+                "reason": "Dry joke",
+                "peak_time": 245.0,
+            },
+            {
+                "start": 300.0,
+                "end": 340.0,
+                "score": 8.4,
+                "title": "Out Of Range Explicit Peak",
+                "reason": "Bad timestamp falls back to midpoint",
+                "peak_time": 999.0,
+            },
+        ]
+    )
+    sub_res = _extract_json(
+        await mcp.call_tool("submit_highlights", {"url": url, "highlights": payload})
+    )
+    assert "error" not in sub_res
+    by_title = {h["title"]: h for h in sub_res["highlights"]}
+    assert by_title["No Explicit Peak"]["peak_time"] == 120.0
+    assert by_title["Valid Explicit Peak"]["peak_time"] == 245.0
+    assert by_title["Out Of Range Explicit Peak"]["peak_time"] == 320.0
+
+    # render_clip with cached state (empty loudness_spikes) AND with uncached URL
+    seg = tmp_path / "temp" / "segments" / "mid.mp4"
+    seg.parent.mkdir(parents=True, exist_ok=True)
+    seg.write_bytes(b"mp4")
+    monkeypatch.setattr(mcp_server, "download_segment", lambda *a, **kw: seg)
+
+    captured_peaks: list[float] = []
+
+    def capture_assemble(self, highlight, metadata, segment_paths, clip_index, mode, *a, **kw):
+        captured_peaks.append(highlight.peak_time)
+        out_mp4 = tmp_path / "output" / f"mid_clip_{clip_index:02d}.mp4"
+        out_mp4.parent.mkdir(parents=True, exist_ok=True)
+        out_mp4.write_bytes(b"mp4")
+        return ClipResult(
+            video_path=out_mp4,
+            metadata_path=None,
+            metadata=metadata,
+            duration_seconds=30.0,
+        )
+
+    monkeypatch.setattr(mcp_server.Pipeline, "_assemble_highlight", capture_assemble)
+
+    cached_render = _extract_json(
+        await mcp.call_tool(
+            "render_clip",
+            {"url": url, "start": 100.0, "end": 140.0, "hook_title": "Cached Quiet", "mode": "raw"},
+        )
+    )
+    assert "error" not in cached_render
+
+    uncached_render = _extract_json(
+        await mcp.call_tool(
+            "render_clip",
+            {
+                "url": "https://www.youtube.com/watch?v=uncached999",
+                "start": 50.0,
+                "end": 90.0,
+                "hook_title": "Uncached Quiet",
+                "mode": "raw",
+            },
+        )
+    )
+    assert "error" not in uncached_render
+    assert captured_peaks == [120.0, 70.0]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_render_all_selected_and_render_clip_same_url_preserve_all_clips(
+    mcp_env: tuple[Config, StepCache, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Concurrent render_all_selected + render_clip on the same URL must never overwrite each other."""
+    config, cache, tmp_path = mcp_env
+    seg = tmp_path / "temp" / "segments" / "conc.mp4"
+    seg.parent.mkdir(parents=True, exist_ok=True)
+    seg.write_bytes(b"mp4")
+
+    def slow_download(*a, **kw):
+        time.sleep(0.03)
+        return seg
+
+    monkeypatch.setattr(mcp_server, "download_segment", slow_download)
+
+    from streamclipper.output.organizer import FileOrganizer
+
+    organizer = FileOrganizer(config)
+
+    def org_assemble(self, highlight, metadata, segment_paths, clip_index, mode, *a, **kw):
+        time.sleep(0.02)
+        out_mp4 = organizer.get_clip_path(metadata.game, metadata.streamer, clip_index)
+        out_mp4.write_bytes(f"{metadata.hook_title}-{clip_index}".encode("utf-8"))
+        return ClipResult(
+            video_path=out_mp4,
+            metadata_path=None,
+            metadata=metadata,
+            duration_seconds=30.0,
+        )
+
+    monkeypatch.setattr(mcp_server.Pipeline, "_assemble_highlight", org_assemble)
+
+    # Test BOTH scheduling orders: batch-first and single-first
+    for suffix, batch_first in (("orderA", True), ("orderB", False)):
+        url = f"https://www.youtube.com/watch?v=cnc{suffix}1"
+        h1 = Highlight(start=10.0, end=40.0, score=9.0, title="Batch 1", reason="r1", final_score=9.0)
+        h2 = Highlight(start=60.0, end=90.0, score=8.7, title="Batch 2", reason="r2", final_score=8.7)
+        cache.save_state(
+            PipelineState(
+                stream_info=StreamInfo(
+                    url=url,
+                    title=f"Concurrent {suffix}",
+                    platform=Platform.YOUTUBE,
+                    streamer=f"Streamer_{suffix}",
+                    game="GTA 6",
+                    duration_seconds=3600,
+                    video_id=f"cnc{suffix}1",
+                ),
+                status=PipelineStatus.ASSEMBLING,
+                highlights=[h1, h2],
+                selected_highlights=[h1, h2],
+            )
+        )
+
+        coro_batch = mcp.call_tool("render_all_selected", {"url": url, "mode": "raw"})
+        coro_single = mcp.call_tool(
+            "render_clip",
+            {
+                "url": url,
+                "start": 200.0,
+                "end": 230.0,
+                "hook_title": "Bonus Single",
+                "mode": "raw",
+            },
+        )
+        if batch_first:
+            r1, r2 = await asyncio.gather(coro_batch, coro_single)
+            batch_res, single_res = _extract_json(r1), _extract_json(r2)
+        else:
+            r1, r2 = await asyncio.gather(coro_single, coro_batch)
+            single_res, batch_res = _extract_json(r1), _extract_json(r2)
+
+        assert "error" not in batch_res, batch_res
+        assert "error" not in single_res, single_res
+        assert batch_res["rendered_count"] == 2
+
+        reloaded = cache.load_state(url)
+        assert reloaded is not None
+        assert len(reloaded.clips) == 3
+        titles = {c.metadata.hook_title for c in reloaded.clips}
+        assert titles == {"Batch 1", "Batch 2", "Bonus Single"}
+        paths = {Path(c.video_path).resolve() for c in reloaded.clips}
+        assert len(paths) == 3
+        assert all(p.is_file() for p in paths)
+
+
+
 
 

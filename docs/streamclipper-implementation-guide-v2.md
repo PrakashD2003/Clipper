@@ -1,7 +1,7 @@
 # 🎮 StreamClipper — Implementation Guide (v2.2 — Patched + Auto-Hardware + YPP Transformative Engine)
 
 > **A free, open-source, game-agnostic AI stream clipping system with MCP + CLI modes and built-in YouTube Partner Program (YPP) Transformative Narrative & Story synthesis**  
-> **Milestone Status:** **Phase 1 (`phase-1-foundation`) and Phase 2 (`phase-2-core-pipeline`) are ✅ COMPLETE and MERGED into `main`. Phase 3 (`phase-3-ai-scoring`, Packages `3.1–3.3` + pre-review audit hardening) is implemented and awaiting Phase 3 Review (`3.R`).** Upcoming phases: **Phase 4 (`4.1–4.6`: facecam, MoviePy v2 9:16 composer + story cuts + zoom, ASS captions + chat ticker, hook/badge overlays, pluggable TTS/ElevenLabs/mic narrator + `:eval=frame` audio ducking, exporter + `FileOrganizer`)** and **Phase 5 (`5.1–5.2`: MCP SDK v2 `MCPServer` tools & README)**.  
+> **Milestone Status:** **All 5 Phases (`phase-1-foundation` through `phase-5-mcp-server`, Packages `1.1–5.2` + Reviews `1.R–5.R`) are ✅ COMPLETE and MERGED into `main` (StreamClipper v2.2 release).**  
 > *v2.2 preserves all 12 v2 runtime/architectural fixes, all 6 Windows & edge-case patches (`FAILED` retry recovery, `librosa.stream` `fill_value=0.0`, Windows-safe FFmpeg `cwd` ASS burn-in + file-lock cleanup + `crf=18` single-loss temp encode, aspect-preserving facecam crop, non-negative chat offsets, dynamic ASS highlight color), and 5-tier `HardwareProfile` auto-configuration (`h264_nvenc` → `libx264`).*
 
 ## Architecture Overview
@@ -3375,10 +3375,10 @@ flowchart LR
 | 2 | ✅ **DONE** | Unit | `pytest tests/test_transcriber.py` | Hardware-aware WhisperX transcription + 2-stage VRAM cleanup |
 | 2 | ✅ **DONE** | Unit | `pytest tests/test_loudness.py` | Streamed RMS spike detection (`librosa.stream` with `fill_value=0.0`) + `metadata["peak_time"]` |
 | 2 | ✅ **DONE** | Unit | `pytest tests/test_chat.py` | `yt-dlp` `.live_chat.json` parsing (skipping negative offsets) + velocity binning + `metadata["sample_messages"]` |
-| 3 | 🔄 **IN REVIEW** | Unit | `pytest tests/test_scorer.py` | Dynamic signal fusion, timestamped chunking, clip duration enforcement, adaptive `moment_type` narrative prompts, `sub_clips` validation, `get_candidate_chunks`, deduplication |
-| 3 | 🔄 **IN REVIEW** | Integration | `pytest tests/test_pipeline.py` | Full pipeline state transitions (`1 -> 7`), `FAILED (99)` retry recovery, `--mode auto|narrative|story|raw` / `--force` / `--voice-intro`, GPU lock serialization in parallel non-interactive mode |
-| 4 | Pending | Unit | `pytest tests/test_assembly.py` | Facecam corner filter, aspect-preserving MoviePy v2 composer (+ clamped story beats & 1.2x spike zoom), ASS `Hormozi` + `ChatTicker` + `h264_nvenc`/`libx264` fallback, pluggable TTS/ElevenLabs/mic narrator + `:eval=frame` dynamic 18% audio ducking, `FileOrganizer`, Windows handle cleanup |
-| 5 | Pending | Unit | `pytest tests/test_mcp_server.py` | MCP SDK v2 (`MCPServer`) tool registration (incl. YPP narrative/story/auto/raw/voiceover params), signal-filtered chunking, `StepCache.find_by_audio_path()` integration, offline `generate_post_metadata` |
+| 3 | ✅ **DONE** | Unit | `pytest tests/test_scorer.py` | Dynamic signal fusion, timestamped chunking, clip duration enforcement, adaptive `moment_type` narrative prompts, `sub_clips` validation, `get_candidate_chunks`, deduplication |
+| 3 | ✅ **DONE** | Integration | `pytest tests/test_pipeline.py` | Full pipeline state transitions (`1 -> 7`), `FAILED (99)` retry recovery, `--mode auto|narrative|story|raw` / `--force` / `--voice-intro`, GPU lock serialization in parallel non-interactive mode |
+| 4 | ✅ **DONE** | Unit / E2E | `pytest tests/test_facecam.py tests/test_composer.py tests/test_hooks.py tests/test_narrator.py tests/test_assembly.py` | Facecam corner filter, aspect-preserving MoviePy v2 composer (+ clamped story beats & 1.2x spike zoom), ASS `Hormozi` + `ChatTicker` + `h264_nvenc`/`libx264` fallback, pluggable TTS/ElevenLabs/mic narrator + `:eval=frame` dynamic 18% audio ducking, `FileOrganizer`, Windows handle cleanup |
+| 5 | ✅ **DONE** | Unit / E2E | `pytest tests/test_mcp_server.py` | MCP SDK v2 (`MCPServer`) tool registration (incl. YPP narrative/story/auto/raw/voiceover params), signal-filtered chunking, `StepCache.find_by_audio_path()` integration, offline `generate_post_metadata`, real assembly E2E, URL/GPU locking |
 
 ### End-to-End Smoke Test
 
