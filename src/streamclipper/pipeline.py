@@ -555,82 +555,115 @@ class Pipeline:
             and len(segment_paths) == len(beats)
         )
 
-        if use_multi_beat:
-            remapped_words, remapped_chat, peak_offset = remap_timeline_for_beats(
-                highlight.word_timestamps,
-                highlight.chat_burst,
-                highlight.peak_time,
-                beats,
-            )
-            beat_trim_ranges: list[tuple[float, float]] = []
-            for beat in beats:
-                b_start = float(beat["start"])
-                b_end = float(beat["end"])
-                lead_pad = b_start - max(0.0, b_start - buffer_seconds)
-                beat_trim_ranges.append((lead_pad, lead_pad + (b_end - b_start)))
+        composed = None
+        try:
+            if use_multi_beat:
+                remapped_words, remapped_chat, peak_offset = remap_timeline_for_beats(
+                    highlight.word_timestamps,
+                    highlight.chat_burst,
+                    highlight.peak_time,
+                    beats,
+                )
+                beat_trim_ranges: list[tuple[float, float]] = []
+                for beat in beats:
+                    b_start = float(beat["start"])
+                    b_end = float(beat["end"])
+                    lead_pad = b_start - max(0.0, b_start - buffer_seconds)
+                    beat_trim_ranges.append((lead_pad, lead_pad + (b_end - b_start)))
 
-            composed = composer.compose_story_beats(
-                segment_paths,
-                facecam,
-                beat_trim_ranges=beat_trim_ranges,
-                peak_offset=peak_offset,
-            )
-            clip_start_offset = 0.0
-            words_for_export = remapped_words
-            chat_for_export = remapped_chat
-        else:
-            actual_start = max(0.0, float(highlight.start) - buffer_seconds)
-            has_peak = highlight.peak_time > 0.0 or (
-                highlight.peak_time == 0.0
-                and highlight.start == 0.0
-                and highlight.loudness_score > 0.0
-            )
-            peak_offset = (
-                max(0.0, highlight.peak_time - actual_start)
-                if (has_peak and mode != "raw")
-                else None
-            )
-            composed = composer.compose(
-                segment_paths[0],
-                facecam,
-                peak_offset=peak_offset,
-            )
-            clip_start_offset = actual_start
-            words_for_export = highlight.word_timestamps
-            chat_for_export = highlight.chat_burst
+                composed = composer.compose_story_beats(
+                    segment_paths,
+                    facecam,
+                    beat_trim_ranges=beat_trim_ranges,
+                    peak_offset=peak_offset,
+                )
+                clip_start_offset = 0.0
+                words_for_export = remapped_words
+                chat_for_export = remapped_chat
+            else:
+                actual_start = max(0.0, float(highlight.start) - buffer_seconds)
+                has_peak = highlight.peak_time > 0.0 or (
+                    highlight.peak_time == 0.0
+                    and highlight.start == 0.0
+                    and highlight.loudness_score > 0.0
+                )
+                peak_offset = (
+                    max(0.0, highlight.peak_time - actual_start)
+                    if (has_peak and mode != "raw")
+                    else None
+                )
+                composed = composer.compose(
+                    segment_paths[0],
+                    facecam,
+                    peak_offset=peak_offset,
+                )
+                clip_start_offset = actual_start
+                words_for_export = highlight.word_timestamps
+                chat_for_export = highlight.chat_burst
 
-        composed = HookTitleOverlay(self.config).add_hook(
-            composed,
-            metadata.hook_title,
-            context_badge=metadata.context_badge if mode != "raw" else "",
-        )
+            composed = HookTitleOverlay(self.config).add_hook(
+                composed,
+                metadata.hook_title,
+                context_badge=metadata.context_badge if mode != "raw" else "",
+            )
 
-        organizer = FileOrganizer(self.config)
-        output_video_path = organizer.get_clip_path(
-            game=metadata.game,
-            streamer=metadata.streamer,
-            index=clip_index,
-        )
+            organizer = FileOrganizer(self.config)
+            output_video_path = organizer.get_clip_path(
+                game=metadata.game,
+                streamer=metadata.streamer,
+                index=clip_index,
+            )
 
-        exporter = Exporter(self.config)
-        final_video = exporter.export(
-            clip=composed,
-            words=words_for_export,
-            clip_start_offset=clip_start_offset,
-            output_path=output_video_path,
-            chat_burst=chat_for_export if mode != "raw" else None,
-            narration_intro=metadata.narration_intro if mode != "raw" else "",
-            narration_outro=metadata.narration_outro if mode != "raw" else "",
-            voice_intro_path=voice_intro_path,
-            voice_outro_path=voice_outro_path,
-            mode=mode,
-        )
+            exporter = Exporter(self.config)
+            final_video = exporter.export(
+                clip=composed,
+                words=words_for_export,
+                clip_start_offset=clip_start_offset,
+                output_path=output_video_path,
+                chat_burst=chat_for_export if mode != "raw" else None,
+                narration_intro=metadata.narration_intro if mode != "raw" else "",
+                narration_outro=metadata.narration_outro if mode != "raw" else "",
+                voice_intro_path=voice_intro_path,
+                voice_outro_path=voice_outro_path,
+                mode=mode,
+            )
+        except Exception:
+            self._close_composed_handles(composed)
+            raise
 
         return organizer.save_clip(
             video_path=final_video,
             metadata=metadata,
             transcript_text=highlight.transcript_chunk,
         )
+
+    @staticmethod
+    def _close_composed_handles(clip: Any) -> None:
+        """Best-effort handle cleanup if an error occurs before Exporter finishes."""
+        if clip is None:
+            return
+        seen: set[int] = set()
+        stack: list[Any] = [clip]
+        while stack:
+            current = stack.pop()
+            if current is None or id(current) in seen:
+                continue
+            seen.add(id(current))
+            src = getattr(current, "_source_clip", None)
+            if src is not None:
+                stack.append(src)
+            srcs = getattr(current, "_source_clips", None)
+            if srcs:
+                try:
+                    stack.extend(srcs)
+                except TypeError:
+                    pass
+            close_fn = getattr(current, "close", None)
+            if callable(close_fn):
+                try:
+                    close_fn()
+                except Exception:
+                    pass
 
     def _fallback_save_segment(
         self,

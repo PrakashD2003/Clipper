@@ -347,6 +347,40 @@ def _install_mock_stage_deps(
     monkeypatch.setattr(
         pipeline_mod, "download_multiple_segments", fake_download_multiple_segments
     )
+
+    # Mock heavy video/FFmpeg Phase 4 operations for dummy 10-byte segment stubs while
+    # letting the real Pipeline._assemble_highlight() and FileOrganizer run end-to-end.
+    import streamclipper.assembly.composer as composer_mod
+    import streamclipper.assembly.facecam as facecam_mod
+    import streamclipper.assembly.hooks as hooks_mod
+    import streamclipper.output.exporter as exporter_mod
+
+    monkeypatch.setattr(facecam_mod.FacecamDetector, "detect", lambda self, path, **kw: None)
+    monkeypatch.setattr(
+        composer_mod.VideoComposer,
+        "compose",
+        lambda self, video_path, facecam, peak_offset=None: {"kind": "single"},
+    )
+    monkeypatch.setattr(
+        composer_mod.VideoComposer,
+        "compose_story_beats",
+        lambda self, segment_paths, facecam, beat_trim_ranges=None, peak_offset=None: {
+            "kind": "multi_beat"
+        },
+    )
+    monkeypatch.setattr(
+        hooks_mod.HookTitleOverlay,
+        "add_hook",
+        lambda self, video_clip, hook_title, context_badge="": video_clip,
+    )
+
+    def _fake_export(self: Any, **kwargs: Any) -> Path:
+        out_path = Path(kwargs["output_path"])
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_bytes(b"rendered-mp4")
+        return out_path
+
+    monkeypatch.setattr(exporter_mod.Exporter, "export", _fake_export)
     return audio_file
 
 

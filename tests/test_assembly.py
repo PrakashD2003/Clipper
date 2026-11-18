@@ -1,10 +1,12 @@
-"""Tests for Phase 4 video assembly modules (Package 4.3: ASS captions & chat ticker)."""
+"""Tests for Phase 4 video assembly & output modules (Packages 4.3 & 4.6)."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import shutil
 import subprocess
-from unittest.mock import patch
+from typing import Any
+from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
@@ -17,9 +19,13 @@ from streamclipper.assembly.captions import (
     _hex_to_ass_bgr,
     _sec_to_ass_time,
 )
-from streamclipper.assembly.composer import remap_timeline_for_beats
+from streamclipper.assembly.composer import VideoComposer, remap_timeline_for_beats
+from streamclipper.assembly.hooks import HookTitleOverlay
 from streamclipper.config import Config, HardwareProfile, detect_hardware_profile
-from streamclipper.models import WordTimestamp
+from streamclipper.models import ClipMetadata, Highlight, WordTimestamp
+from streamclipper.output.exporter import Exporter, _close_clip_handles
+from streamclipper.output.organizer import FileOrganizer
+from streamclipper.pipeline import Pipeline
 
 
 def _make_config(
@@ -800,3 +806,781 @@ class TestRealFfmpegLibassIntegration:
         subprocess.run(cmd, cwd=str(ass_path.resolve().parent), check=True, capture_output=True)
         assert out_video.is_file()
         assert out_video.stat().st_size > 1000
+
+
+# ---------------------------------------------------------------------------
+# Package 4.6 — FileOrganizer unit tests
+# ---------------------------------------------------------------------------
+
+
+def _sample_clip_metadata(**overrides: Any) -> ClipMetadata:
+    base: dict[str, Any] = {
+        "hook_title": "INSANE ROOFTOP ESCAPE!",
+        "caption": "TimTheTatman barely survives a 5-star chase in GTA 6!",
+        "hashtags": ["GTA6", "TimTheTatman", "Gaming"],
+        "streamer": "TimTheTatman",
+        "game": "GTA 6",
+        "source_url": "https://youtube.com/watch?v=gta6_test",
+        "clip_start": 100.0,
+        "clip_end": 142.5,
+        "highlight_score": 9.3,
+        "moment_type": "clutch",
+        "narration_intro": "Five stars on his tail and zero exits left.",
+        "narration_outro": "Somehow he clears six cop cars without a scratch.",
+        "context_badge": "Clutch Escape",
+        "transformation_mode": "story",
+    }
+    base.update(overrides)
+    return ClipMetadata(**base)
+
+
+class TestFileOrganizer:
+    @pytest.mark.parametrize(
+        ("raw", "fallback", "expected"),
+        [
+            ("GTA 6", "unknown", "GTA 6"),
+            ('GTA: 6 / "Vice" *City?<>|', "unknown", "GTA 6 Vice City"),
+            ("  ..TimTheTatman..  ", "unknown", "TimTheTatman"),
+            ("foo\\bar:baz", "unknown", "foobarbaz"),
+            ("   ...   ", "UnknownGame", "UnknownGame"),
+            ('<>:"/\\|?*', "fallback_name", "fallback_name"),
+            ("", "unknown", "unknown"),
+        ],
+    )
+    def test_sanitize_name_strips_forbidden_chars_and_dots(
+        self, raw: str, fallback: str, expected: str
+    ) -> None:
+        assert FileOrganizer._sanitize_name(raw, fallback=fallback) == expected
+
+    def test_get_clip_path_default_structure_and_sanitization(self, tmp_path: Path) -> None:
+        cfg = _make_config(
+            tmp_path,
+            overrides={"general": {"output_dir": str(tmp_path / "out")}},
+        )
+        organizer = FileOrganizer(cfg)
+
+        clip_path = organizer.get_clip_path(
+            game='GTA: 6 / "Vice"?',
+            streamer="  ..Tim*The|Tatman.. ",
+            index=3,
+            date_str="2026-11-18",
+        )
+        expected = tmp_path / "out" / "GTA 6 Vice" / "TimTheTatman" / "2026-11-18" / "clip_03.mp4"
+        assert clip_path == expected
+        assert clip_path.parent.is_dir()
+
+    def test_get_clip_path_custom_templates_and_traversal_protection(self, tmp_path: Path) -> None:
+        cfg = _make_config(
+            tmp_path,
+            overrides={
+                "general": {"output_dir": str(tmp_path / "out")},
+                "output": {
+                    "structure": "{streamer}/{game}",
+                    "filename_template": "short_{index:03d}",
+                },
+            },
+        )
+        organizer = FileOrganizer(cfg)
+        clip_path = organizer.get_clip_path("GTA 6", "KaiCenat", 7, date_str="2026-11-18")
+        assert clip_path == tmp_path / "out" / "KaiCenat" / "GTA 6" / "short_007.mp4"
+
+        # Path traversal & malformed templates must stay strictly inside output_dir
+        bad_cfg = _make_config(
+            tmp_path,
+            overrides={
+                "general": {"output_dir": str(tmp_path / "safe_out")},
+                "output": {
+                    "structure": "../../{bad_key}/../{game}",
+                    "filename_template": "../../evil_{missing}",
+                },
+            },
+        )
+        safe_org = FileOrganizer(bad_cfg)
+        safe_path = safe_org.get_clip_path("GTA 6", "Streamer", 1, date_str="2026-11-18")
+        assert (tmp_path / "safe_out").resolve() in safe_path.resolve().parents
+        assert safe_path.name == "clip_01.mp4"
+
+    def test_save_clip_writes_metadata_json_with_ypp_fields_and_transcript(
+        self, tmp_path: Path
+    ) -> None:
+        cfg = _make_config(
+            tmp_path,
+            overrides={"general": {"output_dir": str(tmp_path / "out")}},
+        )
+        organizer = FileOrganizer(cfg)
+        video_path = organizer.get_clip_path("GTA 6", "TimTheTatman", 1, date_str="2026-11-18")
+        video_path.write_bytes(b"fake-mp4-bytes")
+
+        meta = _sample_clip_metadata()
+        result = organizer.save_clip(
+            video_path=video_path,
+            metadata=meta,
+            transcript_text="WATCH THIS JUMP BRO!",
+        )
+
+        assert result.video_path == video_path
+        assert result.metadata_path == video_path.with_suffix(".json")
+        assert result.metadata_path is not None and result.metadata_path.is_file()
+        assert result.duration_seconds == pytest.approx(42.5)
+
+        saved_json = json.loads(result.metadata_path.read_text(encoding="utf-8"))
+        assert saved_json["hook_title"] == "INSANE ROOFTOP ESCAPE!"
+        assert saved_json["moment_type"] == "clutch"
+        assert saved_json["narration_intro"] == "Five stars on his tail and zero exits left."
+        assert saved_json["narration_outro"] == "Somehow he clears six cop cars without a scratch."
+        assert saved_json["context_badge"] == "Clutch Escape"
+        assert saved_json["transformation_mode"] == "story"
+        assert saved_json["hashtags"] == ["GTA6", "TimTheTatman", "Gaming"]
+
+        transcript_path = video_path.with_name("clip_01_transcript.txt")
+        assert transcript_path.is_file()
+        assert transcript_path.read_text(encoding="utf-8") == "WATCH THIS JUMP BRO!"
+
+    def test_save_clip_respects_disabled_json_and_transcript_flags(self, tmp_path: Path) -> None:
+        cfg = _make_config(
+            tmp_path,
+            overrides={
+                "general": {"output_dir": str(tmp_path / "out")},
+                "output": {
+                    "save_metadata_json": False,
+                    "save_transcript_txt": False,
+                },
+            },
+        )
+        organizer = FileOrganizer(cfg)
+        video_path = organizer.get_clip_path("GTA 6", "Tim", 2, date_str="2026-11-18")
+        video_path.write_bytes(b"mp4")
+
+        result = organizer.save_clip(video_path, _sample_clip_metadata(), transcript_text="hello")
+        assert result.metadata_path is None
+        assert not video_path.with_suffix(".json").exists()
+        assert not video_path.with_name("clip_02_transcript.txt").exists()
+
+
+# ---------------------------------------------------------------------------
+# Package 4.6 — Exporter unit tests (encode params, ducking, ASS, handle cleanup)
+# ---------------------------------------------------------------------------
+
+
+class _TrackedHandle:
+    """Fake MoviePy VideoFileClip handle recording close order."""
+
+    def __init__(self, name: str, events: list[str]) -> None:
+        self.name = name
+        self.events = events
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+        self.events.append(f"close:{self.name}")
+
+
+class _FakeCompositeClip:
+    """Fake MoviePy CompositeVideoClip capturing write_videofile kwargs and handle cleanup order."""
+
+    def __init__(
+        self,
+        events: list[str],
+        *,
+        duration: float = 12.0,
+        has_audio: bool = True,
+        source_clips: list[_TrackedHandle] | None = None,
+        write_error: Exception | None = None,
+    ) -> None:
+        self.events = events
+        self.duration = duration
+        self.audio = object() if has_audio else None
+        self.closed = False
+        self.write_calls: list[tuple[str, dict[str, Any]]] = []
+        self._write_error = write_error
+        self._source_clips = source_clips or []
+        self._source_clip = self._source_clips[0] if self._source_clips else None
+
+    def write_videofile(self, filename: str, **kwargs: Any) -> None:
+        self.events.append("write_videofile")
+        self.write_calls.append((filename, kwargs))
+        if self._write_error is not None:
+            raise self._write_error
+        Path(filename).write_bytes(b"intermediate-mp4")
+
+    def close(self) -> None:
+        self.closed = True
+        self.events.append("close:composite")
+
+
+class TestExporter:
+    def test_export_ultrafast_crf18_narrator_ducking_ass_burn_and_handle_cleanup_order(
+        self, tmp_path: Path
+    ) -> None:
+        cfg = _make_config(
+            tmp_path,
+            overrides={
+                "general": {"temp_dir": str(tmp_path / "temp")},
+                "video": {"fps": 30, "crf": 21, "audio_codec": "aac"},
+            },
+            video_codec="h264_nvenc",
+        )
+        exporter = Exporter(cfg)
+
+        events: list[str] = []
+        src1 = _TrackedHandle("src1", events)
+        src2 = _TrackedHandle("src2", events)
+        fake_clip = _FakeCompositeClip(events, duration=15.0, source_clips=[src1, src2])
+
+        user_intro = tmp_path / "human_intro.wav"
+        user_intro.write_bytes(b"RIFF....WAVE")
+        output_path = tmp_path / "out" / "clip_01.mp4"
+
+        def fake_prepare(
+            *,
+            narration_intro: str,
+            narration_outro: str,
+            voice_intro_path: Path | None,
+            voice_outro_path: Path | None,
+            temp_dir: Path | None,
+        ) -> tuple[Path | None, Path | None]:
+            events.append("narrator:prepare")
+            assert fake_clip.closed and src1.closed and src2.closed
+            assert temp_dir is not None and temp_dir.is_dir()
+            outro_synth = temp_dir / "narrator_outro.wav"
+            outro_synth.write_bytes(b"synth-outro")
+            return voice_intro_path, outro_synth
+
+        def fake_mix(
+            *,
+            input_video: Path,
+            output_video: Path,
+            intro_wav: Path | None,
+            outro_wav: Path | None,
+            clip_duration: float,
+        ) -> Path:
+            events.append("narrator:mix")
+            assert input_video.is_file()
+            assert intro_wav == user_intro
+            assert outro_wav is not None and outro_wav.is_file()
+            assert clip_duration == pytest.approx(15.0)
+            output_video.write_bytes(b"mixed-mp4")
+            return output_video
+
+        burn_calls: list[dict[str, Any]] = []
+        gen_ass_calls: list[dict[str, Any]] = []
+
+        def fake_gen_ass(
+            *,
+            words: list[WordTimestamp],
+            clip_start_offset: float,
+            ass_path: Path,
+            chat_burst: list[dict[str, Any]] | None,
+        ) -> Path:
+            events.append("captions:generate_ass")
+            gen_ass_calls.append(
+                {
+                    "words": words,
+                    "clip_start_offset": clip_start_offset,
+                    "ass_path": ass_path,
+                    "chat_burst": chat_burst,
+                }
+            )
+            ass_path.write_text("[Script Info]\n", encoding="utf-8")
+            return ass_path
+
+        def fake_burn(
+            *,
+            input_video: Path,
+            ass_path: Path,
+            output_video: Path,
+            crf: int,
+            codec: str,
+        ) -> Path:
+            events.append("captions:burn")
+            burn_calls.append(
+                {
+                    "input_video": input_video,
+                    "ass_path": ass_path,
+                    "output_video": output_video,
+                    "crf": crf,
+                    "codec": codec,
+                }
+            )
+            output_video.write_bytes(b"final-burned-mp4")
+            return output_video
+
+        progress_steps: list[float] = []
+        words = [WordTimestamp("WHOA", 10.0, 10.5)]
+        chat_burst = [{"author": "Fan", "message": "INSANE!", "offset_seconds": 10.2}]
+
+        with (
+            patch.object(exporter.narrator, "prepare_narration_tracks", side_effect=fake_prepare),
+            patch.object(exporter.narrator, "mix_narration_with_ducking", side_effect=fake_mix),
+            patch.object(exporter.caption_burner, "generate_ass", side_effect=fake_gen_ass),
+            patch.object(exporter.caption_burner, "burn_captions", side_effect=fake_burn),
+        ):
+            result = exporter.export(
+                clip=fake_clip,  # type: ignore[arg-type]
+                words=words,
+                clip_start_offset=10.0,
+                output_path=output_path,
+                progress_callback=progress_steps.append,
+                chat_burst=chat_burst,
+                narration_intro="Watch this!",
+                narration_outro="Unbelievable ending!",
+                voice_intro_path=user_intro,
+                mode="narrative",
+            )
+
+        assert result == output_path
+        assert output_path.read_bytes() == b"final-burned-mp4"
+
+        # Verify ultrafast CRF 18 intermediate render kwargs
+        assert len(fake_clip.write_calls) == 1
+        _, w_kwargs = fake_clip.write_calls[0]
+        assert w_kwargs["codec"] == "libx264"
+        assert w_kwargs["preset"] == "ultrafast"
+        assert w_kwargs["ffmpeg_params"] == ["-crf", "18"]
+        assert w_kwargs["fps"] == 30
+        assert w_kwargs["audio"] is True
+        assert w_kwargs["audio_codec"] == "aac"
+
+        # Verify ALL MoviePy handles were closed BEFORE narrator mix & ASS burn-in
+        close_indices = [events.index(e) for e in ("close:composite", "close:src1", "close:src2")]
+        assert max(close_indices) < events.index("narrator:prepare")
+        assert events.index("narrator:prepare") < events.index("narrator:mix")
+        assert events.index("narrator:mix") < events.index("captions:generate_ass")
+        assert events.index("captions:generate_ass") < events.index("captions:burn")
+
+        # Verify ASS burn-in received mixed video, chat_burst, configured crf & resolved codec
+        assert gen_ass_calls[0]["chat_burst"] == chat_burst
+        assert burn_calls[0]["input_video"].name == "intermediate_mixed.mp4"
+        assert burn_calls[0]["crf"] == 21
+        assert burn_calls[0]["codec"] == "h264_nvenc"
+
+        # Verify intermediate work_dir was completely cleaned up while user voice file was preserved
+        assert list((tmp_path / "temp").glob("streamclipper_export_*")) == []
+        assert user_intro.is_file()
+        assert progress_steps == [0.0, 0.5, 0.75, 1.0]
+
+    def test_export_closes_all_handles_and_cleans_temp_on_write_error(
+        self, tmp_path: Path
+    ) -> None:
+        cfg = _make_config(
+            tmp_path,
+            overrides={"general": {"temp_dir": str(tmp_path / "temp")}},
+        )
+        exporter = Exporter(cfg)
+        events: list[str] = []
+        src1 = _TrackedHandle("src1", events)
+        src2 = _TrackedHandle("src2", events)
+        failing_clip = _FakeCompositeClip(
+            events,
+            source_clips=[src1, src2],
+            write_error=RuntimeError("simulated render crash"),
+        )
+
+        with pytest.raises(RuntimeError, match="simulated render crash"):
+            exporter.export(
+                clip=failing_clip,  # type: ignore[arg-type]
+                words=[],
+                clip_start_offset=0.0,
+                output_path=tmp_path / "out" / "failed.mp4",
+            )
+
+        assert failing_clip.closed
+        assert src1.closed
+        assert src2.closed
+        assert list((tmp_path / "temp").glob("streamclipper_export_*")) == []
+
+    def test_export_raw_mode_skips_narrator_and_chat_ticker(self, tmp_path: Path) -> None:
+        cfg = _make_config(
+            tmp_path,
+            overrides={"general": {"temp_dir": str(tmp_path / "temp")}},
+        )
+        exporter = Exporter(cfg)
+        events: list[str] = []
+        fake_clip = _FakeCompositeClip(events)
+
+        with (
+            patch.object(exporter.narrator, "prepare_narration_tracks") as mock_prep,
+            patch.object(exporter.narrator, "mix_narration_with_ducking") as mock_mix,
+            patch.object(exporter.caption_burner, "generate_ass") as mock_ass,
+            patch.object(
+                exporter.caption_burner,
+                "burn_captions",
+                side_effect=lambda **kw: kw["output_video"],
+            ) as mock_burn,
+        ):
+            exporter.export(
+                clip=fake_clip,  # type: ignore[arg-type]
+                words=[WordTimestamp("RAW", 0.0, 0.5)],
+                clip_start_offset=0.0,
+                output_path=tmp_path / "raw_clip.mp4",
+                chat_burst=[{"author": "U", "message": "SHOULD NOT BURN", "offset_seconds": 0.1}],
+                narration_intro="Should be skipped",
+                narration_outro="Also skipped",
+                mode="raw",
+            )
+
+        mock_prep.assert_not_called()
+        mock_mix.assert_not_called()
+        mock_ass.assert_called_once()
+        assert mock_ass.call_args.kwargs["chat_burst"] is None
+        mock_burn.assert_called_once()
+
+    def test_export_explicit_mode_overrides_disabled_config_and_restores_narrator(
+        self, tmp_path: Path
+    ) -> None:
+        cfg = _make_config(
+            tmp_path,
+            overrides={
+                "general": {"temp_dir": str(tmp_path / "temp")},
+                "transformation": {"enabled": False, "mode": "raw"},
+            },
+        )
+        exporter = Exporter(cfg)
+        assert exporter.narrator.enabled is False
+        assert exporter.narrator.mode == "raw"
+
+        observed_state: list[tuple[bool, str]] = []
+
+        def fake_prep(**kw: Any) -> tuple[Path | None, Path | None]:
+            observed_state.append((exporter.narrator.enabled, exporter.narrator.mode))
+            wav = Path(kw["temp_dir"]) / "intro.wav"
+            wav.write_bytes(b"wav")
+            return wav, None
+
+        def fake_mix(**kw: Any) -> Path:
+            Path(kw["output_video"]).write_bytes(b"mixed")
+            return Path(kw["output_video"])
+
+        events: list[str] = []
+        fake_clip = _FakeCompositeClip(events)
+
+        with (
+            patch.object(exporter.narrator, "prepare_narration_tracks", side_effect=fake_prep),
+            patch.object(exporter.narrator, "mix_narration_with_ducking", side_effect=fake_mix),
+            patch.object(
+                exporter,
+                "_finalize_without_captions",
+                side_effect=lambda inp, out: out,
+            ),
+        ):
+            exporter.export(
+                clip=fake_clip,  # type: ignore[arg-type]
+                words=[],
+                clip_start_offset=0.0,
+                output_path=tmp_path / "override.mp4",
+                narration_intro="Explicit override intro",
+                mode="narrative",
+            )
+
+        assert observed_state == [(True, "narrative")]
+        # Persistent narrator settings restored cleanly in finally
+        assert exporter.narrator.enabled is False
+        assert exporter.narrator.mode == "raw"
+
+    def test_export_chat_burst_only_still_burns_ass_when_enabled(self, tmp_path: Path) -> None:
+        cfg = _make_config(
+            tmp_path,
+            overrides={"general": {"temp_dir": str(tmp_path / "temp")}},
+        )
+        exporter = Exporter(cfg)
+        fake_clip = _FakeCompositeClip([])
+        chat_burst = [{"author": "Viewer", "message": "W CLIP", "offset_seconds": 2.0}]
+
+        with (
+            patch.object(exporter.caption_burner, "generate_ass") as mock_ass,
+            patch.object(
+                exporter.caption_burner,
+                "burn_captions",
+                side_effect=lambda **kw: kw["output_video"],
+            ) as mock_burn,
+            patch.object(exporter, "_finalize_without_captions") as mock_fin,
+        ):
+            exporter.export(
+                clip=fake_clip,  # type: ignore[arg-type]
+                words=[],
+                clip_start_offset=0.0,
+                output_path=tmp_path / "chat_only.mp4",
+                chat_burst=chat_burst,
+                mode="narrative",
+            )
+
+        mock_ass.assert_called_once()
+        assert mock_ass.call_args.kwargs["chat_burst"] == chat_burst
+        mock_burn.assert_called_once()
+        mock_fin.assert_not_called()
+
+    def test_export_without_captions_finalizes_nvenc_with_libx264_fallback(
+        self, tmp_path: Path
+    ) -> None:
+        cfg = _make_config(
+            tmp_path,
+            overrides={
+                "general": {"temp_dir": str(tmp_path / "temp")},
+                "video": {"crf": 22},
+            },
+            video_codec="h264_nvenc",
+        )
+        exporter = Exporter(cfg)
+        fake_clip = _FakeCompositeClip([])
+        out_path = tmp_path / "out" / "plain.mp4"
+
+        side_effects = [
+            subprocess.CalledProcessError(returncode=1, cmd=["ffmpeg"], stderr=b"nvenc fail"),
+            subprocess.CompletedProcess(args=["ffmpeg"], returncode=0),
+        ]
+        with patch("streamclipper.output.exporter.subprocess.run", side_effect=side_effects) as mock_run:
+            result = exporter.export(
+                clip=fake_clip,  # type: ignore[arg-type]
+                words=[],
+                clip_start_offset=0.0,
+                output_path=out_path,
+                mode="raw",
+            )
+
+        assert result == out_path
+        assert mock_run.call_count == 2
+        first_cmd = mock_run.call_args_list[0].args[0]
+        second_cmd = mock_run.call_args_list[1].args[0]
+        assert "h264_nvenc" in first_cmd and "-cq" in first_cmd
+        assert "libx264" in second_cmd and "-crf" in second_cmd
+        assert "-c:a" in second_cmd and second_cmd[second_cmd.index("-c:a") + 1] == "copy"
+
+    def test_close_clip_handles_deduplicates_nested_sources(self) -> None:
+        events: list[str] = []
+        shared_src = _TrackedHandle("shared", events)
+        mid = _FakeCompositeClip(events, source_clips=[shared_src])
+        outer = MagicMock()
+        outer._source_clip = shared_src
+        outer._source_clips = [shared_src, mid]
+        outer.close.side_effect = lambda: events.append("close:outer")
+
+        _close_clip_handles(outer)
+        assert events.count("close:shared") == 1
+        assert events.count("close:composite") == 1
+        assert events.count("close:outer") == 1
+
+
+# ---------------------------------------------------------------------------
+# Package 4.6 — Real FFmpeg + MoviePy End-to-End Windows Integration Tests
+# ---------------------------------------------------------------------------
+
+
+def _synth_test_video(path: Path, *, duration: float = 2.0, freq: int = 440, color: str = "navy") -> None:
+    """Create a tiny real 16:9 H.264 + AAC MP4 for end-to-end integration tests."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c={color}:s=320x180:d={duration}:r=15",
+            "-f",
+            "lavfi",
+            "-i",
+            f"sine=frequency={freq}:duration={duration}",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-ar",
+            "48000",
+            "-ac",
+            "2",
+            "-shortest",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+
+def _synth_test_wav(path: Path, *, duration: float = 0.6, freq: int = 660) -> None:
+    """Create a tiny real 24kHz mono WAV (matching Kokoro output format) for ducking tests."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"sine=frequency={freq}:sample_rate=24000:duration={duration}",
+            "-ac",
+            "1",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not available on PATH")
+class TestPackage46RealEndToEndIntegration:
+    def test_real_e2e_compose_hook_narrator_export_and_organize(self, tmp_path: Path) -> None:
+        """Full Phase 4 chain on real media: Composer -> Hook -> Exporter (ducking + ASS) -> FileOrganizer."""
+        seg_mp4 = tmp_path / "segments" / "clip_seg.mp4"
+        intro_wav = tmp_path / "human_intro.wav"
+        _synth_test_video(seg_mp4, duration=2.2, freq=440, color="navy")
+        _synth_test_wav(intro_wav, duration=0.6, freq=700)
+
+        cfg = _make_config(
+            tmp_path,
+            overrides={
+                "general": {
+                    "output_dir": str(tmp_path / "output"),
+                    "temp_dir": str(tmp_path / "temp"),
+                },
+                "video": {"resolution": [180, 320], "fps": 15, "crf": 28},
+                "hook_title": {"duration_seconds": 1.2, "font_size": 16},
+                "captions": {"font_size": 20},
+                "transformation": {"enabled": True, "mode": "narrative", "tts_engine": "none"},
+            },
+            video_codec="libx264",
+        )
+
+        composed = VideoComposer(cfg).compose(seg_mp4, facecam=None, peak_offset=1.0)
+        composed = HookTitleOverlay(cfg).add_hook(
+            composed,
+            hook_title="WILD MOMENT",
+            context_badge="Clutch Escape",
+        )
+
+        organizer = FileOrganizer(cfg)
+        out_mp4 = organizer.get_clip_path("GTA 6", "TimTheTatman", 1, date_str="2026-11-18")
+
+        final_mp4 = Exporter(cfg).export(
+            clip=composed,
+            words=[WordTimestamp("INSANE", 10.2, 10.9), WordTimestamp("CLUTCH", 11.0, 11.8)],
+            clip_start_offset=10.0,
+            output_path=out_mp4,
+            chat_burst=[{"author": "Viewer1", "message": "NO WAY!!", "offset_seconds": 10.5}],
+            voice_intro_path=intro_wav,
+            mode="narrative",
+        )
+
+        clip_result = organizer.save_clip(
+            video_path=final_mp4,
+            metadata=_sample_clip_metadata(transformation_mode="narrative"),
+            transcript_text="INSANE CLUTCH",
+        )
+
+        assert final_mp4.is_file() and final_mp4.stat().st_size > 1000
+        assert clip_result.metadata_path is not None and clip_result.metadata_path.is_file()
+        assert final_mp4.with_name("clip_01_transcript.txt").is_file()
+        assert clip_result.duration_seconds > 1.5
+        # Zero Windows file-lock leftovers & original human mic WAV preserved
+        assert list((tmp_path / "temp").glob("streamclipper_export_*")) == []
+        assert intro_wav.is_file()
+        # Source segment can be unlinked on Windows (proving _source_clip handle was closed!)
+        seg_mp4.unlink()
+        assert not seg_mp4.exists()
+
+    def test_real_e2e_pipeline_assemble_highlight_single_and_multi_beat(
+        self, tmp_path: Path
+    ) -> None:
+        """Verify Pipeline._assemble_highlight wires all Phase 4 modules end-to-end with zero mocks."""
+        seg1 = tmp_path / "segments" / "beat1.mp4"
+        seg2 = tmp_path / "segments" / "beat2.mp4"
+        intro_wav = tmp_path / "mic_intro.wav"
+        _synth_test_video(seg1, duration=2.0, freq=440, color="darkgreen")
+        _synth_test_video(seg2, duration=2.0, freq=520, color="darkred")
+        _synth_test_wav(intro_wav, duration=0.5, freq=680)
+
+        cfg = _make_config(
+            tmp_path,
+            overrides={
+                "general": {
+                    "output_dir": str(tmp_path / "output"),
+                    "temp_dir": str(tmp_path / "temp"),
+                },
+                "video": {"resolution": [180, 320], "fps": 15, "crf": 28},
+                "hook_title": {"duration_seconds": 1.0, "font_size": 16},
+                "captions": {"font_size": 20},
+                "transformation": {"enabled": True, "mode": "auto", "tts_engine": "none"},
+            },
+            video_codec="libx264",
+        )
+        pipeline = Pipeline(cfg)
+
+        # 1. Single-cut narrative mode
+        h_single = Highlight(
+            start=10.0,
+            end=12.0,
+            score=9.0,
+            title="SINGLE CUT TEST",
+            reason="Great moment",
+            transcript_chunk="WATCH THIS",
+            word_timestamps=[WordTimestamp("WATCH", 10.2, 10.8), WordTimestamp("THIS", 10.9, 11.5)],
+            moment_type="funny",
+            context_badge="Instant Karma",
+            peak_time=11.0,
+            chat_burst=[{"author": "Chat1", "message": "LMAO", "offset_seconds": 10.5}],
+        )
+        res_single = pipeline._assemble_highlight(
+            highlight=h_single,
+            metadata=_sample_clip_metadata(
+                hook_title="SINGLE CUT TEST",
+                clip_start=10.0,
+                clip_end=12.0,
+                transformation_mode="narrative",
+            ),
+            segment_paths=[seg1],
+            clip_index=1,
+            mode="narrative",
+            voice_intro_path=intro_wav,
+            voice_outro_path=None,
+            buffer_seconds=0.0,
+        )
+        assert res_single.video_path.is_file() and res_single.video_path.stat().st_size > 1000
+        assert res_single.metadata_path is not None and res_single.metadata_path.is_file()
+
+        # 2. Multi-beat story mode (2 segments stitched + remapped words/chat/peak)
+        beats = [
+            {"start": 100.0, "end": 101.5, "label": "Setup"},
+            {"start": 120.0, "end": 121.5, "label": "Payoff"},
+        ]
+        h_story = Highlight(
+            start=100.0,
+            end=121.5,
+            score=9.4,
+            title="STORY MODE TEST",
+            reason="Setup and payoff",
+            transcript_chunk="WAIT FOR IT BOOM",
+            word_timestamps=[
+                WordTimestamp("WAIT", 100.2, 100.8),
+                WordTimestamp("DEAD_AIR", 110.0, 111.0),
+                WordTimestamp("BOOM", 120.2, 121.0),
+            ],
+            moment_type="clutch",
+            context_badge="Clutch Escape",
+            peak_time=120.6,
+            chat_burst=[{"author": "Chat2", "message": "POGGERS", "offset_seconds": 120.5}],
+            sub_clips=beats,
+        )
+        res_story = pipeline._assemble_highlight(
+            highlight=h_story,
+            metadata=_sample_clip_metadata(
+                hook_title="STORY MODE TEST",
+                clip_start=100.0,
+                clip_end=121.5,
+                transformation_mode="story",
+            ),
+            segment_paths=[seg1, seg2],
+            clip_index=2,
+            mode="story",
+            voice_intro_path=intro_wav,
+            voice_outro_path=None,
+            valid_beats=beats,
+            buffer_seconds=0.25,
+        )
+        assert res_story.video_path.is_file() and res_story.video_path.stat().st_size > 1000
+        assert res_story.metadata_path is not None and res_story.metadata_path.is_file()
+        assert res_story.duration_seconds == pytest.approx(3.0, abs=0.4)
+        # Verify Windows handles for BOTH beat segments were cleanly closed
+        seg1.unlink()
+        seg2.unlink()
+        assert not seg1.exists() and not seg2.exists()
