@@ -1,0 +1,98 @@
+# StreamClipper Default Configuration
+# Copy this to config.yaml and customize.
+# Fields set to "auto" are resolved dynamically at runtime via HardwareProfile
+# based on detected GPU VRAM, CUDA Compute Capability (Tensor Cores), and FFmpeg NVENC support.
+
+general:
+  output_dir: "./output"
+  temp_dir: "./temp"
+  cache_dir: "./.cache"
+  max_concurrent_streams: 2
+  log_level: "INFO"
+
+discovery:
+  platform: "youtube"
+  default_game: "GTA 6"
+  game_keywords: ["GTA 6", "Grand Theft Auto 6", "GTA VI"]
+  min_viewers: 1000
+  max_streams: 10
+  min_duration_hours: 1  # skip short videos
+
+transcription:
+  engine: "whisperx"      # whisperx | faster-whisper
+  model_size: "auto"      # auto | tiny | base | small | medium | large-v2
+  device: "auto"          # auto | cpu | cuda
+  compute_type: "auto"    # auto | float16 | int8_float16 | int8
+  language: "en"
+  batch_size: "auto"      # auto | integer (e.g. 4, 8, 16)
+
+analysis:
+  chunk_minutes: 12
+  min_clip_seconds: 30
+  max_clip_seconds: 90
+  max_clips_per_stream: 5
+  min_highlight_score: 7.0
+
+  # Signal weights (must sum to 1.0)
+  weights:
+    loudness: 0.25
+    chat_velocity: 0.25
+    llm_score: 0.50
+
+  loudness:
+    threshold_std: 2.5     # std deviations above mean
+    window_seconds: 2      # RMS frame window
+    merge_gap_seconds: 5   # merge spikes within N seconds
+
+  chat:
+    window_seconds: 10     # bin size for counting messages
+    prominence_factor: 3.0 # std deviations for spike
+    min_messages: 50       # skip chat analysis if fewer total messages
+
+llm:
+  provider: "ollama"       # ollama (standalone mode)
+  model: "auto"            # auto | qwen3:8b | qwen3:4b | any Ollama model
+  base_url: "http://localhost:11434"
+  temperature: 0.3
+  timeout_seconds: 120
+
+video:
+  format: "mp4"
+  resolution: [1080, 1920]  # width x height (9:16)
+  fps: 30
+  codec: "auto"             # auto (h264_nvenc if CUDA+NVENC else libx264) | h264_nvenc | libx264
+  audio_codec: "aac"
+  crf: 23                   # quality (libx264 -crf / h264_nvenc -cq, lower = better, 18-28 range)
+
+captions:
+  style: "hormozi"           # hormozi | single_word | sentence
+  words_per_group: 4         # words visible at once (hormozi style)
+  font: "Arial"
+  font_size: 72
+  color: "white"
+  highlight_color: "#FFD700"  # gold for active word (converted dynamically to ASS BGR &H00D7FF&)
+  stroke_color: "black"
+  stroke_width: 4
+  position_y_ratio: 0.75     # 75% down the screen
+
+hook_title:
+  enabled: true
+  duration_seconds: 4
+  font: "Arial-Bold"
+  font_size: 50
+  color: "white"
+  stroke_color: "black"
+  stroke_width: 3
+  position: "top"            # top | center
+  fade_in: true
+
+metadata:
+  hashtag_count: 15
+  include_streamer_tag: true
+  include_game_tag: true
+
+output:
+  structure: "{game}/{streamer}/{date}"  # folder template
+  filename_template: "clip_{index:02d}"
+  save_metadata_json: true
+  save_transcript_txt: true
