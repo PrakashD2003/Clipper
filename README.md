@@ -56,7 +56,7 @@ Designed around the [YouTube Channel Monetization Policies](https://support.goog
 | **`auto`** *(default)* | Resolves per highlight to **`story`** when validated multi-beat `sub_clips` exist, or **`narrative`** for clean single-cut moments. |
 | **`narrative`** | Single continuous cut with full YPP commentary intro/outro, adaptive context badge, spike punch-in zoom, Hormozi captions, and live chat ticker (never jump-cuts `sub_clips`). |
 | **`story`** | Multi-beat jump-cut stitching (*Setup → Escalation → Payoff*, 2–3 beats removing ≥5 s of dead air) when validated `sub_clips` exist (falling back cleanly to a single cut), plus full YPP commentary and overlays. |
-| **`raw`** | Uncut single clip with captions only (skips narrative LLM commentary, voiceover, context badge, punch-in zoom, and live chat ticker). |
+| **`raw`** | Uncut single clip with captions only (skips narrative LLM commentary, voiceover, context badge, punch-in zoom, multi-beat cuts, and live chat ticker; `hook_title` still honors `hook_title.enabled`). |
 
 - **Adaptive `moment_type` Commentary**: Classifies every highlight into `funny`, `fail`, `graphics_detail`, `hype`, `clutch`, `chat_chaos`, `lore_secret`, or `analysis` so the generated `narration_intro`, `narration_outro`, and `context_badge` match the clip's natural vibe instead of forcing dry analysis onto comedic or hype moments.
 - **Conditional Multi-Beat Jump-Cut Story Mode (`sub_clips`)**: Automatically remaps word-level timestamps, live chat bursts, and spike zoom offsets onto the stitched beat timeline via `remap_timeline_for_beats()`.
@@ -121,7 +121,7 @@ ffmpeg -hide_banner -filters | Select-String " ass "
 
 **Linux (Ubuntu / Debian):**
 ```bash
-sudo apt update && sudo apt install -y ffmpeg libsndfile1 libgl1 python3.12 python3.12-venv
+sudo apt update && sudo apt install -y ffmpeg libsndfile1 libgl1 libglib2.0-0 python3 python3-venv
 ffmpeg -version
 ffmpeg -hide_banner -filters | grep " ass "
 ```
@@ -191,14 +191,11 @@ streamclipper clip "https://www.youtube.com/watch?v=VIDEO_ID" --mode narrative
 # Multi-beat story mode (stitches Setup -> Escalation -> Payoff beats + commentary)
 streamclipper clip "https://www.youtube.com/watch?v=VIDEO_ID" --mode story
 
-# Raw mode (uncut clip + Hormozi captions only, no voiceover or narrative overlays)
+# Raw mode (uncut clip + captions, skipping YPP voiceover, badge, zoom, and chat ticker)
 streamclipper clip "https://www.youtube.com/watch?v=VIDEO_ID" --mode raw
 
 # Supply your own recorded human voiceover WAVs for intro and/or outro
-streamclipper clip "https://www.youtube.com/watch?v=VIDEO_ID" \
-  --mode story \
-  --voice-intro ./my_intro.wav \
-  --voice-outro ./my_outro.wav
+streamclipper clip "https://www.youtube.com/watch?v=VIDEO_ID" --mode story --voice-intro ./my_intro.wav --voice-outro ./my_outro.wav
 
 # Ignore cached pipeline stages and re-run from scratch
 streamclipper clip "https://www.youtube.com/watch?v=VIDEO_ID" --mode auto --force
@@ -276,14 +273,11 @@ To narrate clips in a studio voice or your own **ElevenLabs personal voice clone
 If `ELEVENLABS_API_KEY` or `elevenlabs_voice_id` is unset (or an API error occurs), StreamClipper gracefully falls back to the free `auto` chain (`kokoro` → `edge-tts`) so renders never fail.
 
 ### Option 3: Custom Human Microphone WAVs (Highest YPP Authenticity)
-Record your own short intro/outro WAV and pass it directly on the CLI (or via MCP `render_clip`):
+Record your own short intro/outro WAV (or `.m4a`/`.mp3`/`.aac`, probed via `ffprobe` fallback) and pass it directly on the CLI (or via MCP `render_clip`):
 ```bash
-streamclipper clip "https://www.youtube.com/watch?v=VIDEO_ID" \
-  --mode narrative \
-  --voice-intro ./recordings/intro.wav \
-  --voice-outro ./recordings/outro.wav
+streamclipper clip "https://www.youtube.com/watch?v=VIDEO_ID" --mode narrative --voice-intro ./recordings/intro.wav --voice-outro ./recordings/outro.wav
 ```
-Custom WAV paths bypass TTS synthesis for that slot, normalize automatically to `48000 Hz` stereo, and apply the exact same `18%` dynamic stream ducking.
+Custom audio paths bypass TTS synthesis for that slot, normalize automatically to `48000 Hz` stereo, work even on silent video clips (via a synthesized `anullsrc` base track), and apply the exact same `18%` dynamic stream ducking.
 
 To keep visual overlays (hook title, context badge, spike zoom, live chat ticker) without any voiceover audio, set `transformation.tts_engine: "none"`.
 
@@ -350,36 +344,35 @@ Add StreamClipper to your MCP client configuration file:
 }
 ```
 
-**Windows `.venv` Explicit Path (recommended if `.venv\Scripts` is not on global `PATH`):**
+**Windows `.venv` Explicit Path (recommended if `.venv\Scripts` is not on global `PATH` — adjust the path to your local clone):**
 ```json
 {
   "mcpServers": {
     "streamclipper": {
       "command": "D:\\GTA6-Clipper\\.venv\\Scripts\\streamclipper-mcp.exe",
       "args": [],
-      "env": {
-        "ELEVENLABS_API_KEY": ""
-      }
+      "env": {}
     }
   }
 }
 ```
+> *Optional:* If you want ElevenLabs voiceovers in MCP mode without setting a system-wide environment variable, add `"ELEVENLABS_API_KEY": "sk_your_key"` inside `"env"`. Leave `"env": {}` to inherit your existing shell/system environment variables untouched.
 
 ### 3. Exposed MCP Tools (`streamclipper-mcp`)
 
 | Tool Name | Purpose |
 | :--- | :--- |
-| `discover_streams` | Find top recent YouTube streams/VODs for a given game. |
+| `discover_streams` | Find top recent YouTube streams/VODs for a given game (`game`, `max_results`). |
 | `download_stream_audio` | Download 16 kHz mono WAV audio and initialize `StepCache` state. |
 | `transcribe_audio` | Run hardware-aware WhisperX transcription (resolves `StepCache` by `url` or `audio_path`). |
-| `analyze_signals` | Run streamed loudness + `yt-dlp` live chat velocity analysis and persist spikes to cache. |
-| `get_transcript_chunks` | Return timestamped transcript chunks paired with overlapping spikes (`only_with_signals=True` by default, cutting context tokens by 60–80%). |
-| `submit_highlights` | Submit host-LLM highlight selections including `moment_type`, `narration_intro`, `narration_outro`, `context_badge`, and `sub_clips`. |
-| `render_clip` | Render a single highlight into a final 9:16 Short (`mode`: `auto` \| `narrative` \| `story` \| `raw`, plus optional `voice_intro_path` / `voice_outro_path`). |
-| `render_all_selected` | Batch-render all submitted highlights stored in `StepCache` for a stream. |
+| `analyze_signals` | Run streamed loudness + `yt-dlp` live chat velocity analysis and persist spikes to cache (resolves `StepCache` by `url` or `audio_path`). |
+| `get_transcript_chunks` | Return timestamped transcript chunks paired with overlapping spikes (resolves `StepCache` by `url` or `audio_path`; `only_with_signals=True` by default, cutting context tokens by 60–80%). |
+| `submit_highlights` | Submit host-LLM highlight selections including `moment_type`, `narration_intro`, `narration_outro`, `context_badge`, and `sub_clips`, fusing signals and persisting to `StepCache`. |
+| `render_clip` | Render a single highlight into a final 9:16 Short offline without requiring Ollama (`mode`: `auto` \| `narrative` \| `story` \| `raw`, `sub_clips_json`, and optional `voice_intro_path` / `voice_outro_path`). |
+| `render_all_selected` | Batch-render all submitted highlights stored in `StepCache` for a stream (zero-Ollama offline metadata path). |
 | `get_pipeline_status` | Inspect status and progress of all cached pipelines. |
-| `generate_post_metadata` | Generate structured post captions and normalized hashtags offline (`use_ollama=False` by default). |
-| `cleanup_temp` | Remove temporary audio/video files for a stream or all completed pipelines. |
+| `generate_post_metadata` | Generate structured post captions and normalized hashtags offline (`use_ollama=False` by default; set `use_ollama=True` to invoke local Ollama). |
+| `cleanup_temp` | Remove temporary audio/video files bounded within `general.temp_dir` for a specific `url` (or for all `COMPLETE` pipelines when `url` is omitted). |
 
 ---
 
@@ -401,7 +394,7 @@ StreamClipper loads `config.default.yaml` first and deep-merges your optional `c
 | :--- | :--- | :--- |
 | `discovery.platform` | `"youtube"` | Streaming platform (`youtube`). |
 | `discovery.default_game` | `"GTA 6"` | Default game used when `--game` is omitted. |
-| `discovery.game_keywords` | `["GTA 6", "Grand Theft Auto 6", "GTA VI"]` | Search keywords used for discovery and metadata tagging. |
+| `discovery.game_keywords` | `["GTA 6", "Grand Theft Auto 6", "GTA VI"]` | YouTube search query variants used when discovering streams for `discovery.default_game`. |
 | `discovery.min_viewers` | `1000` | Minimum view/viewer threshold for discovered VODs. |
 | `discovery.max_streams` | `10` | Maximum number of streams returned by discovery. |
 | `discovery.min_duration_hours` | `1` | Minimum VOD length in hours (filters out short uploads). |
@@ -413,7 +406,7 @@ StreamClipper loads `config.default.yaml` first and deep-merges your optional `c
 | `transcription.model_size` | `"auto"` | `auto` \| `tiny` \| `base` \| `small` \| `medium` \| `large-v2`. |
 | `transcription.device` | `"auto"` | `auto` \| `cuda` \| `cpu`. |
 | `transcription.compute_type` | `"auto"` | `auto` \| `float16` \| `int8_float16` \| `int8`. |
-| `transcription.language` | `"en"` | ISO language code for transcription and alignment. |
+| `transcription.language` | `"en"` | ISO language code (e.g., `"en"`) or `"auto"` for automatic language detection. |
 | `transcription.batch_size` | `"auto"` | `auto` \| positive integer (e.g., `4`, `8`, `16`). |
 
 ### `analysis`
@@ -460,9 +453,9 @@ StreamClipper loads `config.default.yaml` first and deep-merges your optional `c
 | `captions.words_per_group` | `4` | Words shown simultaneously in `hormozi` style. |
 | `captions.font` | `"Arial"` | ASS font family name. |
 | `captions.font_size` | `72` | ASS font size. |
-| `captions.color` | `"white"` | Base caption text color (named color or `#RRGGBB`). |
-| `captions.highlight_color` | `"#FFD700"` | Active-word highlight color (converted dynamically to ASS BGR). |
-| `captions.stroke_color` | `"black"` | Text outline/stroke color. |
+| `captions.color` | `"white"` | Base caption text color (`white`, `black`, `yellow`, `gold`, `red`, `cyan`, or `#RRGGBB` hex). |
+| `captions.highlight_color` | `"#FFD700"` | Active-word highlight color (`#RRGGBB` hex or supported named color, converted dynamically to ASS BGR). |
+| `captions.stroke_color` | `"black"` | Text outline/stroke color (`white`, `black`, `yellow`, `gold`, `red`, `cyan`, or `#RRGGBB` hex). |
 | `captions.stroke_width` | `4` | Outline thickness in pixels. |
 | `captions.position_y_ratio` | `0.75` | Vertical placement ratio (`0.75` = 75% down from top). |
 
@@ -477,7 +470,7 @@ StreamClipper loads `config.default.yaml` first and deep-merges your optional `c
 | `hook_title.stroke_color` | `"black"` | Hook title outline color. |
 | `hook_title.stroke_width` | `3` | Hook title outline thickness. |
 | `hook_title.position` | `"top"` | Placement: `top` or `center`. |
-| `hook_title.fade_in` | `true` | Apply subtle fade-in/fade-out transition on hook title overlay. |
+| `hook_title.fade_in` | `true` | Apply `CrossFadeIn` transition (up to `0.5 s`) on the hook title banner and adaptive context badge. |
 
 ### `metadata`
 | Key | Default | Description |
@@ -587,6 +580,7 @@ streamclipper/
 │   ├── discovery/                  # YouTube stream discovery
 │   ├── download/                   # 16kHz audio, ±3s video slices, native yt-dlp live chat
 │   ├── analysis/                   # WhisperX transcription, streamed RMS loudness, chat velocity
+│   ├── prompts/                    # Adaptive YPP highlight scoring & metadata prompt templates
 │   ├── scoring/                    # Tri-modal fusion, OllamaScorer, YPP adaptive prompts, metadata
 │   ├── assembly/                   # Facecam detector, 9:16 composer, hooks, ASS captions, narrator
 │   ├── output/                     # Exporter (ultrafast CRF18 -> duck -> ASS) & FileOrganizer
