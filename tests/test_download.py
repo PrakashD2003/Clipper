@@ -1,4 +1,4 @@
-"""Unit tests for the audio downloader (Package 2.1)."""
+"""Unit tests for the audio and video segment downloaders (Packages 2.1 & 2.2)."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -12,6 +12,12 @@ from streamclipper.download.audio import (
     AudioDownloadError,
     download_audio,
     extract_stream_info,
+)
+from streamclipper.download.video import (
+    VIDEO_FORMAT_1080P,
+    VideoDownloadError,
+    download_multiple_segments,
+    download_segment,
 )
 from streamclipper.models import Platform, StreamInfo
 
@@ -350,3 +356,220 @@ class TestDownloadErrorHandling:
 
         with pytest.raises(AudioDownloadError, match="non-empty string"):
             download_audio(bad_url, tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# Video Segment Downloader Tests (Package 2.2)
+# ---------------------------------------------------------------------------
+
+
+class TestVideoSegmentDownloader:
+    def test_download_segment_options_and_default_buffer_padding(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        output_dir = tmp_path / "segments"
+        captured_opts, instances = _patch_yt_dlp(monkeypatch)
+
+        range_calls: list[tuple[Any, Any]] = []
+        orig_range_func = yt_dlp.utils.download_range_func
+
+        def _spy_range_func(chapters: Any, ranges: Any, *args: Any, **kwargs: Any) -> Any:
+            range_calls.append((chapters, ranges))
+            return orig_range_func(chapters, ranges, *args, **kwargs)
+
+        monkeypatch.setattr(yt_dlp.utils, "download_range_func", _spy_range_func)
+
+        result = download_segment(SAMPLE_URL, 100.0, 145.0, output_dir)
+
+        expected_path = output_dir / "dQw4w9WgXcQ_100_145.mp4"
+        assert output_dir.is_dir()
+        assert result == expected_path
+
+        # Call 0: video_id probe; Call 1: ranged video download
+        assert len(captured_opts) == 2
+        assert captured_opts[0]["skip_download"] is True
+        assert captured_opts[0]["noplaylist"] is True
+        instances[0].extract_info.assert_called_once_with(SAMPLE_URL, download=False)
+
+        dl_opts = captured_opts[1]
+        assert dl_opts["format"] == VIDEO_FORMAT_1080P
+        assert dl_opts["format"] == "bestvideo[height<=1080]+bestaudio/best[height<=1080]"
+        assert dl_opts["merge_output_format"] == "mp4"
+        assert dl_opts["force_keyframes_at_cuts"] is True
+        assert dl_opts["noplaylist"] is True
+        assert dl_opts["outtmpl"] == str(output_dir / "dQw4w9WgXcQ_100_145.%(ext)s")
+
+        assert range_calls == [(None, [(97.0, 148.0)])]
+        resolved_ranges = list(dl_opts["download_ranges"]({}, None))
+        assert resolved_ranges == [{"start_time": 97.0, "end_time": 148.0}]
+        instances[1].download.assert_called_once_with([SAMPLE_URL])
+
+    def test_download_segment_clamps_actual_start_at_zero(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        captured_opts, _ = _patch_yt_dlp(monkeypatch)
+
+        result = download_segment(
+            SAMPLE_URL,
+            start_seconds=1.5,
+            end_seconds=12.0,
+            output_dir=tmp_path,
+            buffer_seconds=3.0,
+        )
+
+        # Filename uses requested (unbuffered) int bounds
+        assert result == tmp_path / "dQw4w9WgXcQ_1_12.mp4"
+        dl_opts = captured_opts[1]
+        resolved_ranges = list(dl_opts["download_ranges"]({}, None))
+        assert resolved_ranges == [{"start_time": 0.0, "end_time": 15.0}]
+
+    @pytest.mark.parametrize(
+        "buffer_seconds,expected_start,expected_end",
+        [
+            (0.0, 20.0, 50.0),
+            (5.0, 15.0, 55.0),
+            (25.0, 0.0, 75.0),
+        ],
+    )
+    def test_download_segment_custom_buffer_seconds(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        buffer_seconds: float,
+        expected_start: float,
+        expected_end: float,
+    ) -> None:
+        captured_opts, _ = _patch_yt_dlp(monkeypatch)
+
+        result = download_segment(
+            SAMPLE_URL,
+            start_seconds=20.0,
+            end_seconds=50.0,
+            output_dir=tmp_path,
+            buffer_seconds=buffer_seconds,
+        )
+
+        assert result == tmp_path / "dQw4w9WgXcQ_20_50.mp4"
+        resolved_ranges = list(captured_opts[1]["download_ranges"]({}, None))
+        assert resolved_ranges == [{"start_time": expected_start, "end_time": expected_end}]
+
+    def test_download_segment_skips_when_cached_mp4_exists(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        cached_mp4 = tmp_path / "dQw4w9WgXcQ_100_145.mp4"
+        cached_mp4.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+
+        captured_opts, instances = _patch_yt_dlp(monkeypatch)
+
+        result = download_segment(SAMPLE_URL, 100.0, 145.0, tmp_path)
+
+        assert result == cached_mp4
+        # Only metadata probe ran; no download YoutubeDL created
+        assert len(captured_opts) == 1
+        instances[0].download.assert_not_called()
+
+    def test_download_multiple_segments_reuses_video_id_and_skips_cached(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # Pre-cache beat #2 so only beat #1 and beat #3 should trigger downloads
+        cached_beat_2 = tmp_path / "dQw4w9WgXcQ_60_75.mp4"
+        cached_beat_2.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+
+        captured_opts, instances = _patch_yt_dlp(monkeypatch)
+
+        segments = [(2.0, 10.0), (60.0, 75.0), (120.5, 138.9)]
+        paths = download_multiple_segments(
+            SAMPLE_URL,
+            segments=segments,
+            output_dir=tmp_path,
+            buffer_seconds=4.0,
+        )
+
+        assert paths == [
+            tmp_path / "dQw4w9WgXcQ_2_10.mp4",
+            cached_beat_2,
+            tmp_path / "dQw4w9WgXcQ_120_138.mp4",
+        ]
+
+        # 1 metadata probe + 2 actual segment downloads (beat #2 skipped)
+        assert len(captured_opts) == 3
+        instances[0].extract_info.assert_called_once_with(SAMPLE_URL, download=False)
+
+        beat_1_ranges = list(captured_opts[1]["download_ranges"]({}, None))
+        assert beat_1_ranges == [{"start_time": 0.0, "end_time": 14.0}]
+        assert captured_opts[1]["force_keyframes_at_cuts"] is True
+        assert captured_opts[1]["merge_output_format"] == "mp4"
+        instances[1].download.assert_called_once_with([SAMPLE_URL])
+
+        beat_3_ranges = list(captured_opts[2]["download_ranges"]({}, None))
+        assert beat_3_ranges == [{"start_time": 116.5, "end_time": 142.9}]
+        assert captured_opts[2]["force_keyframes_at_cuts"] is True
+        assert captured_opts[2]["merge_output_format"] == "mp4"
+        instances[2].download.assert_called_once_with([SAMPLE_URL])
+
+    def test_download_multiple_segments_empty_list_skips_yt_dlp(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        captured_opts, _ = _patch_yt_dlp(monkeypatch)
+
+        result = download_multiple_segments(SAMPLE_URL, [], tmp_path)
+
+        assert result == []
+        assert captured_opts == []
+
+    @pytest.mark.parametrize(
+        "url,start,end,buf",
+        [
+            ("", 10.0, 20.0, 3.0),
+            ("   ", 10.0, 20.0, 3.0),
+            (SAMPLE_URL, -1.0, 20.0, 3.0),
+            (SAMPLE_URL, 20.0, 20.0, 3.0),
+            (SAMPLE_URL, 25.0, 20.0, 3.0),
+            (SAMPLE_URL, 10.0, 20.0, -0.5),
+        ],
+    )
+    def test_download_segment_validation_rejects_invalid_arguments(
+        self,
+        tmp_path: Path,
+        url: str,
+        start: float,
+        end: float,
+        buf: float,
+    ) -> None:
+        with pytest.raises(ValueError):
+            download_segment(url, start, end, tmp_path, buffer_seconds=buf)
+
+    def test_download_multiple_segments_validates_all_segments_before_network(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        captured_opts, _ = _patch_yt_dlp(monkeypatch)
+
+        with pytest.raises(ValueError):
+            download_multiple_segments(
+                SAMPLE_URL,
+                segments=[(10.0, 20.0), (50.0, 40.0)],
+                output_dir=tmp_path,
+            )
+
+        assert captured_opts == []
+
+    def test_download_segment_wraps_yt_dlp_errors(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _patch_yt_dlp(
+            monkeypatch,
+            download_side_effect=yt_dlp.utils.DownloadError(
+                "ERROR: [youtube] abc: Private video"
+            ),
+        )
+
+        with pytest.raises(VideoDownloadError, match="private"):
+            download_segment(SAMPLE_URL, 10.0, 20.0, tmp_path)
+
+    def test_download_segment_raises_when_video_id_missing(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _patch_yt_dlp(monkeypatch, extract_return={"title": "Missing ID"})
+
+        with pytest.raises(VideoDownloadError, match="Could not determine video ID"):
+            download_segment(SAMPLE_URL, 10.0, 20.0, tmp_path)
