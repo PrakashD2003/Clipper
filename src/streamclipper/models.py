@@ -160,6 +160,14 @@ class Highlight(SerializableModel):
     final_score: float = 0.0      # weighted composite score
     transcript_chunk: str = ""    # the spoken words in this range
     word_timestamps: list[WordTimestamp] = field(default_factory=list)
+    # YPP Transformative Narrative fields (Phase 3+, default-valued for backward compat)
+    moment_type: str = "hype"          # funny | fail | graphics_detail | hype | clutch | chat_chaos | lore_secret | analysis
+    narration_intro: str = ""          # 3-4s tone-matched spoken setup (10-15 words)
+    narration_outro: str = ""          # 3-4s tone-matched spoken punchline / callout / takeaway (10-15 words)
+    context_badge: str = ""            # Short adaptive pill (e.g., "🎨 Insane Detail", "💀 Instant Karma", "🔥 Clutch Escape")
+    peak_time: float = 0.0             # Exact second of loudness peak for 1.2x punch-in zoom
+    chat_burst: list[dict[str, Any]] = field(default_factory=list)  # Up to 5 viewer chat messages in range
+    sub_clips: list[dict[str, Any]] = field(default_factory=list)   # Optional [{"start": s, "end": e, "label": "Setup"}]
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Highlight":
@@ -177,6 +185,13 @@ class Highlight(SerializableModel):
             word_timestamps=[
                 WordTimestamp.from_dict(w) for w in data.get("word_timestamps", [])
             ],
+            moment_type=data.get("moment_type", "hype"),
+            narration_intro=data.get("narration_intro", ""),
+            narration_outro=data.get("narration_outro", ""),
+            context_badge=data.get("context_badge", ""),
+            peak_time=float(data.get("peak_time", 0.0)),
+            chat_burst=list(data.get("chat_burst", [])),
+            sub_clips=list(data.get("sub_clips", [])),
         )
 
 
@@ -210,6 +225,12 @@ class ClipMetadata(SerializableModel):
     clip_start: float
     clip_end: float
     highlight_score: float
+    # YPP Transformative Narrative fields (Phase 3+, default-valued for backward compat)
+    moment_type: str = "hype"
+    narration_intro: str = ""
+    narration_outro: str = ""
+    context_badge: str = ""
+    transformation_mode: str = "narrative"
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ClipMetadata":
@@ -223,6 +244,11 @@ class ClipMetadata(SerializableModel):
             clip_start=float(data["clip_start"]),
             clip_end=float(data["clip_end"]),
             highlight_score=float(data["highlight_score"]),
+            moment_type=data.get("moment_type", "hype"),
+            narration_intro=data.get("narration_intro", ""),
+            narration_outro=data.get("narration_outro", ""),
+            context_badge=data.get("context_badge", ""),
+            transformation_mode=data.get("transformation_mode", "narrative"),
         )
 
 
