@@ -170,6 +170,17 @@ def _compute_signal_overlaps(
     return overlaps
 
 
+def _has_valid_peak_time(spike: TimeRange) -> bool:
+    """Return True if a loudness spike carries a valid finite numeric metadata['peak_time']."""
+    candidate = (spike.metadata or {}).get("peak_time")
+    if candidate is None or isinstance(candidate, bool):
+        return False
+    try:
+        return math.isfinite(float(candidate))
+    except (TypeError, ValueError):
+        return False
+
+
 def _normalize_moment_type(value: Any) -> str:
     """Normalize a moment_type string to a valid taxonomy value."""
     normalized = _as_str(value, "hype").lower()
@@ -1052,7 +1063,9 @@ async def submit_highlights(url: str, highlights: str) -> str:
                 overlapping_loudness = [
                     s
                     for s in state.loudness_spikes
-                    if s.end > highlight.start and s.start < highlight.end
+                    if s.end > highlight.start
+                    and s.start < highlight.end
+                    and _has_valid_peak_time(s)
                 ]
                 explicit_peak = _parse_seconds(item.get("peak_time"))
                 if overlapping_loudness:
@@ -1062,9 +1075,7 @@ async def submit_highlights(url: str, highlights: str) -> str:
                 elif explicit_peak is not None and start <= explicit_peak <= end:
                     highlight.peak_time = explicit_peak
                 else:
-                    highlight.peak_time = scorer._extract_peak_time(
-                        highlight, state.loudness_spikes
-                    )
+                    highlight.peak_time = scorer._extract_peak_time(highlight, [])
                 highlight.chat_burst = scorer._extract_chat_burst(
                     highlight, state.chat_spikes
                 )

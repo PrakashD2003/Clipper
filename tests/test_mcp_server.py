@@ -2391,6 +2391,251 @@ async def test_concurrent_render_all_selected_and_render_clip_same_url_preserve_
         assert all(p.is_file() for p in paths)
 
 
+@pytest.mark.asyncio
+async def test_submit_highlights_preserves_explicit_peak_when_overlapping_loudness_lacks_valid_peak_time(
+    mcp_env: tuple[Config, StepCache, Path],
+) -> None:
+    """Overlapping loudness spikes without valid peak_time metadata must not clobber explicit peak_time."""
+    _, cache, _ = mcp_env
+    url = "https://www.youtube.com/watch?v=pkmeta12345"
+
+    cache.save_state(
+        PipelineState(
+            stream_info=StreamInfo(
+                url=url,
+                title="Peak Metadata Stream",
+                platform=Platform.YOUTUBE,
+                streamer="Kai",
+                game="GTA 6",
+                duration_seconds=3600,
+                video_id="pkmeta12345",
+            ),
+            status=PipelineStatus.SCORING,
+            loudness_spikes=[
+                TimeRange(start=105.0, end=115.0, score=8.0, metadata={}),
+                TimeRange(start=116.0, end=122.0, score=8.5, metadata={"peak_time": "invalid"}),
+                TimeRange(start=123.0, end=128.0, score=9.0, metadata={"peak_time": True}),
+                TimeRange(start=205.0, end=215.0, score=8.2, metadata={}),
+                TimeRange(start=310.0, end=325.0, score=9.1, metadata={"peak_time": 318.5}),
+            ],
+            analysis_complete=True,
+        )
+    )
+
+    payload = json.dumps(
+        [
+            {
+                "start": 100.0,
+                "end": 140.0,
+                "score": 9.0,
+                "title": "Explicit Beats Invalid Spike Meta",
+                "peak_time": 135.0,
+            },
+            {
+                "start": 200.0,
+                "end": 240.0,
+                "score": 8.5,
+                "title": "Midpoint When Both Missing",
+            },
+            {
+                "start": 300.0,
+                "end": 340.0,
+                "score": 8.8,
+                "title": "Valid Spike Beats Explicit",
+                "peak_time": 333.0,
+            },
+        ]
+    )
+    res = _extract_json(
+        await mcp.call_tool("submit_highlights", {"url": url, "highlights": payload})
+    )
+    assert "error" not in res
+    by_title = {h["title"]: h for h in res["highlights"]}
+    assert by_title["Explicit Beats Invalid Spike Meta"]["peak_time"] == 135.0
+    assert by_title["Midpoint When Both Missing"]["peak_time"] == 220.0
+    assert by_title["Valid Spike Beats Explicit"]["peak_time"] == 318.5
 
 
+@pytest.mark.asyncio
+async def test_render_all_selected_mid_batch_failure_preserves_preexisting_clips_and_rerun_appends(
+    mcp_env: tuple[Config, StepCache, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mid-batch failure preserves prior render_clip entries; re-running render_all_selected preserves all clips."""
+    config, cache, tmp_path = mcp_env
+    url = "https://www.youtube.com/watch?v=rerun123456"
+    h1 = Highlight(start=10.0, end=40.0, score=9.0, title="Batch A", reason="r1", final_score=9.0)
+    h2 = Highlight(start=60.0, end=90.0, score=8.6, title="Batch B", reason="r2", final_score=8.6)
+    cache.save_state(
+        PipelineState(
+            stream_info=StreamInfo(
+                url=url,
+                title="Rerun Stream",
+                platform=Platform.YOUTUBE,
+                streamer="Kai",
+                game="GTA 6",
+                duration_seconds=3600,
+                video_id="rerun123456",
+            ),
+            status=PipelineStatus.ASSEMBLING,
+            highlights=[h1, h2],
+            selected_highlights=[h1, h2],
+        )
+    )
+
+    seg = tmp_path / "temp" / "segments" / "rerun.mp4"
+    seg.parent.mkdir(parents=True, exist_ok=True)
+    seg.write_bytes(b"mp4")
+    monkeypatch.setattr(mcp_server, "download_segment", lambda *a, **kw: seg)
+
+    from streamclipper.output.organizer import FileOrganizer
+
+    organizer = FileOrganizer(config)
+    fail_on_batch_b = {"active": True}
+
+    def assemble(self, highlight, metadata, segment_paths, clip_index, mode, *a, **kw):
+        if fail_on_batch_b["active"] and metadata.hook_title == "Batch B":
+            raise RuntimeError("Simulated mid-batch failure on Batch B")
+        out_mp4 = organizer.get_clip_path(metadata.game, metadata.streamer, clip_index)
+        out_mp4.write_bytes(f"{metadata.hook_title}-{clip_index}".encode("utf-8"))
+        return ClipResult(
+            video_path=out_mp4,
+            metadata_path=None,
+            metadata=metadata,
+            duration_seconds=30.0,
+        )
+
+    monkeypatch.setattr(mcp_server.Pipeline, "_assemble_highlight", assemble)
+
+    # 1. Pre-existing single clip via render_clip
+    single_res = _extract_json(
+        await mcp.call_tool(
+            "render_clip",
+            {"url": url, "start": 200.0, "end": 230.0, "hook_title": "Preexisting Single", "mode": "raw"},
+        )
+    )
+    assert "error" not in single_res
+
+    # 2. Mid-batch failure in render_all_selected must preserve the preexisting clip + Batch A
+    fail_res = _extract_json(
+        await mcp.call_tool("render_all_selected", {"url": url, "mode": "raw"})
+    )
+    assert "error" in fail_res
+    assert fail_res["rendered_count"] == 1
+    assert len(fail_res["clips"]) == 1
+    assert fail_res["clips"][0]["metadata"]["hook_title"] == "Batch A"
+
+    after_fail = cache.load_state(url)
+    assert after_fail is not None
+    assert after_fail.status == PipelineStatus.FAILED
+    assert len(after_fail.clips) == 2
+    assert {c.metadata.hook_title for c in after_fail.clips} == {"Preexisting Single", "Batch A"}
+
+    # 3. Re-running render_all_selected cleanly succeeds without clobbering prior clips or files
+    fail_on_batch_b["active"] = False
+    ok_res = _extract_json(
+        await mcp.call_tool("render_all_selected", {"url": url, "mode": "raw"})
+    )
+    assert "error" not in ok_res
+    assert ok_res["rendered_count"] == 2
+    assert ok_res["status"] == "complete"
+
+    after_rerun = cache.load_state(url)
+    assert after_rerun is not None
+    assert after_rerun.status == PipelineStatus.COMPLETE
+    assert len(after_rerun.clips) == 4
+    paths = {Path(c.video_path).resolve() for c in after_rerun.clips}
+    assert len(paths) == 4
+    assert all(p.is_file() for p in paths)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_render_all_selected_and_render_clip_real_assembly_same_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Real MoviePy/FFmpeg concurrent render_all_selected + render_clip on the same URL preserve all clips."""
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg not installed on PATH")
+
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(
+        "\n".join(
+            [
+                "general:",
+                f"  output_dir: '{(tmp_path / 'output').as_posix()}'",
+                f"  temp_dir: '{(tmp_path / 'temp').as_posix()}'",
+                f"  cache_dir: '{(tmp_path / '.cache').as_posix()}'",
+                "video:",
+                "  resolution: [360, 640]",
+                "  fps: 15",
+                "  codec: libx264",
+                "captions:",
+                "  enabled: false",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    config = Config(user_config_path=cfg_file, hardware_profile=_cpu_profile())
+    cache = StepCache(config)
+    monkeypatch.setattr(mcp_server, "_get_config", lambda: config)
+
+    seg_dir = tmp_path / "temp" / "segments"
+    seg_dir.mkdir(parents=True, exist_ok=True)
+    seg_mp4 = seg_dir / "real_conc.mp4"
+    subprocess.run(
+        [
+            "ffmpeg", "-y",
+            "-f", "lavfi", "-i", "color=c=navy:s=640x360:d=4:r=15",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=4",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+            str(seg_mp4),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    monkeypatch.setattr(mcp_server, "download_segment", lambda *a, **kw: seg_mp4)
+
+    url = "https://www.youtube.com/watch?v=realcnc1234"
+    h1 = Highlight(start=10.0, end=12.0, score=9.0, title="Real Batch 1", reason="r1", final_score=9.0)
+    cache.save_state(
+        PipelineState(
+            stream_info=StreamInfo(
+                url=url,
+                title="Real Concurrent Stream",
+                platform=Platform.YOUTUBE,
+                streamer="RealStreamer",
+                game="GTA 6",
+                duration_seconds=300,
+                video_id="realcnc1234",
+            ),
+            status=PipelineStatus.ASSEMBLING,
+            highlights=[h1],
+            selected_highlights=[h1],
+        )
+    )
+
+    r_batch, r_single = await asyncio.gather(
+        mcp.call_tool("render_all_selected", {"url": url, "mode": "raw"}),
+        mcp.call_tool(
+            "render_clip",
+            {
+                "url": url,
+                "start": 20.0,
+                "end": 22.0,
+                "hook_title": "Real Single 1",
+                "mode": "raw",
+            },
+        ),
+    )
+    batch_res = _extract_json(r_batch)
+    single_res = _extract_json(r_single)
+    assert "error" not in batch_res, batch_res
+    assert "error" not in single_res, single_res
+
+    reloaded = cache.load_state(url)
+    assert reloaded is not None
+    assert len(reloaded.clips) == 2
+    assert {c.metadata.hook_title for c in reloaded.clips} == {"Real Batch 1", "Real Single 1"}
+    paths = [Path(c.video_path).resolve() for c in reloaded.clips]
+    assert len(set(paths)) == 2
+    assert all(p.is_file() and p.stat().st_size > 1000 for p in paths)
 
