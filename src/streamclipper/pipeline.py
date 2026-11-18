@@ -29,6 +29,7 @@ from .models import (
     StreamInfo,
 )
 from .scoring.ollama_scorer import OllamaScorer
+from .scoring.scorer import Scorer
 
 logger = logging.getLogger(__name__)
 
@@ -89,12 +90,16 @@ class Pipeline:
         voice_outro_path: Path | None = None,
     ) -> list[ClipResult]:
         """Process a single stream through the full resumable pipeline."""
+        if not isinstance(url, str) or not url.strip():
+            raise ValueError("Invalid URL: stream URL must be a non-empty string.")
+        clean_url = url.strip()
+
         intro_path = Path(voice_intro_path) if voice_intro_path is not None else None
         outro_path = Path(voice_outro_path) if voice_outro_path is not None else None
 
-        state = self.cache.load_state(url) or PipelineState(
+        state = self.cache.load_state(clean_url) or PipelineState(
             stream_info=StreamInfo(
-                url=url,
+                url=clean_url,
                 title="",
                 platform=Platform.YOUTUBE,
                 streamer=streamer or "",
@@ -131,7 +136,7 @@ class Pipeline:
                 self.cache.save_state(state)
 
             # Step 6: Select highlights (interactive only when explicitly requested)
-            if not state.selected_highlights:
+            if state.status < PipelineStatus.COMPLETE and not state.selected_highlights:
                 if interactive:
                     state.selected_highlights = self._interactive_select(state.highlights)
                 else:
@@ -204,9 +209,9 @@ class Pipeline:
             self.temp_dir,
         )
 
-        # Preserve explicit caller overrides for streamer/game while filling detected metadata
+        # Preserve canonical cache URL and explicit caller overrides while filling detected metadata
         state.stream_info = StreamInfo(
-            url=downloaded_info.url or state.stream_info.url,
+            url=state.stream_info.url,
             title=downloaded_info.title or state.stream_info.title,
             platform=downloaded_info.platform,
             streamer=state.stream_info.streamer or downloaded_info.streamer,
@@ -306,18 +311,27 @@ class Pipeline:
         )
 
         clips: list[ClipResult] = []
+        buffer_seconds = 3.0
         for idx, highlight in enumerate(state.selected_highlights, start=1):
-            use_multi_beat = effective_mode != "raw" and len(highlight.sub_clips) >= 2
+            valid_beats = (
+                Scorer._validate_sub_clips(
+                    highlight.sub_clips, highlight.start, highlight.end
+                )
+                if effective_mode != "raw"
+                else []
+            )
+            use_multi_beat = len(valid_beats) >= 2
             if use_multi_beat:
                 beat_ranges = [
                     (float(beat["start"]), float(beat["end"]))
-                    for beat in highlight.sub_clips
+                    for beat in valid_beats
                 ]
                 segment_paths = await asyncio.to_thread(
                     download_multiple_segments,
                     state.stream_info.url,
                     beat_ranges,
                     segments_dir,
+                    buffer_seconds,
                 )
             else:
                 single_path = await asyncio.to_thread(
@@ -326,6 +340,7 @@ class Pipeline:
                     highlight.start,
                     highlight.end,
                     segments_dir,
+                    buffer_seconds,
                 )
                 segment_paths = [single_path]
 
@@ -347,6 +362,8 @@ class Pipeline:
                 effective_mode,
                 voice_intro_path,
                 voice_outro_path,
+                valid_beats=valid_beats,
+                buffer_seconds=buffer_seconds,
             )
             clips.append(clip_result)
 
@@ -363,8 +380,23 @@ class Pipeline:
         mode: str,
         voice_intro_path: Path | None,
         voice_outro_path: Path | None,
+        *,
+        valid_beats: list[dict[str, Any]] | None = None,
+        buffer_seconds: float = 3.0,
     ) -> ClipResult:
         """Run Phase 4 video assembly/export when installed, else persist raw segment + metadata."""
+        beats = (
+            valid_beats
+            if valid_beats is not None
+            else (
+                Scorer._validate_sub_clips(
+                    highlight.sub_clips, highlight.start, highlight.end
+                )
+                if mode != "raw"
+                else []
+            )
+        )
+
         try:
             from .assembly.composer import VideoComposer, remap_timeline_for_beats
             from .assembly.facecam import FacecamDetector
@@ -383,6 +415,7 @@ class Pipeline:
                 metadata=metadata,
                 segment_paths=segment_paths,
                 clip_index=clip_index,
+                valid_beats=beats,
             )
 
         facecam = FacecamDetector(self.config).detect(segment_paths[0])
@@ -390,8 +423,8 @@ class Pipeline:
 
         use_multi_beat = (
             mode != "raw"
-            and len(highlight.sub_clips) >= 2
-            and len(segment_paths) == len(highlight.sub_clips)
+            and len(beats) >= 2
+            and len(segment_paths) == len(beats)
         )
 
         if use_multi_beat:
@@ -399,20 +432,28 @@ class Pipeline:
                 highlight.word_timestamps,
                 highlight.chat_burst,
                 highlight.peak_time,
-                highlight.sub_clips,
+                beats,
             )
-            composed = composer.compose_multi_beat(
+            beat_trim_ranges: list[tuple[float, float]] = []
+            for beat in beats:
+                b_start = float(beat["start"])
+                b_end = float(beat["end"])
+                lead_pad = b_start - max(0.0, b_start - buffer_seconds)
+                beat_trim_ranges.append((lead_pad, lead_pad + (b_end - b_start)))
+
+            composed = composer.compose_story_beats(
                 segment_paths,
-                highlight.sub_clips,
                 facecam,
+                beat_trim_ranges=beat_trim_ranges,
                 peak_offset=peak_offset if mode != "raw" else None,
             )
             clip_start_offset = 0.0
             words_for_export = remapped_words
             chat_for_export = remapped_chat
         else:
+            actual_start = max(0.0, float(highlight.start) - buffer_seconds)
             peak_offset = (
-                max(0.0, highlight.peak_time - highlight.start)
+                max(0.0, highlight.peak_time - actual_start)
                 if (highlight.peak_time > 0.0 and mode != "raw")
                 else None
             )
@@ -421,7 +462,7 @@ class Pipeline:
                 facecam,
                 peak_offset=peak_offset,
             )
-            clip_start_offset = highlight.start
+            clip_start_offset = actual_start
             words_for_export = highlight.word_timestamps
             chat_for_export = highlight.chat_burst
 
@@ -464,6 +505,7 @@ class Pipeline:
         metadata: ClipMetadata,
         segment_paths: list[Path],
         clip_index: int,
+        valid_beats: list[dict[str, Any]] | None = None,
     ) -> ClipResult:
         """Phase 3 fallback before Phase 4 assembly exists: persist metadata JSON & transcript."""
         game_dir = _sanitize_path_segment(metadata.game, "UnknownGame")
@@ -484,9 +526,10 @@ class Pipeline:
             transcript_path = clip_dir / f"{stem}_transcript.txt"
             transcript_path.write_text(highlight.transcript_chunk, encoding="utf-8")
 
-        if len(highlight.sub_clips) >= 2 and metadata.transformation_mode != "raw":
+        beats = valid_beats or []
+        if len(beats) >= 2 and metadata.transformation_mode != "raw":
             duration = sum(
-                max(0.0, float(b["end"]) - float(b["start"])) for b in highlight.sub_clips
+                max(0.0, float(b["end"]) - float(b["start"])) for b in beats
             )
         else:
             duration = max(0.0, float(highlight.end) - float(highlight.start))

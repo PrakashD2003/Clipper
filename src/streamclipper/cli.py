@@ -40,14 +40,14 @@ def cli(ctx: click.Context, config: str | None, verbose: bool) -> None:
 @click.option(
     "--voice-intro",
     "voice_intro",
-    type=click.Path(path_type=Path),
+    type=click.Path(dir_okay=False, path_type=Path),
     default=None,
     help="Path to custom human intro voiceover WAV",
 )
 @click.option(
     "--voice-outro",
     "voice_outro",
-    type=click.Path(path_type=Path),
+    type=click.Path(dir_okay=False, path_type=Path),
     default=None,
     help="Path to custom human outro voiceover WAV",
 )
@@ -112,14 +112,14 @@ def clip(
 @click.option(
     "--voice-intro",
     "voice_intro",
-    type=click.Path(path_type=Path),
+    type=click.Path(dir_okay=False, path_type=Path),
     default=None,
     help="Path to custom human intro voiceover WAV",
 )
 @click.option(
     "--voice-outro",
     "voice_outro",
-    type=click.Path(path_type=Path),
+    type=click.Path(dir_okay=False, path_type=Path),
     default=None,
     help="Path to custom human outro voiceover WAV",
 )

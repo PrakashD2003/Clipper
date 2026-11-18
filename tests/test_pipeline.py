@@ -5,6 +5,8 @@ import asyncio
 import builtins
 import json
 from pathlib import Path
+import sys
+import types
 from typing import Any
 
 import pandas as pd
@@ -640,6 +642,7 @@ class TestPipelineEndToEnd:
             mode: str,
             voice_intro_path: Path | None,
             voice_outro_path: Path | None,
+            **kwargs: Any,
         ) -> ClipResult:
             recorded_assembly_kwargs.append(
                 {
@@ -657,6 +660,7 @@ class TestPipelineEndToEnd:
                 mode,
                 voice_intro_path,
                 voice_outro_path,
+                **kwargs,
             )
 
         monkeypatch.setattr(pipeline, "_assemble_highlight", spy_assemble_highlight)
@@ -698,6 +702,244 @@ class TestPipelineEndToEnd:
         assert clips == []
         cached = pipeline.cache.load_state(url)
         assert cached is not None and cached.status is PipelineStatus.COMPLETE
+
+    @pytest.mark.asyncio
+    async def test_url_whitespace_normalized_and_empty_url_rejected(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        call_log: list[str] = []
+        _install_mock_stage_deps(monkeypatch, tmp_path, call_log=call_log)
+        pipeline = Pipeline(_make_config(tmp_path))
+
+        with pytest.raises(ValueError, match="non-empty"):
+            await pipeline.process_stream("   ", interactive=False)
+        assert pipeline.cache.list_all() == []
+
+        raw_url = "  https://youtube.com/watch?v=ws_norm  "
+        clean_url = raw_url.strip()
+        clips = await pipeline.process_stream(raw_url, max_clips=1, interactive=False)
+        assert len(clips) == 1
+
+        # Re-running with stripped URL hits the exact same COMPLETE cache without re-running stages
+        call_log.clear()
+        clips_again = await pipeline.process_stream(clean_url, max_clips=1, interactive=False)
+        assert len(clips_again) == 1
+        assert call_log == []
+
+    @pytest.mark.asyncio
+    async def test_complete_state_with_empty_selection_skips_reselection(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        call_log: list[str] = []
+        _install_mock_stage_deps(monkeypatch, tmp_path, call_log=call_log)
+        pipeline = Pipeline(_make_config(tmp_path))
+        url = "https://youtube.com/watch?v=done_empty_selection"
+
+        pipeline.cache.save_state(
+            PipelineState(
+                stream_info=_sample_stream_info(url=url, video_id="done_empty_selection"),
+                status=PipelineStatus.COMPLETE,
+                highlights=_sample_highlights(),
+                selected_highlights=[],
+                clips=[],
+            )
+        )
+
+        def _forbid_input(_prompt: str = "") -> str:
+            raise AssertionError("COMPLETE state must never re-prompt interactive selection")
+
+        monkeypatch.setattr(builtins, "input", _forbid_input)
+        clips = await pipeline.process_stream(url, interactive=True)
+        assert clips == []
+        assert call_log == []
+
+        cached = pipeline.cache.load_state(url)
+        assert cached is not None
+        assert cached.status is PipelineStatus.COMPLETE
+        assert cached.selected_highlights == []
+
+    @pytest.mark.asyncio
+    async def test_invalid_sub_clips_falls_back_to_single_segment_download(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        bad_highlight = Highlight(
+            start=100.0,
+            end=150.0,
+            score=9.0,
+            title="MALFORMED BEATS",
+            reason="Overlapping/invalid sub_clips should fall back to single cut",
+            final_score=9.0,
+            sub_clips=[
+                {"start": 100.0, "end": 120.0, "label": "Setup"},
+                {"start": 115.0, "end": 140.0, "label": "Overlapping Payoff"},
+            ],
+        )
+        call_log: list[str] = []
+        segment_calls: list[tuple[str, Any]] = []
+        _install_mock_stage_deps(
+            monkeypatch,
+            tmp_path,
+            call_log=call_log,
+            highlights=[bad_highlight],
+            segment_calls=segment_calls,
+        )
+
+        pipeline = Pipeline(_make_config(tmp_path))
+        clips = await pipeline.process_stream(
+            "https://youtube.com/watch?v=bad_beats",
+            max_clips=1,
+            interactive=False,
+            mode="story",
+        )
+        assert len(clips) == 1
+        assert segment_calls == [("single", (100.0, 150.0))]
+
+    @pytest.mark.asyncio
+    async def test_phase4_assembly_hook_single_and_multi_beat_contract(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Verify Phase 4 compose_story_beats, beat_trim_ranges, buffer offset math, and Exporter wiring."""
+        call_log: list[str] = []
+        _install_mock_stage_deps(monkeypatch, tmp_path, call_log=call_log)
+
+        compose_story_calls: list[dict[str, Any]] = []
+        compose_single_calls: list[dict[str, Any]] = []
+        export_calls: list[dict[str, Any]] = []
+
+        facecam_mod = types.ModuleType("streamclipper.assembly.facecam")
+
+        class StubFacecamDetector:
+            def __init__(self, config: Config) -> None:
+                self.config = config
+
+            def detect(self, path: Path) -> None:
+                return None
+
+        facecam_mod.FacecamDetector = StubFacecamDetector  # type: ignore[attr-defined]
+
+        composer_mod = types.ModuleType("streamclipper.assembly.composer")
+
+        def stub_remap(words, chat_burst, peak_time, beats):
+            return words, chat_burst, 10.5
+
+        class StubVideoComposer:
+            def __init__(self, config: Config) -> None:
+                self.config = config
+
+            def compose_story_beats(
+                self,
+                segment_paths,
+                facecam,
+                beat_trim_ranges=None,
+                peak_offset=None,
+            ):
+                compose_story_calls.append(
+                    {
+                        "segment_paths": segment_paths,
+                        "facecam": facecam,
+                        "beat_trim_ranges": beat_trim_ranges,
+                        "peak_offset": peak_offset,
+                    }
+                )
+                return {"kind": "multi_beat"}
+
+            def compose(self, video_path, facecam, peak_offset=None):
+                compose_single_calls.append(
+                    {
+                        "video_path": video_path,
+                        "facecam": facecam,
+                        "peak_offset": peak_offset,
+                    }
+                )
+                return {"kind": "single"}
+
+        composer_mod.remap_timeline_for_beats = stub_remap  # type: ignore[attr-defined]
+        composer_mod.VideoComposer = StubVideoComposer  # type: ignore[attr-defined]
+
+        hooks_mod = types.ModuleType("streamclipper.assembly.hooks")
+
+        class StubHookTitleOverlay:
+            def __init__(self, config: Config) -> None:
+                self.config = config
+
+            def add_hook(self, video_clip, hook_title, context_badge=""):
+                return {**video_clip, "hook_title": hook_title, "context_badge": context_badge}
+
+        hooks_mod.HookTitleOverlay = StubHookTitleOverlay  # type: ignore[attr-defined]
+
+        exporter_mod = types.ModuleType("streamclipper.output.exporter")
+
+        class StubExporter:
+            def __init__(self, config: Config) -> None:
+                self.config = config
+
+            def export(self, **kwargs: Any) -> Path:
+                export_calls.append(kwargs)
+                out_path = Path(kwargs["output_path"])
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_bytes(b"rendered-mp4")
+                return out_path
+
+        exporter_mod.Exporter = StubExporter  # type: ignore[attr-defined]
+
+        organizer_mod = types.ModuleType("streamclipper.output.organizer")
+
+        class StubFileOrganizer:
+            def __init__(self, config: Config) -> None:
+                self.out_dir = Path(config.get("general.output_dir"))
+
+            def get_clip_path(self, game: str, streamer: str, index: int) -> Path:
+                return self.out_dir / f"clip_{index:02d}.mp4"
+
+            def save_clip(
+                self, video_path: Path, metadata: ClipMetadata, transcript_text: str = ""
+            ) -> ClipResult:
+                meta_path = video_path.with_suffix(".json")
+                meta_path.write_text(metadata.to_json(), encoding="utf-8")
+                return ClipResult(
+                    video_path=video_path,
+                    metadata_path=meta_path,
+                    metadata=metadata,
+                    duration_seconds=34.0,
+                )
+
+        organizer_mod.FileOrganizer = StubFileOrganizer  # type: ignore[attr-defined]
+
+        monkeypatch.setitem(sys.modules, "streamclipper.assembly.facecam", facecam_mod)
+        monkeypatch.setitem(sys.modules, "streamclipper.assembly.composer", composer_mod)
+        monkeypatch.setitem(sys.modules, "streamclipper.assembly.hooks", hooks_mod)
+        monkeypatch.setitem(sys.modules, "streamclipper.output.exporter", exporter_mod)
+        monkeypatch.setitem(sys.modules, "streamclipper.output.organizer", organizer_mod)
+
+        intro_wav = tmp_path / "human_intro.wav"
+        outro_wav = tmp_path / "human_outro.wav"
+
+        pipeline = Pipeline(_make_config(tmp_path))
+        clips = await pipeline.process_stream(
+            "https://youtube.com/watch?v=phase4_contract",
+            max_clips=2,
+            interactive=False,
+            mode="story",
+            voice_intro_path=intro_wav,
+            voice_outro_path=outro_wav,
+        )
+
+        assert len(clips) == 2
+
+        # Highlight 1: multi-beat [110..124] & [140..160] with 3s download buffer -> local trims (3,17) & (3,23)
+        assert len(compose_story_calls) == 1
+        assert compose_story_calls[0]["beat_trim_ranges"] == [(3.0, 17.0), (3.0, 23.0)]
+        assert compose_story_calls[0]["peak_offset"] == 10.5
+        assert export_calls[0]["clip_start_offset"] == 0.0
+        assert export_calls[0]["mode"] == "story"
+        assert export_calls[0]["voice_intro_path"] == intro_wav
+        assert export_calls[0]["voice_outro_path"] == outro_wav
+
+        # Highlight 2: single-cut [400..445], peak=425.0, buffer=3.0 -> actual_start=397.0, peak_offset=28.0
+        assert len(compose_single_calls) == 1
+        assert compose_single_calls[0]["peak_offset"] == pytest.approx(28.0)
+        assert export_calls[1]["clip_start_offset"] == pytest.approx(397.0)
+        assert export_calls[1]["mode"] == "story"
 
 
 # ---------------------------------------------------------------------------
@@ -967,6 +1209,25 @@ class TestCLIPipelineWiring:
         )
         assert result.exit_code != 0
         assert "Invalid value for '--mode'" in result.output
+
+    def test_clip_command_rejects_directory_for_voice_intro(self, tmp_path: Path) -> None:
+        cfg_file = tmp_path / "config.yaml"
+        cfg_file.write_text(yaml.safe_dump({}), encoding="utf-8")
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "--config",
+                str(cfg_file),
+                "clip",
+                "https://youtube.com/watch?v=dir_voice",
+                "--voice-intro",
+                str(tmp_path),
+            ],
+        )
+        assert result.exit_code != 0
+        assert "directory" in result.output.lower()
 
     def test_auto_command_discovers_and_invokes_parallel_pipeline(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
