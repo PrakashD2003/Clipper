@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Project
+/output/
+temp/
+*.wav
+*.mp3
+*.mp4
+*.ass
+*.live_chat.json
+
+# Config
+# user config (not default)
+config.yaml
+
+# IDE
+.vscode/
+.idea/
+
+# Cache
+.cache/
+*.cache

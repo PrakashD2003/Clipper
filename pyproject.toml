@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "streamclipper"
+version = "0.1.0"
+description = "Free, open-source AI-powered stream clipping tool"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [{name = "StreamClipper Contributors"}]
+
+dependencies = [
+    "yt-dlp>=2024.8.0",
+    "faster-whisper>=1.0.0",
+    "librosa>=0.10.0",
+    "soundfile>=0.12.1",
+    "opencv-python>=4.8.0",
+    "moviepy>=2.0.0",
+    "ollama>=0.3.0",
+    "numpy>=1.24.0",
+    "scipy>=1.11.0",
+    "pandas>=2.0.0",
+    "Pillow>=10.0.0",
+    "pyyaml>=6.0",
+    "click>=8.1.0",
+    "rich>=13.0.0",
+    "tqdm>=4.65.0",
+]
+
+[project.optional-dependencies]
+whisperx = ["whisperx @ git+https://github.com/m-bain/whisperX.git"]
+mcp = ["mcp>=1.2.0"]
+dev = ["pytest>=7.0", "pytest-asyncio>=0.21"]
+
+[project.scripts]
+streamclipper = "streamclipper.cli:cli"
+streamclipper-mcp = "streamclipper.mcp_server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
