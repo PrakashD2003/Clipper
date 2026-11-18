@@ -520,3 +520,53 @@ class TestRealFileHandlingAndWindowsCleanup:
         )
         assert cropped.w >= 1 and cropped.h >= 1
         assert cropped.w <= clip.w and cropped.h <= clip.h
+
+    def test_apply_spike_zoom_uses_spec_window_and_skips_zero_duration(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """apply_spike_zoom must use z_end = min(duration, z_start + zoom_duration) and skip zoom_duration=0."""
+        import streamclipper.assembly.composer as composer_mod
+
+        captured_slices: list[Any] = []
+        orig_concat = composer_mod.concatenate_videoclips
+
+        def _spy_concat(slices: list[Any], **kwargs: Any) -> Any:
+            captured_slices.extend(slices)
+            return orig_concat(slices, **kwargs)
+
+        monkeypatch.setattr(composer_mod, "concatenate_videoclips", _spy_concat)
+
+        cfg = _make_config(
+            tmp_path,
+            overrides={"transformation": {"punch_in_zoom": 1.2, "zoom_duration_seconds": 3.5}},
+        )
+        composer = VideoComposer(cfg)
+        clip = _make_dummy_clip(duration=10.0, size=(360, 640))
+        zoomed = composer.apply_spike_zoom(clip, peak_offset=4.0)
+        assert zoomed.duration == pytest.approx(10.0)
+        # Expect slices: [0.0..3.5], [3.5..7.0], [7.0..10.0] -> exact 3.5s zoom duration
+        assert [round(s.duration, 2) for s in captured_slices] == [3.5, 3.5, 3.0]
+
+        cfg_zero = _make_config(
+            tmp_path,
+            overrides={"transformation": {"punch_in_zoom": 1.2, "zoom_duration_seconds": 0.0}},
+        )
+        composer_zero = VideoComposer(cfg_zero)
+        assert composer_zero.apply_spike_zoom(clip, peak_offset=4.0) is clip
+
+    def test_remap_timeline_handles_malformed_chat_and_trailing_zero_duration_beat(self):
+        """remap_timeline_for_beats skips non-dict/bad chat timestamps and keeps end boundary on last valid beat."""
+        words = [WordTimestamp(text="boom", start=10.0, end=11.0)]
+        chat = [
+            {"offset_seconds": 20.0, "message": "boundary"},
+            {"offset_seconds": "not-a-number", "message": "bad"},
+            {"offset_seconds": True, "message": "bool"},
+            "not_a_dict",
+        ]
+        beats = [{"start": 10.0, "end": 20.0}, {"start": 30.0, "end": 30.0}]
+        rw, rc, rp = remap_timeline_for_beats(words, chat, peak_time=20.0, beats=beats)  # type: ignore[arg-type]
+        assert len(rw) == 1
+        assert len(rc) == 1
+        assert rc[0]["message"] == "boundary"
+        assert rc[0]["offset_seconds"] == pytest.approx(10.0)
+        assert rp == pytest.approx(10.0)

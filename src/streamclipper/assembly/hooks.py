@@ -37,13 +37,41 @@ def _load_font(font_name: str | None, size: int) -> ImageFont.ImageFont:
         return ImageFont.load_default()
 
 
+def _split_oversized_word(
+    word: str,
+    draw: ImageDraw.ImageDraw,
+    font: ImageFont.ImageFont,
+    max_w: int,
+    stroke_width: int = 0,
+) -> list[str]:
+    """Split a single token wider than max_w into character chunks that fit within max_w."""
+    chunks: list[str] = []
+    current = ""
+    for ch in word:
+        candidate = current + ch
+        bbox = draw.textbbox((0, 0), candidate, font=font, stroke_width=stroke_width)
+        if (bbox[2] - bbox[0]) <= max_w or not current:
+            current = candidate
+        else:
+            chunks.append(current)
+            current = ch
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 def _wrap_text(
     text: str,
     font: ImageFont.ImageFont,
     max_w: int,
     stroke_width: int = 0,
+    break_long_words: bool = False,
 ) -> list[str]:
-    """Wrap text so that every line fits within max_w width."""
+    """Wrap text so that every line fits within max_w width.
+
+    When ``break_long_words=True``, single tokens wider than ``max_w`` are split
+    into character chunks so rendered banners/badges never overflow frame bounds.
+    """
     tmp = Image.new("RGBA", (1, 1))
     d_tmp = ImageDraw.Draw(tmp)
 
@@ -56,6 +84,21 @@ def _wrap_text(
             continue
         current_line: list[str] = []
         for word in words:
+            if break_long_words:
+                word_bbox = d_tmp.textbbox(
+                    (0, 0), word, font=font, stroke_width=stroke_width
+                )
+                if (word_bbox[2] - word_bbox[0]) > max_w:
+                    if current_line:
+                        lines.append(" ".join(current_line))
+                        current_line = []
+                    pieces = _split_oversized_word(
+                        word, d_tmp, font, max_w, stroke_width
+                    )
+                    lines.extend(pieces[:-1])
+                    current_line = [pieces[-1]]
+                    continue
+
             test_line = " ".join(current_line + [word])
             bbox = d_tmp.textbbox((0, 0), test_line, font=font, stroke_width=stroke_width)
             if (bbox[2] - bbox[0]) <= max_w or not current_line:
@@ -85,7 +128,9 @@ def render_hook_banner(
     line_spacing = max(6, int(font_size * 0.2))
     content_max_w = max(200, max_width - 2 * pad_x)
 
-    lines = _wrap_text(text, font, content_max_w, stroke_width=stroke_width)
+    lines = _wrap_text(
+        text, font, content_max_w, stroke_width=stroke_width, break_long_words=True
+    )
     if not lines:
         lines = [text]
 
@@ -131,31 +176,51 @@ def render_context_badge(
     text: str,
     font_size: int = 28,
     font_name: str | None = None,
+    max_width: int | None = None,
 ) -> np.ndarray:
     """Render a compact context badge pill into an RGBA numpy array."""
     font = _load_font(font_name, font_size)
     tmp = Image.new("RGBA", (1, 1))
     d_tmp = ImageDraw.Draw(tmp)
-    b = d_tmp.textbbox((0, 0), text, font=font)
-    tw, th = b[2] - b[0], b[3] - b[1]
 
     pad_x = 22
     pad_y = 8
-    badge_w = tw + 2 * pad_x
-    badge_h = th + 2 * pad_y
+    line_spacing = max(4, int(font_size * 0.2))
+
+    if max_width is not None:
+        content_max_w = max(80, int(max_width) - 2 * pad_x)
+        lines = _wrap_text(
+            text, font, content_max_w, stroke_width=0, break_long_words=True
+        ) or [text]
+    else:
+        lines = [text]
+
+    line_metrics: list[tuple[int, int, tuple[int, int, int, int]]] = []
+    for line in lines:
+        b = d_tmp.textbbox((0, 0), line, font=font)
+        line_metrics.append((max(1, b[2] - b[0]), max(1, b[3] - b[1]), b))
+
+    max_line_w = max(m[0] for m in line_metrics)
+    total_line_h = sum(m[1] for m in line_metrics) + (len(lines) - 1) * line_spacing
+
+    badge_w = max_line_w + 2 * pad_x
+    badge_h = total_line_h + 2 * pad_y
 
     img = Image.new("RGBA", (badge_w, badge_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     draw.rounded_rectangle(
         [(0, 0), (badge_w - 1, badge_h - 1)],
-        radius=badge_h // 2,
+        radius=min(badge_h // 2, 24) if len(lines) > 1 else badge_h // 2,
         fill=(25, 25, 30, 215),
         outline=(255, 255, 255, 75),
         width=1,
     )
-    tx = pad_x - b[0]
-    ty = pad_y - b[1]
-    draw.text((tx, ty), text, font=font, fill="white")
+    curr_y = pad_y
+    for line, (lw, lh, b) in zip(lines, line_metrics):
+        tx = (badge_w - lw) // 2 - b[0]
+        ty = curr_y - b[1]
+        draw.text((tx, ty), line, font=font, fill="white")
+        curr_y += lh + line_spacing
 
     return np.array(img, dtype=np.uint8)
 
@@ -242,6 +307,7 @@ class HookTitleOverlay:
                 text=clean_badge,
                 font_size=badge_font_size,
                 font_name=self.font_name,
+                max_width=int(video_w * 0.90),
             )
             badge_clip = ImageClip(badge_arr).with_duration(overlay_duration)
 

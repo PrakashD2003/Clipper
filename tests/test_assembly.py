@@ -869,6 +869,37 @@ class TestFileOrganizer:
         assert clip_path == expected
         assert clip_path.parent.is_dir()
 
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("CON", "CON_"),
+            ("nul", "nul_"),
+            ("AUX", "AUX_"),
+            ("prn", "prn_"),
+            ("COM1", "COM1_"),
+            ("lpt9", "lpt9_"),
+            ("con.txt", "con.txt_"),
+        ],
+    )
+    def test_sanitize_name_and_get_clip_path_guard_windows_reserved_names(
+        self, tmp_path: Path, raw: str, expected: str
+    ) -> None:
+        assert FileOrganizer._sanitize_name(raw) == expected
+        cfg = _make_config(
+            tmp_path,
+            overrides={"general": {"output_dir": str(tmp_path / "out")}},
+        )
+        organizer = FileOrganizer(cfg)
+        clip_path = organizer.get_clip_path(
+            game=raw,
+            streamer="NUL",
+            index=1,
+            date_str="2026-11-18",
+        )
+        assert clip_path.parent.is_dir()
+        clip_path.write_bytes(b"ok")
+        assert clip_path.is_file()
+
     def test_get_clip_path_custom_templates_and_traversal_protection(self, tmp_path: Path) -> None:
         cfg = _make_config(
             tmp_path,

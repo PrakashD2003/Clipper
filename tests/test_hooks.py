@@ -389,3 +389,22 @@ class TestFadeInEffect:
         base = ColorClip((720, 1280), color=(0, 0, 0)).with_duration(4.0)
         result = overlay.add_hook(base, "SHOULD SKIP", "🔥 Badge")
         assert result is base
+
+    def test_oversized_single_token_hook_and_long_badge_fit_within_frame_width(self) -> None:
+        """Long unspaced tokens and long context badges must never exceed 90% of video width."""
+        long_token = "NOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO"
+        banner = render_hook_banner(long_token, max_width=972, font_size=50)
+        assert banner.shape[1] <= 972
+
+        long_badge = (
+            "🔥 Insane Ultra Long Adaptive Context Badge Label That Would Overflow 1080px Without Wrapping"
+        )
+        badge = render_context_badge(long_badge, font_size=28, max_width=972)
+        assert badge.shape[1] <= 972
+
+        cfg = DummyConfig({"hook_title.enabled": True, "hook_title.duration_seconds": 3.0})
+        overlay = HookTitleOverlay(cfg)  # type: ignore[arg-type]
+        base = ColorClip((1080, 1920), color=(0, 0, 0)).with_duration(4.0)
+        result = overlay.add_hook(base, long_token, long_badge)
+        assert result.clips[1].w <= int(1080 * 0.90)
+        assert result.clips[2].w <= int(1080 * 0.90)

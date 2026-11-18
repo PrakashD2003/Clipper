@@ -14,6 +14,16 @@ logger = logging.getLogger(__name__)
 
 _INVALID_PATH_CHARS_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
 _MULTISPACE_RE = re.compile(r"\s+")
+_WINDOWS_RESERVED_NAMES = frozenset(
+    {
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        *(f"COM{i}" for i in range(1, 10)),
+        *(f"LPT{i}" for i in range(1, 10)),
+    }
+)
 
 
 class FileOrganizer:
@@ -37,10 +47,15 @@ class FileOrganizer:
 
     @staticmethod
     def _sanitize_name(name: str, fallback: str = "unknown") -> str:
-        """Strip Windows/POSIX invalid path characters (<>:\"/\\|?*) and leading/trailing dots/spaces."""
+        """Strip Windows/POSIX invalid path characters (<>:\"/\\|?*), leading/trailing dots/spaces, and guard Windows reserved device names."""
         cleaned = _INVALID_PATH_CHARS_RE.sub("", str(name or ""))
         cleaned = _MULTISPACE_RE.sub(" ", cleaned).strip(" .")
-        return cleaned or fallback
+        if not cleaned:
+            return fallback
+        stem = cleaned.split(".", 1)[0].strip().upper()
+        if stem in _WINDOWS_RESERVED_NAMES:
+            cleaned = f"{cleaned}_"
+        return cleaned
 
     def get_clip_path(
         self,

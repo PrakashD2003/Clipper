@@ -27,21 +27,28 @@ class TransformativeNarrator:
     def __init__(self, config: Config) -> None:
         self.config = config
         self.enabled: bool = bool(config.get("transformation.enabled", True))
-        self.mode: str = str(config.get("transformation.mode", "auto"))
-        self.engine: str = str(config.get("transformation.tts_engine", "auto"))
-        self.voice: str = str(config.get("transformation.tts_voice", "af_heart"))
+        self.mode: str = str(
+            config.get("transformation.mode", "auto") or "auto"
+        ).strip().lower()
+        self.engine: str = str(
+            config.get("transformation.tts_engine", "auto") or "auto"
+        )
+        self.voice: str = str(
+            config.get("transformation.tts_voice", "af_heart") or "af_heart"
+        )
         self.edge_tts_voice: str = str(
             config.get("transformation.edge_tts_voice", "en-US-GuyNeural")
+            or "en-US-GuyNeural"
         )
         self.elevenlabs_voice_id: str = str(
-            config.get("transformation.elevenlabs_voice_id", "")
+            config.get("transformation.elevenlabs_voice_id", "") or ""
         )
         self.elevenlabs_model_id: str = str(
             config.get("transformation.elevenlabs_model_id", "eleven_multilingual_v2")
+            or "eleven_multilingual_v2"
         )
-        self.duck_volume: float = float(
-            config.get("transformation.duck_stream_volume", 0.18)
-        )
+        raw_duck = config.get("transformation.duck_stream_volume", 0.18)
+        self.duck_volume: float = float(0.18 if raw_duck is None else raw_duck)
 
     def synthesize_speech(self, text: str, output_wav: Path) -> Path | None:
         """Synthesize text to WAV via configured provider (kokoro | edge-tts | elevenlabs | auto).
@@ -283,7 +290,7 @@ class TransformativeNarrator:
         temp_dir: Path | None = None,
     ) -> tuple[Path | None, Path | None]:
         """Prepare intro and outro narration WAV paths respecting custom mic priority."""
-        if not self.enabled or self.mode == "raw":
+        if not self.enabled or str(self.mode or "").strip().lower() == "raw":
             return None, None
 
         temp = temp_dir or Path(tempfile.gettempdir())
@@ -306,10 +313,14 @@ class TransformativeNarrator:
         intro_dur: float | None,
         outro_dur: float | None,
         clip_duration: float,
+        has_video_audio: bool = True,
     ) -> tuple[str, int]:
         """Build dynamic FFmpeg filter_complex string and input count.
 
         - Handles intro-only (2 inputs), outro-only (2 inputs), or intro+outro (3 inputs).
+        - When ``has_video_audio`` is False (silent clip), synthesizes a 48kHz stereo
+          silent base track of ``clip_duration`` via ``anullsrc`` so intro/outro voiceovers
+          still attach cleanly instead of failing on a missing ``[0:a]`` stream.
         - Normalizes stream audio and all narrator WAV inputs to 48000 Hz stereo
           (`aresample=48000,aformat=channel_layouts=stereo`) before `amix` so 24kHz mono
           Kokoro/Edge-TTS/ElevenLabs tracks mix cleanly with 48kHz stereo stream audio,
@@ -326,9 +337,19 @@ class TransformativeNarrator:
         clip_dur = max(float(clip_duration), 0.1)
 
         if not has_intro and not has_outro:
+            if not has_video_audio:
+                return (
+                    f"anullsrc=channel_layout=stereo:sample_rate=48000,"
+                    f"atrim=0:{clip_dur:.2f},asetpts=PTS-STARTPTS[aout]",
+                    1,
+                )
             return "[0:a]aresample=48000,aformat=channel_layouts=stereo[aout]", 1
 
         duck_vol_str = f"{self.duck_volume:.2f}"
+        silent_base = (
+            f"anullsrc=channel_layout=stereo:sample_rate=48000,"
+            f"atrim=0:{clip_dur:.2f},asetpts=PTS-STARTPTS[a0];"
+        )
 
         if has_intro and has_outro:
             intro_d = float(intro_dur)  # type: ignore[arg-type]
@@ -348,12 +369,12 @@ class TransformativeNarrator:
             delay_ms = int(round(outro_start * 1000))
 
             intro_trim = (
-                f",atrim=0:{eff_intro:.2f},asetpts=PTS-STARTPTS"
+                f",atrim=0:{max(0.01, eff_intro):.2f},asetpts=PTS-STARTPTS"
                 if eff_intro < intro_d - 1e-6
                 else ""
             )
             outro_trim = (
-                f",atrim=0:{eff_outro:.2f},asetpts=PTS-STARTPTS"
+                f",atrim=0:{max(0.01, eff_outro):.2f},asetpts=PTS-STARTPTS"
                 if eff_outro < outro_d - 1e-6
                 else ""
             )
@@ -363,8 +384,13 @@ class TransformativeNarrator:
                 f"between(t,{outro_start:.2f},{outro_end:.2f}),"
                 f"{duck_vol_str},1.0)"
             )
-            filter_complex = (
+            base_branch = (
                 f"[0:a]volume='{vol_expr}':eval=frame,aresample=48000,aformat=channel_layouts=stereo[a0];"
+                if has_video_audio
+                else silent_base
+            )
+            filter_complex = (
+                f"{base_branch}"
                 f"[1:a]aresample=48000,aformat=channel_layouts=stereo{intro_trim}[a1];"
                 f"[2:a]aresample=48000,aformat=channel_layouts=stereo{outro_trim},adelay={delay_ms}|{delay_ms}[a2];"
                 f"[a0][a1][a2]amix=inputs=3:duration=first:normalize=0[aout]"
@@ -376,14 +402,19 @@ class TransformativeNarrator:
             eff_intro = min(intro_d, clip_dur * 0.75)
             intro_end = eff_intro
             intro_trim = (
-                f",atrim=0:{eff_intro:.2f},asetpts=PTS-STARTPTS"
+                f",atrim=0:{max(0.01, eff_intro):.2f},asetpts=PTS-STARTPTS"
                 if eff_intro < intro_d - 1e-6
                 else ""
             )
 
             vol_expr = f"if(between(t,0,{intro_end:.2f}),{duck_vol_str},1.0)"
-            filter_complex = (
+            base_branch = (
                 f"[0:a]volume='{vol_expr}':eval=frame,aresample=48000,aformat=channel_layouts=stereo[a0];"
+                if has_video_audio
+                else silent_base
+            )
+            filter_complex = (
+                f"{base_branch}"
                 f"[1:a]aresample=48000,aformat=channel_layouts=stereo{intro_trim}[a1];"
                 f"[a0][a1]amix=inputs=2:duration=first:normalize=0[aout]"
             )
@@ -396,7 +427,7 @@ class TransformativeNarrator:
         outro_end = clip_dur
         delay_ms = int(round(outro_start * 1000))
         outro_trim = (
-            f",atrim=0:{eff_outro:.2f},asetpts=PTS-STARTPTS"
+            f",atrim=0:{max(0.01, eff_outro):.2f},asetpts=PTS-STARTPTS"
             if eff_outro < outro_d - 1e-6
             else ""
         )
@@ -404,12 +435,71 @@ class TransformativeNarrator:
         vol_expr = (
             f"if(between(t,{outro_start:.2f},{outro_end:.2f}),{duck_vol_str},1.0)"
         )
-        filter_complex = (
+        base_branch = (
             f"[0:a]volume='{vol_expr}':eval=frame,aresample=48000,aformat=channel_layouts=stereo[a0];"
+            if has_video_audio
+            else silent_base
+        )
+        filter_complex = (
+            f"{base_branch}"
             f"[1:a]aresample=48000,aformat=channel_layouts=stereo{outro_trim},adelay={delay_ms}|{delay_ms}[a1];"
             f"[a0][a1]amix=inputs=2:duration=first:normalize=0[aout]"
         )
         return filter_complex, 2
+
+    def _probe_audio_duration(self, audio_path: Path | None) -> float | None:
+        """Probe narration track duration via soundfile with ffprobe fallback (supports .wav/.m4a/.mp3/.aac)."""
+        if audio_path is None:
+            return None
+        p = Path(audio_path)
+        if not p.is_file() or p.stat().st_size == 0:
+            return None
+        try:
+            info = sf.info(str(p))
+            if info.duration > 0.05:
+                return float(info.duration)
+            return None
+        except Exception as exc:
+            logger.debug("soundfile could not probe %s (%s); trying ffprobe", p, exc)
+
+        try:
+            cmd = [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(p),
+            ]
+            res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            val = float(res.stdout.strip())
+            if val > 0.05:
+                return val
+        except Exception as exc:
+            logger.debug("ffprobe failed reading audio duration for %s: %s", p, exc)
+        return None
+
+    def _has_audio_stream(self, video_path: Path) -> bool:
+        """Check whether input_video has at least one audio stream (defaults True if probe unavailable)."""
+        try:
+            cmd = [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "a",
+                "-show_entries",
+                "stream=codec_type",
+                "-of",
+                "csv=p=0",
+                str(video_path),
+            ]
+            res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            return bool(res.stdout.strip())
+        except Exception:
+            return True
 
     def mix_narration_with_ducking(
         self,
@@ -425,31 +515,11 @@ class TransformativeNarrator:
         output_video.parent.mkdir(parents=True, exist_ok=True)
 
         # Bypass mixing if disabled, raw mode, or neither voiceover exists
-        if not self.enabled or self.mode == "raw":
+        if not self.enabled or str(self.mode or "").strip().lower() == "raw":
             return self._bypass_copy(input_video, output_video)
 
-        intro_dur: float | None = None
-        outro_dur: float | None = None
-
-        if intro_wav is not None:
-            p_intro = Path(intro_wav)
-            if p_intro.is_file() and p_intro.stat().st_size > 0:
-                try:
-                    info = sf.info(str(p_intro))
-                    if info.duration > 0.05:
-                        intro_dur = float(info.duration)
-                except Exception as exc:
-                    logger.debug("Failed reading intro_wav info: %s", exc)
-
-        if outro_wav is not None:
-            p_outro = Path(outro_wav)
-            if p_outro.is_file() and p_outro.stat().st_size > 0:
-                try:
-                    info = sf.info(str(p_outro))
-                    if info.duration > 0.05:
-                        outro_dur = float(info.duration)
-                except Exception as exc:
-                    logger.debug("Failed reading outro_wav info: %s", exc)
+        intro_dur = self._probe_audio_duration(intro_wav)
+        outro_dur = self._probe_audio_duration(outro_wav)
 
         if intro_dur is None and outro_dur is None:
             return self._bypass_copy(input_video, output_video)
@@ -459,10 +529,12 @@ class TransformativeNarrator:
         if eff_clip_duration <= 0.0:
             eff_clip_duration = self._probe_clip_duration(input_video)
 
+        has_video_audio = self._has_audio_stream(input_video)
         filtergraph, input_count = self._build_ducking_filtergraph(
             intro_dur=intro_dur,
             outro_dur=outro_dur,
             clip_duration=eff_clip_duration,
+            has_video_audio=has_video_audio,
         )
 
         same_file = False

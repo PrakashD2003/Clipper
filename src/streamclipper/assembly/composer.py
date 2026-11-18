@@ -1,6 +1,7 @@
 """9:16 Video Composer using MoviePy v2 for YouTube Shorts assembly."""
 
 import logging
+import math
 from pathlib import Path
 from typing import Any
 
@@ -27,17 +28,23 @@ def remap_timeline_for_beats(
     if not beats:
         return list(words), list(chat_burst), (peak_time if peak_time > 0.0 else None)
 
+    valid_beats: list[tuple[float, float]] = []
+    for beat in beats:
+        if not isinstance(beat, dict):
+            continue
+        b_start = float(beat.get("start", 0.0))
+        b_end = float(beat.get("end", 0.0))
+        if b_end > b_start:
+            valid_beats.append((b_start, b_end))
+
     remapped_words: list[WordTimestamp] = []
     remapped_chat: list[dict[str, Any]] = []
     remapped_peak: float | None = None
 
     cum_offset = 0.0
-    for i, beat in enumerate(beats):
-        b_start = float(beat.get("start", 0.0))
-        b_end = float(beat.get("end", 0.0))
-        b_dur = max(0.0, b_end - b_start)
-        if b_dur <= 0.0:
-            continue
+    for i, (b_start, b_end) in enumerate(valid_beats):
+        b_dur = b_end - b_start
+        is_last_beat = i == len(valid_beats) - 1
 
         # Remap words overlapping this beat
         for w in words:
@@ -60,6 +67,8 @@ def remap_timeline_for_beats(
 
         # Remap chat messages
         for msg in chat_burst:
+            if not isinstance(msg, dict):
+                continue
             raw_time = msg.get("offset_seconds")
             if raw_time is None:
                 raw_time = msg.get("timestamp")
@@ -67,13 +76,18 @@ def remap_timeline_for_beats(
                 raw_time = msg.get("time")
             if raw_time is None:
                 raw_time = msg.get("offset")
-            if raw_time is None:
+            if raw_time is None or isinstance(raw_time, bool):
+                continue
+            try:
+                msg_time = float(raw_time)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(msg_time):
                 continue
 
-            msg_time = float(raw_time)
             is_in_beat = (
                 (b_start <= msg_time <= b_end)
-                if i == len(beats) - 1
+                if is_last_beat
                 else (b_start <= msg_time < b_end)
             )
             if is_in_beat:
@@ -97,7 +111,7 @@ def remap_timeline_for_beats(
         if peak_time > 0.0 and remapped_peak is None:
             is_peak_in_beat = (
                 (b_start <= peak_time <= b_end)
-                if i == len(beats) - 1
+                if is_last_beat
                 else (b_start <= peak_time < b_end)
             )
             if is_peak_in_beat:
@@ -324,7 +338,7 @@ class VideoComposer:
             return clip
 
         z_start = max(0.0, float(peak_offset) - 0.5)
-        z_end = min(float(clip.duration), float(peak_offset) + self.zoom_duration)
+        z_end = min(float(clip.duration), z_start + self.zoom_duration)
         if z_end <= z_start or z_start >= clip.duration:
             return clip
 

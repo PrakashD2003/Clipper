@@ -57,10 +57,27 @@ def format_time(seconds: float) -> str:
     return f"{hrs:02d}:{mins:02d}:{secs:02d}"
 
 
+_WINDOWS_RESERVED_NAMES = frozenset(
+    {
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        *(f"COM{i}" for i in range(1, 10)),
+        *(f"LPT{i}" for i in range(1, 10)),
+    }
+)
+
+
 def _sanitize_path_segment(name: str, fallback: str = "unknown") -> str:
     """Sanitize a folder segment so it is valid on Windows and POSIX filesystems."""
     cleaned = _INVALID_PATH_CHARS_RE.sub("_", str(name or "")).strip(" .")
-    return cleaned or fallback
+    if not cleaned:
+        return fallback
+    stem = cleaned.split(".", 1)[0].strip().upper()
+    if stem in _WINDOWS_RESERVED_NAMES:
+        cleaned = f"{cleaned}_"
+    return cleaned
 
 
 class Pipeline:
