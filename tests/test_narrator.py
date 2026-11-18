@@ -693,3 +693,113 @@ class TestMixNarrationWithDucking:
             assert result == out_video
             assert out_video.is_file()
             assert out_video.read_text(encoding="utf-8") == "valid input video data"
+
+    def test_silent_video_still_receives_narrator_audio_track(
+        self, base_config: Config, tmp_path: Path
+    ) -> None:
+        """Silent video clips (no audio stream) must receive narrator intro/outro instead of bypassing."""
+        narrator = TransformativeNarrator(base_config)
+
+        silent_video = tmp_path / "silent_input.mp4"
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=160x120:d=3",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-an",
+                str(silent_video),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        intro_wav = create_synthetic_wav(tmp_path / "intro_s.wav", duration_sec=0.8, freq=440.0)
+        outro_wav = create_synthetic_wav(tmp_path / "outro_s.wav", duration_sec=0.8, freq=880.0)
+        out_video = tmp_path / "silent_with_voiceover.mp4"
+
+        res = narrator.mix_narration_with_ducking(
+            input_video=silent_video,
+            output_video=out_video,
+            intro_wav=intro_wav,
+            outro_wav=outro_wav,
+            clip_duration=3.0,
+        )
+        assert res == out_video
+        probe = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "a",
+                "-show_entries",
+                "stream=codec_name",
+                "-of",
+                "csv=p=0",
+                str(out_video),
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert probe.stdout.strip() == "aac"
+
+    def test_non_wav_m4a_custom_voiceover_is_probed_and_mixed(
+        self, base_config: Config, tmp_path: Path
+    ) -> None:
+        """Non-WAV custom voiceover containers (e.g., .m4a) must be probed via ffprobe fallback and mixed."""
+        narrator = TransformativeNarrator(base_config)
+        in_video = create_synthetic_mp4(tmp_path / "stream_m4a.mp4", duration_sec=3.0)
+        intro_m4a = tmp_path / "custom_intro.m4a"
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=660:duration=0.9",
+                "-c:a",
+                "aac",
+                str(intro_m4a),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        out_video = tmp_path / "mixed_m4a.mp4"
+
+        narrator.mix_narration_with_ducking(
+            input_video=in_video,
+            output_video=out_video,
+            intro_wav=intro_m4a,
+            outro_wav=None,
+            clip_duration=3.0,
+        )
+        assert out_video.is_file() and out_video.stat().st_size > 0
+        # Byte comparison proves FFmpeg actually mixed the .m4a track rather than bypassing via copy
+        assert out_video.read_bytes() != in_video.read_bytes()
+
+    def test_case_insensitive_raw_mode_and_tiny_atrim_floor(
+        self, base_config: Config, tmp_path: Path
+    ) -> None:
+        """Uppercase/whitespace 'RAW' config must bypass mixing, and tiny clips must not emit atrim=0:0.00."""
+        cfg_file = tmp_path / "raw_upper.yaml"
+        cfg_file.write_text("transformation:\n  mode: ' RAW '\n", encoding="utf-8")
+        raw_narrator = TransformativeNarrator(Config(cfg_file))
+        wav = create_synthetic_wav(tmp_path / "intro_raw.wav", duration_sec=0.5)
+        assert raw_narrator.prepare_narration_tracks(
+            voice_intro_path=wav, temp_dir=tmp_path
+        ) == (None, None)
+
+        narrator = TransformativeNarrator(base_config)
+        fg, count = narrator._build_ducking_filtergraph(
+            intro_dur=10.0, outro_dur=0.05, clip_duration=0.1
+        )
+        assert count == 3
+        assert "atrim=0:0.00" not in fg
