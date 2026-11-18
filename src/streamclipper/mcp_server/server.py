@@ -8,6 +8,7 @@ import math
 from pathlib import Path
 import re
 from typing import Any
+import weakref
 
 from mcp.server.mcpserver import MCPServer
 
@@ -30,6 +31,7 @@ from ..models import (
     StreamInfo,
     TimeRange,
 )
+from ..output.organizer import FileOrganizer
 from ..pipeline import Pipeline
 from ..scoring.ollama_scorer import (
     VALID_MOMENT_TYPES,
@@ -44,6 +46,37 @@ from ..scoring.scorer import Scorer, TranscriptChunk
 logger = logging.getLogger(__name__)
 
 mcp = MCPServer("streamclipper")
+
+_LOOP_GPU_LOCKS: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop, asyncio.Lock
+] = weakref.WeakKeyDictionary()
+_LOOP_URL_LOCKS: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop, dict[str, asyncio.Lock]
+] = weakref.WeakKeyDictionary()
+
+
+def _get_gpu_lock() -> asyncio.Lock:
+    """Return the shared GPU serialization lock bound to the active event loop."""
+    loop = asyncio.get_running_loop()
+    lock = _LOOP_GPU_LOCKS.get(loop)
+    if lock is None:
+        lock = asyncio.Lock()
+        _LOOP_GPU_LOCKS[loop] = lock
+    return lock
+
+
+def _get_url_lock(cache_key: str) -> asyncio.Lock:
+    """Return a per-stream cache lock bound to the active event loop."""
+    loop = asyncio.get_running_loop()
+    locks = _LOOP_URL_LOCKS.get(loop)
+    if locks is None:
+        locks = {}
+        _LOOP_URL_LOCKS[loop] = locks
+    lock = locks.get(cache_key)
+    if lock is None:
+        lock = asyncio.Lock()
+        locks[cache_key] = lock
+    return lock
 
 _DEFAULT_CLIP_HASHTAGS: tuple[str, ...] = (
     "Gaming",
@@ -268,21 +301,34 @@ def _is_within_directory(path: Path, base_dir: Path) -> bool:
         return False
 
 
+def _is_safe_id_prefix(value: str) -> bool:
+    """Return True if value is a safe single-segment filename prefix (no separators or '..')."""
+    if not value or not value.strip():
+        return False
+    if "/" in value or "\\" in value or ":" in value or ".." in value:
+        return False
+    return True
+
+
 def _collect_temp_files_for_stream(
     temp_dir: Path,
     cache: StepCache,
     url: str,
     state: PipelineState | None,
 ) -> list[Path]:
-    """Identify temporary audio, chat, and segment files belonging to a stream."""
+    """Identify temporary audio, chat, and segment files belonging to a stream.
+
+    Uses exact filename prefix/suffix matching (never glob wildcard expansion) and
+    enforces strict containment within ``temp_dir`` on every returned path.
+    """
     candidates: list[Path] = []
     video_ids: set[str] = set()
 
-    if state is not None and state.stream_info.video_id:
+    if state is not None and _is_safe_id_prefix(state.stream_info.video_id):
         video_ids.add(state.stream_info.video_id)
 
     extracted_id = _extract_youtube_id_from_url(url)
-    if extracted_id:
+    if extracted_id and _is_safe_id_prefix(extracted_id):
         video_ids.add(extracted_id)
 
     cache_key = cache.get_cache_key(url) if url else ""
@@ -291,39 +337,62 @@ def _collect_temp_files_for_stream(
         audio_candidate = Path(state.audio_path)
         if audio_candidate.is_file() and _is_within_directory(audio_candidate, temp_dir):
             candidates.append(audio_candidate)
-            if audio_candidate.stem:
+            if _is_safe_id_prefix(audio_candidate.stem):
                 video_ids.add(audio_candidate.stem)
 
     if temp_dir.is_dir():
         for vid in video_ids:
             for direct_name in (f"{vid}.wav", f"{vid}.info.json", f"{vid}_chat.csv"):
                 p = temp_dir / direct_name
-                if p.is_file():
+                if p.is_file() and _is_within_directory(p, temp_dir):
                     candidates.append(p)
-            for live_chat in temp_dir.glob(f"{vid}*.live_chat.json"):
-                if live_chat.is_file():
-                    candidates.append(live_chat)
 
-        if cache_key:
+        if video_ids:
+            for entry in temp_dir.iterdir():
+                if not entry.is_file() or not _is_within_directory(entry, temp_dir):
+                    continue
+                if entry.name.endswith(".live_chat.json") and any(
+                    entry.name.startswith(vid) for vid in video_ids
+                ):
+                    candidates.append(entry)
+
+        if cache_key and _is_safe_id_prefix(cache_key):
             key_chat = temp_dir / f"{cache_key}_chat.csv"
-            if key_chat.is_file():
+            if key_chat.is_file() and _is_within_directory(key_chat, temp_dir):
                 candidates.append(key_chat)
 
         segments_dir = temp_dir / "segments"
-        if segments_dir.is_dir():
-            for vid in video_ids:
-                for seg_file in segments_dir.glob(f"{vid}_*"):
-                    if seg_file.is_file():
-                        candidates.append(seg_file)
+        if segments_dir.is_dir() and video_ids:
+            seg_prefixes = tuple(f"{vid}_" for vid in video_ids)
+            for seg_file in segments_dir.iterdir():
+                if (
+                    seg_file.is_file()
+                    and _is_within_directory(seg_file, temp_dir)
+                    and seg_file.name.startswith(seg_prefixes)
+                ):
+                    candidates.append(seg_file)
 
     unique: list[Path] = []
     seen: set[str] = set()
     for p in candidates:
+        if not _is_within_directory(p, temp_dir):
+            continue
         key = str(p.resolve()).lower()
         if key not in seen:
             seen.add(key)
             unique.append(p)
     return unique
+
+
+def _next_available_clip_index(
+    config: Config, game: str, streamer: str, min_index: int = 1
+) -> int:
+    """Find the lowest clip index >= min_index that does not overwrite an existing output MP4."""
+    organizer = FileOrganizer(config)
+    idx = max(1, int(min_index))
+    while organizer.get_clip_path(game=game, streamer=streamer, index=idx).exists():
+        idx += 1
+    return idx
 
 
 async def _render_single_highlight(
@@ -333,10 +402,12 @@ async def _render_single_highlight(
     highlight: Highlight,
     streamer_name: str,
     game_name: str,
-    clip_index: int,
+    clip_index: int | None,
     base_mode: str,
     voice_intro_path: Path | None = None,
     voice_outro_path: Path | None = None,
+    *,
+    min_clip_index: int = 1,
 ) -> tuple[ClipResult, str]:
     """Download segment(s), build offline ClipMetadata, and assemble one highlight."""
     clip_mode, valid_beats = pipeline._resolve_highlight_mode(base_mode, highlight)
@@ -392,18 +463,26 @@ async def _render_single_highlight(
         transformation_mode=clip_mode,
     )
 
-    clip_result = await asyncio.to_thread(
-        pipeline._assemble_highlight,
-        highlight,
-        metadata,
-        segment_paths,
-        clip_index,
-        clip_mode,
-        voice_intro_path,
-        voice_outro_path,
-        valid_beats=valid_beats,
-        buffer_seconds=buffer_seconds,
-    )
+    async with _get_gpu_lock():
+        effective_index = (
+            clip_index
+            if clip_index is not None
+            else _next_available_clip_index(
+                config, game_name, streamer_name, min_index=min_clip_index
+            )
+        )
+        clip_result = await asyncio.to_thread(
+            pipeline._assemble_highlight,
+            highlight,
+            metadata,
+            segment_paths,
+            effective_index,
+            clip_mode,
+            voice_intro_path,
+            voice_outro_path,
+            valid_beats=valid_beats,
+            buffer_seconds=buffer_seconds,
+        )
     return clip_result, clip_mode
 
 
@@ -454,52 +533,60 @@ async def download_stream_audio(url: str) -> str:
             download_audio, clean_url, temp_dir
         )
 
-        existing = cache.load_state(clean_url)
         default_game = str(config.get("discovery.default_game", "GTA 6"))
-        if existing is not None:
-            resolved_game = existing.stream_info.game or downloaded_info.game or default_game
-            existing.stream_info = StreamInfo(
-                url=clean_url,
-                title=downloaded_info.title or existing.stream_info.title,
-                platform=downloaded_info.platform,
-                streamer=existing.stream_info.streamer or downloaded_info.streamer,
-                game=resolved_game,
-                duration_seconds=(
-                    downloaded_info.duration_seconds
-                    or existing.stream_info.duration_seconds
-                ),
-                view_count=downloaded_info.view_count or existing.stream_info.view_count,
-                video_id=downloaded_info.video_id or existing.stream_info.video_id,
-            )
-            existing.audio_path = Path(audio_path)
-            if (
-                existing.status < PipelineStatus.TRANSCRIBING
-                or existing.status == PipelineStatus.FAILED
-            ):
-                existing.status = (
-                    PipelineStatus.ANALYZING
-                    if existing.transcript is not None
-                    else PipelineStatus.TRANSCRIBING
+        async with _get_url_lock(cache.get_cache_key(clean_url)):
+            existing = cache.load_state(clean_url)
+            if existing is not None:
+                resolved_game = existing.stream_info.game or downloaded_info.game or default_game
+                existing.stream_info = StreamInfo(
+                    url=clean_url,
+                    title=downloaded_info.title or existing.stream_info.title,
+                    platform=downloaded_info.platform,
+                    streamer=existing.stream_info.streamer or downloaded_info.streamer,
+                    game=resolved_game,
+                    duration_seconds=(
+                        downloaded_info.duration_seconds
+                        or existing.stream_info.duration_seconds
+                    ),
+                    view_count=downloaded_info.view_count or existing.stream_info.view_count,
+                    video_id=(
+                        downloaded_info.video_id
+                        or existing.stream_info.video_id
+                        or (_extract_youtube_id_from_url(clean_url) or "")
+                    ),
                 )
-            state = existing
-        else:
-            stream_info = StreamInfo(
-                url=clean_url,
-                title=downloaded_info.title,
-                platform=downloaded_info.platform,
-                streamer=downloaded_info.streamer,
-                game=downloaded_info.game or default_game,
-                duration_seconds=downloaded_info.duration_seconds,
-                view_count=downloaded_info.view_count,
-                video_id=downloaded_info.video_id,
-            )
-            state = PipelineState(
-                stream_info=stream_info,
-                status=PipelineStatus.TRANSCRIBING,
-                audio_path=Path(audio_path),
-            )
+                existing.audio_path = Path(audio_path)
+                if (
+                    existing.status < PipelineStatus.TRANSCRIBING
+                    or existing.status == PipelineStatus.FAILED
+                ):
+                    existing.status = (
+                        PipelineStatus.ANALYZING
+                        if existing.transcript is not None
+                        else PipelineStatus.TRANSCRIBING
+                    )
+                state = existing
+            else:
+                stream_info = StreamInfo(
+                    url=clean_url,
+                    title=downloaded_info.title,
+                    platform=downloaded_info.platform,
+                    streamer=downloaded_info.streamer,
+                    game=downloaded_info.game or default_game,
+                    duration_seconds=downloaded_info.duration_seconds,
+                    view_count=downloaded_info.view_count,
+                    video_id=(
+                        downloaded_info.video_id
+                        or (_extract_youtube_id_from_url(clean_url) or "")
+                    ),
+                )
+                state = PipelineState(
+                    stream_info=stream_info,
+                    status=PipelineStatus.TRANSCRIBING,
+                    audio_path=Path(audio_path),
+                )
 
-        cache.save_state(state)
+            cache.save_state(state)
         return _json_ok(
             {
                 "url": clean_url,
@@ -527,13 +614,13 @@ async def transcribe_audio(url: str = "", audio_path: str = "") -> str:
 
         config = _get_config()
         cache = _get_cache(config)
-        state = _resolve_state(cache, url=clean_url, audio_path=clean_audio)
+        initial_state = _resolve_state(cache, url=clean_url, audio_path=clean_audio)
 
         target_audio: Path | None = None
         if clean_audio:
             target_audio = Path(clean_audio)
-        elif state is not None and state.audio_path is not None:
-            target_audio = Path(state.audio_path)
+        elif initial_state is not None and initial_state.audio_path is not None:
+            target_audio = Path(initial_state.audio_path)
 
         if target_audio is None:
             return _json_error(
@@ -543,37 +630,52 @@ async def transcribe_audio(url: str = "", audio_path: str = "") -> str:
             return _json_error(f"Audio file not found: {target_audio}")
 
         transcriber = Transcriber(config)
-        transcript = await asyncio.to_thread(transcriber.transcribe, target_audio)
+        async with _get_gpu_lock():
+            transcript = await asyncio.to_thread(transcriber.transcribe, target_audio)
 
-        if state is None and clean_url:
-            state = PipelineState(
-                stream_info=StreamInfo(
-                    url=clean_url,
-                    title="",
-                    platform=Platform.YOUTUBE,
-                    streamer="",
-                    game=str(config.get("discovery.default_game", "GTA 6")),
-                    duration_seconds=0,
-                ),
-                status=PipelineStatus.ANALYZING,
-                audio_path=target_audio,
-                transcript=transcript,
-            )
-            cache.save_state(state)
-        elif state is not None:
-            state.transcript = transcript
-            if state.audio_path is None:
-                state.audio_path = target_audio
-            if (
-                state.status < PipelineStatus.ANALYZING
-                or state.status == PipelineStatus.FAILED
-            ):
-                state.status = PipelineStatus.ANALYZING
-            cache.save_state(state)
+        resolved_url = (
+            initial_state.stream_info.url if initial_state is not None else clean_url
+        )
+        state: PipelineState | None = None
+        if resolved_url:
+            async with _get_url_lock(cache.get_cache_key(resolved_url)):
+                # Reload latest state to avoid clobbering concurrent analyze_signals updates
+                fresh_state = cache.load_state(resolved_url) or initial_state
+                if fresh_state is None:
+                    fresh_state = PipelineState(
+                        stream_info=StreamInfo(
+                            url=resolved_url,
+                            title="",
+                            platform=Platform.YOUTUBE,
+                            streamer="",
+                            game=str(config.get("discovery.default_game", "GTA 6")),
+                            duration_seconds=0,
+                            video_id=_extract_youtube_id_from_url(resolved_url) or "",
+                        ),
+                        status=PipelineStatus.ANALYZING,
+                        audio_path=target_audio,
+                        transcript=transcript,
+                    )
+                else:
+                    fresh_state.transcript = transcript
+                    if fresh_state.audio_path is None or (
+                        clean_audio and not Path(fresh_state.audio_path).is_file()
+                    ):
+                        fresh_state.audio_path = target_audio
+                    if (
+                        fresh_state.status < PipelineStatus.ANALYZING
+                        or fresh_state.status == PipelineStatus.FAILED
+                    ):
+                        fresh_state.status = (
+                            PipelineStatus.SCORING
+                            if fresh_state.analysis_complete
+                            else PipelineStatus.ANALYZING
+                        )
+                cache.save_state(fresh_state)
+                state = fresh_state
 
         word_count = sum(len(seg.words) for seg in transcript.segments)
         duration_seconds = transcript.segments[-1].end if transcript.segments else 0.0
-        resolved_url = state.stream_info.url if state is not None else clean_url
 
         return _json_ok(
             {
@@ -604,14 +706,14 @@ async def analyze_signals(url: str = "", audio_path: str = "") -> str:
 
         config = _get_config()
         cache = _get_cache(config)
-        state = _resolve_state(cache, url=clean_url, audio_path=clean_audio)
+        initial_state = _resolve_state(cache, url=clean_url, audio_path=clean_audio)
 
-        target_url = state.stream_info.url if state is not None else clean_url
+        target_url = initial_state.stream_info.url if initial_state is not None else clean_url
         target_audio: Path | None = None
         if clean_audio:
             target_audio = Path(clean_audio)
-        elif state is not None and state.audio_path is not None:
-            target_audio = Path(state.audio_path)
+        elif initial_state is not None and initial_state.audio_path is not None:
+            target_audio = Path(initial_state.audio_path)
 
         if target_audio is None:
             return _json_error(
@@ -631,9 +733,9 @@ async def analyze_signals(url: str = "", audio_path: str = "") -> str:
             temp_dir.mkdir(parents=True, exist_ok=True)
             scraper = ChatScraper()
             video_id = (
-                state.stream_info.video_id
-                if (state is not None and state.stream_info.video_id)
-                else cache.get_cache_key(target_url)
+                initial_state.stream_info.video_id
+                if (initial_state is not None and initial_state.stream_info.video_id)
+                else (_extract_youtube_id_from_url(target_url) or cache.get_cache_key(target_url))
             )
             chat_cache_path = temp_dir / f"{video_id}_chat.csv"
 
@@ -650,35 +752,43 @@ async def analyze_signals(url: str = "", audio_path: str = "") -> str:
             chat_analyzer = ChatVelocityAnalyzer(config)
             chat_spikes = await asyncio.to_thread(chat_analyzer.analyze, chat_df)
 
-        if state is None and target_url:
-            state = PipelineState(
-                stream_info=StreamInfo(
-                    url=target_url,
-                    title="",
-                    platform=Platform.YOUTUBE,
-                    streamer="",
-                    game=str(config.get("discovery.default_game", "GTA 6")),
-                    duration_seconds=0,
-                ),
-                status=PipelineStatus.SCORING,
-                audio_path=target_audio,
-                loudness_spikes=loudness_spikes,
-                chat_spikes=chat_spikes,
-                analysis_complete=True,
-            )
-            cache.save_state(state)
-        elif state is not None:
-            state.loudness_spikes = loudness_spikes
-            state.chat_spikes = chat_spikes
-            state.analysis_complete = True
-            if state.audio_path is None:
-                state.audio_path = target_audio
-            if (
-                state.status < PipelineStatus.SCORING
-                or state.status == PipelineStatus.FAILED
-            ):
-                state.status = PipelineStatus.SCORING
-            cache.save_state(state)
+        state: PipelineState | None = None
+        if target_url:
+            async with _get_url_lock(cache.get_cache_key(target_url)):
+                # Reload latest state to avoid clobbering concurrent transcribe_audio updates
+                fresh_state = cache.load_state(target_url) or initial_state
+                if fresh_state is None:
+                    fresh_state = PipelineState(
+                        stream_info=StreamInfo(
+                            url=target_url,
+                            title="",
+                            platform=Platform.YOUTUBE,
+                            streamer="",
+                            game=str(config.get("discovery.default_game", "GTA 6")),
+                            duration_seconds=0,
+                            video_id=_extract_youtube_id_from_url(target_url) or "",
+                        ),
+                        status=PipelineStatus.SCORING,
+                        audio_path=target_audio,
+                        loudness_spikes=loudness_spikes,
+                        chat_spikes=chat_spikes,
+                        analysis_complete=True,
+                    )
+                else:
+                    fresh_state.loudness_spikes = loudness_spikes
+                    fresh_state.chat_spikes = chat_spikes
+                    fresh_state.analysis_complete = True
+                    if fresh_state.audio_path is None or (
+                        clean_audio and not Path(fresh_state.audio_path).is_file()
+                    ):
+                        fresh_state.audio_path = target_audio
+                    if (
+                        fresh_state.status < PipelineStatus.SCORING
+                        or fresh_state.status == PipelineStatus.FAILED
+                    ):
+                        fresh_state.status = PipelineStatus.SCORING
+                cache.save_state(fresh_state)
+                state = fresh_state
 
         overlaps = _compute_signal_overlaps(loudness_spikes, chat_spikes)
         return _json_ok(
@@ -755,17 +865,27 @@ async def get_transcript_chunks(
             for idx, (chunk, loud, chat) in enumerate(candidates)
         ]
 
-        return _json_ok(
-            {
-                "url": state.stream_info.url,
-                "chunk_minutes": chunk_minutes,
-                "only_with_signals": only_with_signals,
-                "total_chunks": len(all_chunks),
-                "returned_chunks": len(chunks_payload),
-                "filtered_out_chunks": max(0, len(all_chunks) - len(chunks_payload)),
-                "chunks": chunks_payload,
-            }
-        )
+        payload: dict[str, Any] = {
+            "url": state.stream_info.url,
+            "chunk_minutes": chunk_minutes,
+            "only_with_signals": only_with_signals,
+            "analysis_complete": state.analysis_complete,
+            "total_chunks": len(all_chunks),
+            "returned_chunks": len(chunks_payload),
+            "filtered_out_chunks": max(0, len(all_chunks) - len(chunks_payload)),
+            "chunks": chunks_payload,
+        }
+        if (
+            only_with_signals
+            and not state.analysis_complete
+            and not state.loudness_spikes
+            and not state.chat_spikes
+        ):
+            payload["hint"] = (
+                "Signal analysis has not been run yet; call analyze_signals first "
+                "or pass only_with_signals=False."
+            )
+        return _json_ok(payload)
     except Exception as exc:
         logger.exception("get_transcript_chunks failed")
         return _json_error(str(exc))
@@ -809,102 +929,117 @@ async def submit_highlights(url: str, highlights: str) -> str:
         cache = _get_cache(config)
         scorer = _MCPScorer(config)
 
-        state = cache.load_state(clean_url)
-        if state is None:
-            state = PipelineState(
-                stream_info=StreamInfo(
-                    url=clean_url,
-                    title="",
-                    platform=Platform.YOUTUBE,
-                    streamer="",
-                    game=str(config.get("discovery.default_game", "GTA 6")),
-                    duration_seconds=0,
-                ),
-                status=PipelineStatus.SCORING,
-            )
-
-        accepted: list[Highlight] = []
-        rejected_count = 0
-
-        for item in raw_items:
-            if not isinstance(item, dict):
-                rejected_count += 1
-                continue
-
-            start = _parse_seconds(item.get("start"))
-            end = _parse_seconds(item.get("end"))
-            if start is None or end is None or end <= start:
-                rejected_count += 1
-                continue
-
-            score = _parse_score(item.get("score"))
-            title = (
-                _as_str(item.get("title"))
-                or _as_str(item.get("hook_title"))
-                or "Stream Highlight"
-            )
-            reason = _as_str(item.get("reason"))
-            best_quote = _as_str(item.get("best_quote"))
-            moment_type = _normalize_moment_type(item.get("moment_type"))
-            narration_intro = _as_str(item.get("narration_intro"))
-            narration_outro = _as_str(item.get("narration_outro"))
-            context_badge = _as_str(item.get("context_badge"))
-
-            raw_beats = _parse_raw_sub_clips(item.get("sub_clips"))
-            validated_beats = Scorer._validate_sub_clips(
-                raw_beats,
-                start,
-                end,
-                max_duration=scorer.max_clip_seconds,
-            )
-
-            highlight = Highlight(
-                start=start,
-                end=end,
-                score=score,
-                title=title,
-                reason=reason,
-                best_quote=best_quote,
-                moment_type=moment_type,
-                narration_intro=narration_intro,
-                narration_outro=narration_outro,
-                context_badge=context_badge,
-                sub_clips=validated_beats,
-            )
-            highlight.final_score = scorer._compute_weighted_score(
-                highlight, state.loudness_spikes, state.chat_spikes
-            )
-
-            if state.transcript is not None:
-                highlight.word_timestamps = scorer._extract_words_for_range(
-                    state.transcript, highlight.start, highlight.end
+        async with _get_url_lock(cache.get_cache_key(clean_url)):
+            state = cache.load_state(clean_url)
+            if state is None:
+                state = PipelineState(
+                    stream_info=StreamInfo(
+                        url=clean_url,
+                        title="",
+                        platform=Platform.YOUTUBE,
+                        streamer="",
+                        game=str(config.get("discovery.default_game", "GTA 6")),
+                        duration_seconds=0,
+                        video_id=_extract_youtube_id_from_url(clean_url) or "",
+                    ),
+                    status=PipelineStatus.SCORING,
                 )
-                scoped_text = scorer._extract_transcript_for_range(
-                    state.transcript, highlight.start, highlight.end
+
+            accepted: list[Highlight] = []
+            rejected_count = 0
+
+            for item in raw_items:
+                if not isinstance(item, dict):
+                    rejected_count += 1
+                    continue
+
+                start = _parse_seconds(item.get("start"))
+                end = _parse_seconds(item.get("end"))
+                if start is None or end is None or end <= start:
+                    rejected_count += 1
+                    continue
+
+                score = _parse_score(item.get("score"))
+                title = (
+                    _as_str(item.get("title"))
+                    or _as_str(item.get("hook_title"))
+                    or "Stream Highlight"
                 )
-                if scoped_text:
-                    highlight.transcript_chunk = scoped_text
+                reason = _as_str(item.get("reason"))
+                best_quote = _as_str(item.get("best_quote"))
+                moment_type = _normalize_moment_type(item.get("moment_type"))
+                narration_intro = _as_str(item.get("narration_intro"))
+                narration_outro = _as_str(item.get("narration_outro"))
+                context_badge = _as_str(item.get("context_badge"))
 
-            if state.loudness_spikes:
-                highlight.peak_time = scorer._extract_peak_time(
-                    highlight, state.loudness_spikes
+                raw_beats = _parse_raw_sub_clips(item.get("sub_clips"))
+                validated_beats = Scorer._validate_sub_clips(
+                    raw_beats,
+                    start,
+                    end,
+                    max_duration=scorer.max_clip_seconds,
                 )
-            highlight.chat_burst = scorer._extract_chat_burst(
-                highlight, state.chat_spikes
-            )
-            accepted.append(highlight)
 
-        if raw_items and not accepted:
-            return _json_error(
-                "No valid highlights found in payload (check start/end timestamps)."
-            )
+                highlight = Highlight(
+                    start=start,
+                    end=end,
+                    score=score,
+                    title=title,
+                    reason=reason,
+                    best_quote=best_quote,
+                    moment_type=moment_type,
+                    narration_intro=narration_intro,
+                    narration_outro=narration_outro,
+                    context_badge=context_badge,
+                    sub_clips=validated_beats,
+                )
+                highlight.final_score = scorer._compute_weighted_score(
+                    highlight, state.loudness_spikes, state.chat_spikes
+                )
 
-        accepted.sort(key=lambda h: h.final_score, reverse=True)
-        state.highlights = list(accepted)
-        state.selected_highlights = list(accepted)
-        if accepted:
-            state.status = PipelineStatus.ASSEMBLING
-        cache.save_state(state)
+                if state.transcript is not None:
+                    highlight.word_timestamps = scorer._extract_words_for_range(
+                        state.transcript, highlight.start, highlight.end
+                    )
+                    scoped_text = scorer._extract_transcript_for_range(
+                        state.transcript, highlight.start, highlight.end
+                    )
+                    if scoped_text:
+                        highlight.transcript_chunk = scoped_text
+
+                if state.loudness_spikes:
+                    highlight.peak_time = scorer._extract_peak_time(
+                        highlight, state.loudness_spikes
+                    )
+                else:
+                    explicit_peak = _parse_seconds(item.get("peak_time"))
+                    if explicit_peak is not None and start <= explicit_peak <= end:
+                        highlight.peak_time = explicit_peak
+                highlight.chat_burst = scorer._extract_chat_burst(
+                    highlight, state.chat_spikes
+                )
+                accepted.append(highlight)
+
+            if raw_items and not accepted:
+                return _json_error(
+                    "No valid highlights found in payload (check start/end timestamps)."
+                )
+
+            accepted.sort(key=lambda h: h.final_score, reverse=True)
+            state.highlights = list(accepted)
+            state.selected_highlights = list(accepted)
+            if accepted:
+                state.status = PipelineStatus.ASSEMBLING
+            elif (
+                state.status >= PipelineStatus.ASSEMBLING
+                and state.status != PipelineStatus.FAILED
+            ):
+                state.status = (
+                    PipelineStatus.SCORING
+                    if (state.analysis_complete or state.transcript is not None)
+                    else PipelineStatus.PENDING
+                )
+            cache.save_state(state)
 
         return _json_ok(
             {
@@ -983,11 +1118,16 @@ async def render_clip(
             if isinstance(voice_intro_path, str) and voice_intro_path.strip()
             else None
         )
+        if intro_path is not None and not intro_path.is_file():
+            return _json_error(f"voice_intro_path not found: {intro_path}")
+
         outro_path = (
             Path(voice_outro_path.strip())
             if isinstance(voice_outro_path, str) and voice_outro_path.strip()
             else None
         )
+        if outro_path is not None and not outro_path.is_file():
+            return _json_error(f"voice_outro_path not found: {outro_path}")
 
         state = cache.load_state(clean_url)
         resolved_game = (
@@ -1037,7 +1177,7 @@ async def render_clip(
         else:
             highlight.final_score = highlight.score
 
-        clip_index = (len(state.clips) + 1) if state is not None else 1
+        min_clip_index = (len(state.clips) + 1) if state is not None else 1
         clip_result, resolved_mode = await _render_single_highlight(
             pipeline=pipeline,
             config=config,
@@ -1045,15 +1185,18 @@ async def render_clip(
             highlight=highlight,
             streamer_name=resolved_streamer,
             game_name=resolved_game,
-            clip_index=clip_index,
+            clip_index=None,
             base_mode=base_mode,
             voice_intro_path=intro_path,
             voice_outro_path=outro_path,
+            min_clip_index=min_clip_index,
         )
 
-        if state is not None:
-            state.clips.append(clip_result)
-            cache.save_state(state)
+        async with _get_url_lock(cache.get_cache_key(clean_url)):
+            fresh_state = cache.load_state(clean_url)
+            if fresh_state is not None:
+                fresh_state.clips.append(clip_result)
+                cache.save_state(fresh_state)
 
         return _json_ok(
             {
@@ -1070,6 +1213,9 @@ async def render_clip(
 @mcp.tool()
 async def render_all_selected(url: str, mode: str = "auto") -> str:
     """Render all selected highlights stored in StepCache for a stream."""
+    rendered: list[ClipResult] = []
+    clean_url = ""
+    cache: StepCache | None = None
     try:
         clean_url = url.strip() if isinstance(url, str) else ""
         if not clean_url:
@@ -1092,9 +1238,10 @@ async def render_all_selected(url: str, mode: str = "auto") -> str:
         game_name = state.stream_info.game or str(
             config.get("discovery.default_game", "GTA 6")
         )
+        selected_highlights = list(state.selected_highlights)
+        cache_key = cache.get_cache_key(clean_url)
 
-        rendered: list[ClipResult] = []
-        for idx, highlight in enumerate(state.selected_highlights, start=1):
+        for idx, highlight in enumerate(selected_highlights, start=1):
             clip_result, _ = await _render_single_highlight(
                 pipeline=pipeline,
                 config=config,
@@ -1106,22 +1253,48 @@ async def render_all_selected(url: str, mode: str = "auto") -> str:
                 base_mode=base_mode,
             )
             rendered.append(clip_result)
+            # Persist incremental clip progress so mid-batch failures never orphan rendered files
+            async with _get_url_lock(cache_key):
+                fresh_state = cache.load_state(clean_url) or state
+                fresh_state.clips = list(rendered)
+                fresh_state.status = PipelineStatus.ASSEMBLING
+                cache.save_state(fresh_state)
 
-        state.clips = rendered
-        state.status = PipelineStatus.COMPLETE
-        cache.save_state(state)
+        async with _get_url_lock(cache_key):
+            final_state = cache.load_state(clean_url) or state
+            final_state.clips = list(rendered)
+            final_state.status = PipelineStatus.COMPLETE
+            cache.save_state(final_state)
 
         return _json_ok(
             {
                 "url": clean_url,
                 "mode": base_mode,
                 "rendered_count": len(rendered),
-                "status": state.status.name.lower(),
+                "status": final_state.status.name.lower(),
                 "clips": [c.to_dict() for c in rendered],
             }
         )
     except Exception as exc:
         logger.exception("render_all_selected failed")
+        if rendered and cache is not None and clean_url:
+            try:
+                async with _get_url_lock(cache.get_cache_key(clean_url)):
+                    failed_state = cache.load_state(clean_url)
+                    if failed_state is not None:
+                        failed_state.clips = list(rendered)
+                        failed_state.status = PipelineStatus.FAILED
+                        cache.save_state(failed_state)
+            except Exception:
+                logger.exception("Failed to persist partial clips after render_all_selected error")
+            return _json_ok(
+                {
+                    "error": str(exc),
+                    "url": clean_url,
+                    "rendered_count": len(rendered),
+                    "clips": [c.to_dict() for c in rendered],
+                }
+            )
         return _json_error(str(exc))
 
 
@@ -1194,13 +1367,14 @@ async def generate_post_metadata(
             title=clean_hook,
             reason=clean_desc,
         )
-        caption, hashtags = await asyncio.to_thread(
-            scorer._generate_caption_and_hashtags,
-            synthetic,
-            clean_streamer,
-            clean_game,
-            clean_hook,
-        )
+        async with _get_gpu_lock():
+            caption, hashtags = await asyncio.to_thread(
+                scorer._generate_caption_and_hashtags,
+                synthetic,
+                clean_streamer,
+                clean_game,
+                clean_hook,
+            )
         return _json_ok(
             {
                 "hook_title": clean_hook,

@@ -1,8 +1,13 @@
 """Unit tests for the StreamClipper MCP SDK v2 server (Package 5.1)."""
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
+import shutil
+import subprocess
+import threading
+import time
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -1171,4 +1176,596 @@ async def test_edge_cases_validation_and_cache_hydration(
     assert "GTA6ViceCity" in captured["metadata"].hashtags
     assert "DrDisrespect" in captured["metadata"].hashtags
     assert len(cache.load_state(url).clips) == 1
+
+
+# ---------------------------------------------------------------------------
+# 10. Concurrency, Security, Partial Progress & Real Assembly Integration
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_parallel_transcribe_and_analyze_preserve_both_cache_updates(
+    mcp_env: tuple[Config, StepCache, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Concurrent transcribe_audio + analyze_signals on the same URL must not clobber StepCache."""
+    _, cache, tmp_path = mcp_env
+    url = "https://www.youtube.com/watch?v=par12345678"
+    wav_path = tmp_path / "temp" / "par12345678.wav"
+    wav_path.parent.mkdir(parents=True, exist_ok=True)
+    wav_path.write_bytes(b"RIFF0000WAVE")
+
+    cache.save_state(
+        PipelineState(
+            stream_info=StreamInfo(
+                url=url,
+                title="Parallel Stream",
+                platform=Platform.YOUTUBE,
+                streamer="Tim",
+                game="GTA 6",
+                duration_seconds=3600,
+                video_id="par12345678",
+            ),
+            status=PipelineStatus.TRANSCRIBING,
+            audio_path=wav_path,
+        )
+    )
+
+    class SlowTranscriber:
+        def __init__(self, cfg: Config) -> None:
+            pass
+
+        def transcribe(self, path: Path) -> TranscriptionResult:
+            time.sleep(0.15)
+            return _make_sample_transcript()
+
+    class FastLoudness:
+        def __init__(self, cfg: Config) -> None:
+            pass
+
+        def detect(self, path: Path) -> list[TimeRange]:
+            time.sleep(0.02)
+            return [
+                TimeRange(
+                    start=1810.0,
+                    end=1830.0,
+                    score=9.1,
+                    signal_type=SignalType.LOUDNESS,
+                    metadata={"peak_time": 1820.0},
+                )
+            ]
+
+    class FastChatScraper:
+        def load_cache(self, path: Path):
+            return None
+
+        def scrape(self, stream_url: str, temp_dir: Path) -> pd.DataFrame:
+            return pd.DataFrame(columns=["offset_seconds", "author", "message"])
+
+        def save_cache(self, df: pd.DataFrame, path: Path) -> None:
+            pass
+
+    class FastChatAnalyzer:
+        def __init__(self, cfg: Config) -> None:
+            pass
+
+        def analyze(self, df: pd.DataFrame) -> list[TimeRange]:
+            return []
+
+    monkeypatch.setattr(mcp_server, "Transcriber", SlowTranscriber)
+    monkeypatch.setattr(mcp_server, "LoudnessDetector", FastLoudness)
+    monkeypatch.setattr(mcp_server, "ChatScraper", FastChatScraper)
+    monkeypatch.setattr(mcp_server, "ChatVelocityAnalyzer", FastChatAnalyzer)
+
+    res_t, res_a = await asyncio.gather(
+        mcp.call_tool("transcribe_audio", {"url": url}),
+        mcp.call_tool("analyze_signals", {"url": url}),
+    )
+    data_t = _extract_json(res_t)
+    data_a = _extract_json(res_a)
+    assert "error" not in data_t
+    assert "error" not in data_a
+
+    final_state = cache.load_state(url)
+    assert final_state is not None
+    assert final_state.transcript is not None
+    assert len(final_state.transcript.segments) == 3
+    assert len(final_state.loudness_spikes) == 1
+    assert final_state.analysis_complete is True
+    assert final_state.status == PipelineStatus.SCORING
+
+
+@pytest.mark.asyncio
+async def test_gpu_lock_serializes_concurrent_transcribe_and_render(
+    mcp_env: tuple[Config, StepCache, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Shared GPU lock prevents concurrent WhisperX and video assembly from contending on VRAM."""
+    _, _, tmp_path = mcp_env
+    wav_path = tmp_path / "temp" / "gpu12345678.wav"
+    seg_path = tmp_path / "temp" / "segments" / "gpu_seg.mp4"
+    wav_path.parent.mkdir(parents=True, exist_ok=True)
+    seg_path.parent.mkdir(parents=True, exist_ok=True)
+    wav_path.write_bytes(b"RIFF")
+    seg_path.write_bytes(b"mp4")
+
+    counter_lock = threading.Lock()
+    active_gpu = 0
+    max_concurrent_gpu = 0
+
+    def _enter_gpu() -> None:
+        nonlocal active_gpu, max_concurrent_gpu
+        with counter_lock:
+            active_gpu += 1
+            max_concurrent_gpu = max(max_concurrent_gpu, active_gpu)
+
+    def _exit_gpu() -> None:
+        nonlocal active_gpu
+        with counter_lock:
+            active_gpu -= 1
+
+    class GPUTranscriber:
+        def __init__(self, cfg: Config) -> None:
+            pass
+
+        def transcribe(self, path: Path) -> TranscriptionResult:
+            _enter_gpu()
+            try:
+                time.sleep(0.1)
+                return _make_sample_transcript()
+            finally:
+                _exit_gpu()
+
+    def gpu_assemble(self, highlight, metadata, segment_paths, clip_index, mode, *a, **kw):
+        _enter_gpu()
+        try:
+            time.sleep(0.1)
+            out_mp4 = tmp_path / "output" / f"clip_{clip_index:02d}.mp4"
+            out_mp4.parent.mkdir(parents=True, exist_ok=True)
+            out_mp4.write_bytes(b"mp4")
+            return ClipResult(
+                video_path=out_mp4,
+                metadata_path=None,
+                metadata=metadata,
+                duration_seconds=15.0,
+            )
+        finally:
+            _exit_gpu()
+
+    monkeypatch.setattr(mcp_server, "Transcriber", GPUTranscriber)
+    monkeypatch.setattr(mcp_server, "download_segment", lambda *a, **kw: seg_path)
+    monkeypatch.setattr(mcp_server.Pipeline, "_assemble_highlight", gpu_assemble)
+
+    r1, r2 = await asyncio.gather(
+        mcp.call_tool("transcribe_audio", {"audio_path": str(wav_path)}),
+        mcp.call_tool(
+            "render_clip",
+            {
+                "url": "https://www.youtube.com/watch?v=gpu12345678",
+                "start": 10.0,
+                "end": 25.0,
+                "hook_title": "GPU TEST",
+                "mode": "raw",
+            },
+        ),
+    )
+    assert "error" not in _extract_json(r1)
+    assert "error" not in _extract_json(r2)
+    assert max_concurrent_gpu == 1
+
+
+@pytest.mark.asyncio
+async def test_cleanup_temp_blocks_glob_injection_and_path_traversal(
+    mcp_env: tuple[Config, StepCache, Path],
+) -> None:
+    """cleanup_temp must resist glob wildcards ('*', '[a-z]*') and '../' path traversal."""
+    _, cache, tmp_path = mcp_env
+    temp_dir = tmp_path / "temp"
+    seg_dir = temp_dir / "segments"
+    seg_dir.mkdir(parents=True, exist_ok=True)
+
+    innocent_seg = seg_dir / "otherstream_10_20.mp4"
+    innocent_chat = temp_dir / "otherstream.live_chat.json"
+    outside_secret = tmp_path / "secret.wav"
+    for f in (innocent_seg, innocent_chat, outside_secret):
+        f.write_bytes(b"PROTECTED")
+
+    for idx, malicious_vid in enumerate(("*", "[a-z]*stream", "../secret", r"..\secret")):
+        bad_url = f"https://example.com/malicious-{idx}"
+        cache.save_state(
+            PipelineState(
+                stream_info=StreamInfo(
+                    url=bad_url,
+                    title="Malicious",
+                    platform=Platform.YOUTUBE,
+                    streamer="Bad",
+                    game="GTA 6",
+                    duration_seconds=60,
+                    video_id=malicious_vid,
+                ),
+                status=PipelineStatus.COMPLETE,
+            )
+        )
+        res = _extract_json(await mcp.call_tool("cleanup_temp", {"url": bad_url}))
+        assert "error" not in res
+        assert res["deleted_count"] == 0
+
+    assert innocent_seg.is_file()
+    assert innocent_chat.is_file()
+    assert outside_secret.is_file()
+
+
+@pytest.mark.asyncio
+async def test_render_all_selected_persists_partial_progress_on_mid_batch_failure(
+    mcp_env: tuple[Config, StepCache, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mid-batch failure in render_all_selected persists rendered clips and reports partial output."""
+    _, cache, tmp_path = mcp_env
+    url = "https://www.youtube.com/watch?v=prt12345678"
+    highlights = [
+        Highlight(start=10.0, end=45.0, score=9.0, title="Clip 1", reason="First", final_score=9.0),
+        Highlight(start=100.0, end=140.0, score=8.5, title="Clip 2", reason="Fails", final_score=8.5),
+        Highlight(start=200.0, end=240.0, score=8.0, title="Clip 3", reason="Never", final_score=8.0),
+    ]
+    cache.save_state(
+        PipelineState(
+            stream_info=StreamInfo(
+                url=url,
+                title="Batch Fail",
+                platform=Platform.YOUTUBE,
+                streamer="S",
+                game="GTA 6",
+                duration_seconds=3600,
+                video_id="prt12345678",
+            ),
+            status=PipelineStatus.ASSEMBLING,
+            highlights=highlights,
+            selected_highlights=highlights,
+        )
+    )
+
+    seg = tmp_path / "temp" / "segments" / "prt.mp4"
+    seg.parent.mkdir(parents=True, exist_ok=True)
+    seg.write_bytes(b"mp4")
+    monkeypatch.setattr(mcp_server, "download_segment", lambda *a, **kw: seg)
+
+    def flaky_assemble(self, highlight, metadata, segment_paths, clip_index, mode, *a, **kw):
+        if clip_index == 2:
+            raise RuntimeError("FFmpeg crashed on clip 2")
+        out_mp4 = tmp_path / "output" / f"clip_{clip_index:02d}.mp4"
+        out_mp4.parent.mkdir(parents=True, exist_ok=True)
+        out_mp4.write_bytes(b"mp4")
+        return ClipResult(
+            video_path=out_mp4,
+            metadata_path=None,
+            metadata=metadata,
+            duration_seconds=35.0,
+        )
+
+    monkeypatch.setattr(mcp_server.Pipeline, "_assemble_highlight", flaky_assemble)
+
+    data = _extract_json(await mcp.call_tool("render_all_selected", {"url": url}))
+    assert "error" in data
+    assert "FFmpeg crashed on clip 2" in data["error"]
+    assert data["rendered_count"] == 1
+    assert len(data["clips"]) == 1
+
+    reloaded = cache.load_state(url)
+    assert reloaded is not None
+    assert reloaded.status == PipelineStatus.FAILED
+    assert len(reloaded.clips) == 1
+
+
+@pytest.mark.asyncio
+async def test_submit_highlights_empty_resets_status_and_parses_string_timestamps(
+    mcp_env: tuple[Config, StepCache, Path],
+) -> None:
+    """submit_highlights handles MM:SS timestamps + explicit peak_time and resets stale status on []."""
+    _, cache, _ = mcp_env
+    url = "https://www.youtube.com/watch?v=str12345678"
+
+    payload = json.dumps(
+        [
+            {
+                "start": "01:30",
+                "end": "02:20",
+                "score": "8.9",
+                "title": "MM:SS Beat Clip",
+                "peak_time": "02:05",
+                "sub_clips": [
+                    {"start": "01:30", "end": "01:40", "label": "Setup"},
+                    {"start": "01:55", "end": "02:20", "label": "Payoff"},
+                ],
+            }
+        ]
+    )
+    sub = _extract_json(
+        await mcp.call_tool("submit_highlights", {"url": url, "highlights": payload})
+    )
+    assert sub["accepted_count"] == 1
+    assert sub["status"] == "assembling"
+    hl = sub["highlights"][0]
+    assert hl["start"] == 90.0
+    assert hl["end"] == 140.0
+    assert hl["peak_time"] == 125.0
+    assert len(hl["sub_clips"]) == 2
+    assert hl["sub_clips"][0]["start"] == 90.0
+    assert hl["sub_clips"][1]["end"] == 140.0
+
+    # Submitting empty list resets stale ASSEMBLING status instead of leaving ASSEMBLING with 0 clips
+    cleared = _extract_json(
+        await mcp.call_tool("submit_highlights", {"url": url, "highlights": "[]"})
+    )
+    assert cleared["accepted_count"] == 0
+    assert cleared["status"] != "assembling"
+    reloaded = cache.load_state(url)
+    assert reloaded is not None
+    assert reloaded.selected_highlights == []
+    assert reloaded.status != PipelineStatus.ASSEMBLING
+
+
+@pytest.mark.asyncio
+async def test_render_clip_nonexistent_voice_path_and_uncached_collision_avoidance(
+    mcp_env: tuple[Config, StepCache, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """render_clip validates voiceover paths exist and avoids overwriting clip_01 on uncached URLs."""
+    config, _, tmp_path = mcp_env
+    url = "https://www.youtube.com/watch?v=col12345678"
+
+    # Missing voice_intro_path / voice_outro_path return structured errors
+    err_intro = _extract_json(
+        await mcp.call_tool(
+            "render_clip",
+            {
+                "url": url,
+                "start": 10.0,
+                "end": 40.0,
+                "hook_title": "Missing Intro",
+                "voice_intro_path": str(tmp_path / "does_not_exist.wav"),
+            },
+        )
+    )
+    assert "error" in err_intro
+    assert "voice_intro_path not found" in err_intro["error"]
+
+    err_outro = _extract_json(
+        await mcp.call_tool(
+            "render_clip",
+            {
+                "url": url,
+                "start": 10.0,
+                "end": 40.0,
+                "hook_title": "Missing Outro",
+                "voice_outro_path": str(tmp_path / "does_not_exist_outro.wav"),
+            },
+        )
+    )
+    assert "error" in err_outro
+    assert "voice_outro_path not found" in err_outro["error"]
+
+    # Two uncached render_clip calls must allocate clip_01.mp4 then clip_02.mp4 (no overwrite)
+    seg = tmp_path / "temp" / "segments" / "col.mp4"
+    seg.parent.mkdir(parents=True, exist_ok=True)
+    seg.write_bytes(b"mp4")
+    monkeypatch.setattr(mcp_server, "download_segment", lambda *a, **kw: seg)
+
+    from streamclipper.output.organizer import FileOrganizer
+
+    organizer = FileOrganizer(config)
+
+    def org_assemble(self, highlight, metadata, segment_paths, clip_index, mode, *a, **kw):
+        out_mp4 = organizer.get_clip_path(metadata.game, metadata.streamer, clip_index)
+        out_mp4.write_bytes(f"clip-{clip_index}".encode("utf-8"))
+        return ClipResult(
+            video_path=out_mp4,
+            metadata_path=None,
+            metadata=metadata,
+            duration_seconds=30.0,
+        )
+
+    monkeypatch.setattr(mcp_server.Pipeline, "_assemble_highlight", org_assemble)
+
+    c1 = _extract_json(
+        await mcp.call_tool(
+            "render_clip",
+            {"url": url, "start": 10.0, "end": 40.0, "hook_title": "First", "mode": "raw"},
+        )
+    )
+    c2 = _extract_json(
+        await mcp.call_tool(
+            "render_clip",
+            {"url": url, "start": 50.0, "end": 80.0, "hook_title": "Second", "mode": "raw"},
+        )
+    )
+    p1 = Path(c1["clip"]["video_path"])
+    p2 = Path(c2["clip"]["video_path"])
+    assert p1 != p2
+    assert p1.name == "clip_01.mp4"
+    assert p2.name == "clip_02.mp4"
+    assert p1.read_bytes() == b"clip-1"
+    assert p2.read_bytes() == b"clip-2"
+
+
+@pytest.mark.asyncio
+async def test_render_clip_real_assembly_end_to_end_narrative_and_story(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end MCP render_clip exercising real Pipeline._assemble_highlight (MoviePy/FFmpeg/ASS/Narrator)."""
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg not installed on PATH")
+
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(
+        "\n".join(
+            [
+                "general:",
+                f"  output_dir: '{(tmp_path / 'output').as_posix()}'",
+                f"  temp_dir: '{(tmp_path / 'temp').as_posix()}'",
+                f"  cache_dir: '{(tmp_path / '.cache').as_posix()}'",
+                "video:",
+                "  resolution: [360, 640]",
+                "  fps: 15",
+                "  codec: libx264",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    config = Config(user_config_path=cfg_file, hardware_profile=_cpu_profile())
+    cache = StepCache(config)
+    monkeypatch.setattr(mcp_server, "_get_config", lambda: config)
+
+    seg_dir = tmp_path / "temp" / "segments"
+    seg_dir.mkdir(parents=True, exist_ok=True)
+    seg_single = seg_dir / "e2e_single.mp4"
+    seg_beat1 = seg_dir / "e2e_beat1.mp4"
+    seg_beat2 = seg_dir / "e2e_beat2.mp4"
+    voice_intro = tmp_path / "e2e_intro.wav"
+
+    subprocess.run(
+        [
+            "ffmpeg", "-y",
+            "-f", "lavfi", "-i", "color=c=blue:s=640x360:d=5:r=15",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=5",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+            str(seg_single),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    for beat_path, freq in ((seg_beat1, 440), (seg_beat2, 550)):
+        subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-f", "lavfi", "-i", "color=c=green:s=640x360:d=11:r=15",
+                "-f", "lavfi", "-i", f"sine=frequency={freq}:duration=11",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+                str(beat_path),
+            ],
+            check=True,
+            capture_output=True,
+        )
+    subprocess.run(
+        [
+            "ffmpeg", "-y",
+            "-f", "lavfi", "-i", "sine=frequency=660:duration=1.2",
+            "-ar", "24000", "-ac", "1",
+            str(voice_intro),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+    url = "https://www.youtube.com/watch?v=e2e12345678"
+    cache.save_state(
+        PipelineState(
+            stream_info=StreamInfo(
+                url=url,
+                title="E2E Stream",
+                platform=Platform.YOUTUBE,
+                streamer="TimTheTatman",
+                game="GTA 6",
+                duration_seconds=600,
+                video_id="e2e12345678",
+            ),
+            status=PipelineStatus.SCORING,
+            transcript=TranscriptionResult(
+                segments=[
+                    TranscriptSegment(
+                        text="Watch this crazy jump!",
+                        start=100.0,
+                        end=105.0,
+                        words=[
+                            WordTimestamp("Watch", 100.5, 101.5, 0.99),
+                            WordTimestamp("jump!", 102.0, 104.0, 0.99),
+                        ],
+                    ),
+                    TranscriptSegment(
+                        text="Payoff explosion right now!",
+                        start=120.0,
+                        end=125.0,
+                        words=[
+                            WordTimestamp("Payoff", 120.5, 122.0, 0.99),
+                            WordTimestamp("now!", 122.5, 124.5, 0.99),
+                        ],
+                    ),
+                ],
+                full_text="Watch this crazy jump! Payoff explosion right now!",
+            ),
+            loudness_spikes=[
+                TimeRange(100.0, 105.0, 9.0, SignalType.LOUDNESS, {"peak_time": 102.5}),
+                TimeRange(120.0, 125.0, 9.5, SignalType.LOUDNESS, {"peak_time": 122.5}),
+            ],
+            chat_spikes=[
+                TimeRange(
+                    100.0,
+                    105.0,
+                    8.5,
+                    SignalType.CHAT_VELOCITY,
+                    {
+                        "sample_messages": [
+                            {"offset_seconds": 101.5, "author": "fan1", "message": "NO WAY!"}
+                        ]
+                    },
+                )
+            ],
+            analysis_complete=True,
+        )
+    )
+
+    monkeypatch.setattr(mcp_server, "download_segment", lambda *a, **kw: seg_single)
+    monkeypatch.setattr(
+        mcp_server, "download_multiple_segments", lambda *a, **kw: [seg_beat1, seg_beat2]
+    )
+
+    # 1) Real narrative mode with custom voiceover WAV + ASS captions + ChatTicker + spike zoom
+    narr = _extract_json(
+        await mcp.call_tool(
+            "render_clip",
+            {
+                "url": url,
+                "start": 100.0,
+                "end": 105.0,
+                "hook_title": "CRAZY JUMP!",
+                "moment_type": "hype",
+                "narration_intro": "Watch this jump.",
+                "context_badge": "Hype Moment",
+                "mode": "narrative",
+                "voice_intro_path": str(voice_intro),
+            },
+        )
+    )
+    assert "error" not in narr
+    assert narr["mode"] == "narrative"
+    narr_video = Path(narr["clip"]["video_path"])
+    narr_meta = Path(narr["clip"]["metadata_path"])
+    assert narr_video.is_file() and narr_video.stat().st_size > 1000
+    assert narr_meta.is_file()
+    meta_json = json.loads(narr_meta.read_text(encoding="utf-8"))
+    assert meta_json["transformation_mode"] == "narrative"
+    assert meta_json["context_badge"] == "Hype Moment"
+
+    # 2) Real story mode with 2 beats stitched via compose_story_beats + remap_timeline_for_beats
+    story = _extract_json(
+        await mcp.call_tool(
+            "render_clip",
+            {
+                "url": url,
+                "start": 100.0,
+                "end": 125.0,
+                "hook_title": "STORY CUT!",
+                "sub_clips_json": json.dumps(
+                    [
+                        {"start": 100.0, "end": 105.0, "label": "Setup"},
+                        {"start": 120.0, "end": 125.0, "label": "Payoff"},
+                    ]
+                ),
+                "mode": "auto",
+            },
+        )
+    )
+    assert "error" not in story
+    assert story["mode"] == "story"
+    story_video = Path(story["clip"]["video_path"])
+    assert story_video.is_file() and story_video.stat().st_size > 1000
+    assert story_video != narr_video
+    assert abs(story["clip"]["duration_seconds"] - 10.0) <= 1.0
+
 
