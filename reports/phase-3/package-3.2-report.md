@@ -16,8 +16,8 @@
 
 | File | Action | Lines | Summary |
 | :--- | :--- | :--- | :--- |
-| `src/streamclipper/scoring/ollama_scorer.py` | **Created** | 552 | Implemented `OllamaConnectionError` and `OllamaScorer(Scorer)` using resolved `llm.model` from `Config`/`HardwareProfile`, `ollama.Client(host, timeout)`, `_score_chunk()` with 3-attempt JSON retry logic, `_parse_response()` (raw list, wrapped `{"highlights": [...]}`, Qwen3 `<think>` / code-fence stripping, relative offset shifting, YPP fields + `sub_clips`), `generate_narrative()`, `generate_metadata()`, and `check_connection()`. |
-| `tests/test_scorer.py` | Modified | 1226 (+501) | Expanded with 19 new unit tests across 5 test classes (`TestOllamaScorerInit`, `TestOllamaScorerResponseParsing`, `TestOllamaScorerScoreChunkAndRetries`, `TestOllamaScorerNarrativeAndMetadata`, `TestOllamaScorerCheckConnection`) mocking `ollama.Client.generate` and `ollama.Client.list`. |
+| `src/streamclipper/scoring/ollama_scorer.py` | **Created** | 656 | Implemented `OllamaConnectionError` and `OllamaScorer(Scorer)` using resolved `llm.model` from `Config`/`HardwareProfile`, `ollama.Client(host, timeout)`, `_score_chunk()` with 3-attempt JSON retry logic, `_parse_response()` (raw list, wrapped `{"highlights": [...]}`, Qwen3 `<think>` / code-fence stripping, null-safe string conversion, finite/non-negative numeric & `MM:SS`/`HH:MM:SS` timestamp parsing, bounded relative offset shifting, YPP fields + `sub_clips`), `generate_narrative()`, `generate_metadata()` (respecting `transformation.enabled`/`mode` and `metadata.include_*_tag`), and `check_connection()`. |
+| `tests/test_scorer.py` | Modified | 1423 (+698) | Expanded with 27 new unit tests across 6 test classes (`TestOllamaScorerInit`, `TestOllamaScorerResponseParsing`, `TestOllamaScorerScoreChunkAndRetries`, `TestOllamaScorerNarrativeAndMetadata`, `TestOllamaScorerCheckConnection`, `TestOllamaScorerEdgeCasesAndHardening`) mocking `ollama.Client.generate` and `ollama.Client.list`. |
 | `reports/phase-3/package-3.2-report.md` | **Created** | — | This package completion report. |
 
 ## 3. Acceptance Criteria Verification
@@ -31,8 +31,8 @@
 | 5 | Generates tone-matched narrative scripts (`generate_narrative`), hook titles, and captions using prompt templates | `TestOllamaScorerNarrativeAndMetadata::test_generate_narrative_uses_moment_type_and_retries`, `TestOllamaScorerNarrativeAndMetadata::test_generate_metadata_backfills_missing_narrative_fields`, `TestOllamaScorerNarrativeAndMetadata::test_generate_metadata_preserves_existing_narrative_without_extra_call` | ✅ 3/3 PASSED |
 | 6 | Raises descriptive error including the resolved `self.model` name if Ollama is unreachable or model is missing | `TestOllamaScorerCheckConnection::test_check_connection_raises_when_model_missing`, `TestOllamaScorerCheckConnection::test_check_connection_raises_when_server_unreachable`, `TestOllamaScorerScoreChunkAndRetries::test_connection_error_during_generate_propagates_with_model_hint` | ✅ 3/3 PASSED |
 
-**Scorer Test Suite:** `68/68 PASSED` (`49` Phase 3.1 + `19` Phase 3.2)  
-**Full Repository Test Suite:** `192/192 PASSED` (`pytest -v` in `18.16s`)
+**Scorer Test Suite:** `76/76 PASSED` (`49` Phase 3.1 + `27` Phase 3.2)  
+**Full Repository Test Suite:** `226/226 PASSED` (`pytest -v` in `11.47s`)
 
 ## 4. Verbatim `pytest tests/test_scorer.py -v` Output
 
@@ -44,7 +44,7 @@ rootdir: D:\GTA6-Clipper
 configfile: pyproject.toml
 plugins: anyio-4.16.0, platformdirs-4.14.7, asyncio-1.5.0
 asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
-collecting ... collected 68 items
+collecting ... collected 76 items
 
 tests/test_scorer.py::TestModelBackwardCompat::test_highlight_from_dict_without_ypp_fields PASSED [  1%]
 tests/test_scorer.py::TestModelBackwardCompat::test_highlight_from_dict_with_ypp_fields PASSED [  2%]
@@ -113,16 +113,25 @@ tests/test_scorer.py::TestOllamaScorerNarrativeAndMetadata::test_generate_metada
 tests/test_scorer.py::TestOllamaScorerCheckConnection::test_check_connection_succeeds_with_ollama_list_response PASSED [ 95%]
 tests/test_scorer.py::TestOllamaScorerCheckConnection::test_check_connection_succeeds_with_dict_response_and_latest_tag PASSED [ 97%]
 tests/test_scorer.py::TestOllamaScorerCheckConnection::test_check_connection_raises_when_model_missing PASSED [ 98%]
-tests/test_scorer.py::TestOllamaScorerCheckConnection::test_check_connection_raises_when_server_unreachable PASSED [100%]
+tests/test_scorer.py::TestOllamaScorerCheckConnection::test_check_connection_raises_when_server_unreachable PASSED [ 89%]
+tests/test_scorer.py::TestOllamaScorerEdgeCasesAndHardening::test_null_json_fields_never_stringify_to_none PASSED [ 90%]
+tests/test_scorer.py::TestOllamaScorerEdgeCasesAndHardening::test_null_metadata_in_loudness_and_chat_formatters PASSED [ 92%]
+tests/test_scorer.py::TestOllamaScorerEdgeCasesAndHardening::test_relative_offset_shift_does_not_overshift_out_of_window_timestamps PASSED [ 93%]
+tests/test_scorer.py::TestOllamaScorerEdgeCasesAndHardening::test_rejects_nan_infinity_bool_and_negative_timestamps PASSED [ 94%]
+tests/test_scorer.py::TestOllamaScorerEdgeCasesAndHardening::test_parses_mm_ss_and_hh_mm_ss_timestamp_strings PASSED [ 96%]
+tests/test_scorer.py::TestOllamaScorerEdgeCasesAndHardening::test_hashtags_honor_game_and_streamer_flags_and_deduplicate PASSED [ 97%]
+tests/test_scorer.py::TestOllamaScorerEdgeCasesAndHardening::test_raw_or_disabled_transformation_skips_narrative_backfill PASSED [ 98%]
+tests/test_scorer.py::TestOllamaScorerEdgeCasesAndHardening::test_narrative_and_caption_retries_reinforce_json_instruction PASSED [100%]
 
-============================= 68 passed in 5.32s ==============================
+============================= 76 passed in 5.29s ==============================
 ```
 
 ## 5. Architectural Notes & Edge Cases
 
-- **Qwen3 Reasoning & Fence Resilience**: `_clean_llm_text()` strips `<think>...</think>` blocks and Markdown ` ```json ... ``` ` code fences before JSON decoding so both `qwen3:8b` and `qwen3:4b` outputs parse reliably while malformed JSON still triggers the 3-attempt retry loop.
+- **Null-Safe String & Numeric Parsing**: `_as_str()`, `_parse_seconds()`, and `_parse_score()` prevent JSON `null` (`None`) from stringifying to `"None"`, reject `NaN`/`Infinity`/booleans/negative timestamps, and support `MM:SS` / `HH:MM:SS` / `120.5s` timestamp strings from smaller local models.
+- **Qwen3 Reasoning & Fence Resilience**: `_clean_llm_text()` strips `<think>...</think>` blocks and Markdown ` ```json ... ``` ` code fences before JSON decoding so both `qwen3:8b` and `qwen3:4b` outputs parse reliably while malformed JSON still triggers the 3-attempt retry loop with reinforced JSON reminders across `_score_chunk()`, `generate_narrative()`, and `_generate_caption_and_hashtags()`.
 - **Ollama SDK Compatibility**: `_extract_response_text()` and `_extract_model_names()` support both typed `ollama._types.GenerateResponse` / `ListResponse` Pydantic models (installed in `.venv`) and plain `dict` payloads, with `:latest` tag normalization that never falsely matches `qwen3:8b` against `qwen3:4b`.
-- **Relative-Timestamp Safeguard**: When a smaller local model returns chunk-relative timestamps (`0 <= start < end <= chunk_offset`) on chunks after `0.0s`, `_parse_response()` automatically shifts both highlight boundaries and `sub_clips` beats by `+chunk_offset`, while leaving absolute stream timestamps untouched.
-- **Selective Narrative Backfill**: `generate_metadata()` only invokes `generate_narrative()` when at least one of `narration_intro`, `narration_outro`, or `context_badge` is missing, avoiding redundant LLM calls when `_score_chunk()` already populated them.
+- **Bounded Relative-Timestamp Safeguard**: When a smaller local model returns chunk-relative timestamps (`0 <= start < end <= min(chunk_offset, chunk_minutes * 60)`) on chunks after `0.0s`, `_parse_response()` shifts highlight boundaries and `sub_clips` beats by `+chunk_offset`, without over-shifting out-of-window hallucinations on chunk ≥ 3.
+- **Selective Narrative Backfill & Raw Mode**: `generate_metadata()` resolves `transformation_mode = "raw"` when `transformation.enabled` is `False`, skips `generate_narrative()` in `"raw"` mode or when all 3 narrative fields are already populated, and honors `metadata.include_game_tag` / `metadata.include_streamer_tag` with case-insensitive hashtag deduplication.
 - **Connection vs. Parse Failures**: `OllamaConnectionError` (subclass of `RuntimeError`) is raised immediately with the resolved `self.model` and `ollama pull <model>` guidance without wasting retry attempts, whereas malformed JSON retries up to 3 times and degrades gracefully per chunk.
 - **Next Package**: 3.3 — Pipeline Orchestrator (Claude Opus 4.6, 🔴 Critical). Wires `OllamaScorer.check_connection()`, `score_and_select()`, and `generate_metadata()` into `Pipeline`.

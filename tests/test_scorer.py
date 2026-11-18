@@ -1224,3 +1224,200 @@ class TestOllamaScorerCheckConnection:
         assert "http://localhost:11434" in msg
         assert "ollama serve" in msg
 
+
+class TestOllamaScorerEdgeCasesAndHardening:
+    """Regression tests for null JSON fields, non-finite numbers, offset bounds, tags, and raw mode."""
+
+    @pytest.fixture()
+    def scorer(self, config: Config) -> OllamaScorer:
+        with patch("streamclipper.scoring.ollama_scorer.ollama.Client"):
+            return OllamaScorer(config)
+
+    def test_null_json_fields_never_stringify_to_none(self, scorer: OllamaScorer):
+        """Explicit JSON null values map to empty strings / defaults, never literal 'None'."""
+        payload = [
+            {
+                "start": 100.0,
+                "end": 150.0,
+                "score": 8.0,
+                "moment_type": None,
+                "title": None,
+                "reason": None,
+                "best_quote": None,
+                "narration_intro": None,
+                "narration_outro": None,
+                "context_badge": None,
+                "sub_clips": [
+                    {"start": 100.0, "end": 120.0, "label": None},
+                    {"start": 130.0, "end": 150.0, "label": "Payoff"},
+                ],
+            }
+        ]
+        highlights = scorer._parse_response(json.dumps(payload), chunk_offset=0.0)
+        assert len(highlights) == 1
+        h = highlights[0]
+        assert h.moment_type == "hype"
+        assert h.title == "Stream Highlight"
+        assert h.reason == ""
+        assert h.best_quote == ""
+        assert h.narration_intro == ""
+        assert h.narration_outro == ""
+        assert h.context_badge == ""
+        assert h.sub_clips[0]["label"] == ""
+
+    def test_null_metadata_in_loudness_and_chat_formatters(self, scorer: OllamaScorer):
+        """None peak_time or None chat message values do not crash or emit 'None'."""
+        loud = [TimeRange(start=10.0, end=20.0, score=8.0, metadata={"peak_time": None})]
+        chat = [
+            TimeRange(
+                start=10.0,
+                end=20.0,
+                score=7.5,
+                metadata={"sample_messages": [{"message": None, "text": "POG"}, {"message": None}]},
+            )
+        ]
+        loud_str = scorer._format_loudness_data(loud)
+        chat_str = scorer._format_chat_data(chat)
+        assert "peak: 15.0s" in loud_str
+        assert "'POG'" in chat_str
+        assert "None" not in chat_str
+
+    def test_relative_offset_shift_does_not_overshift_out_of_window_timestamps(
+        self, scorer: OllamaScorer
+    ):
+        """On chunk 3 (offset=1320s), end=950s (> 720s chunk duration) is NOT shifted past chunk end."""
+        payload = [
+            {"start": 20.0, "end": 75.0, "score": 8.0, "title": "Relative", "reason": "r"},
+            {"start": 900.0, "end": 950.0, "score": 8.0, "title": "Hallucinated", "reason": "r"},
+        ]
+        highlights = scorer._parse_response(json.dumps(payload), chunk_offset=1320.0)
+        assert len(highlights) == 2
+        assert highlights[0].start == 1340.0
+        assert highlights[0].end == 1395.0
+        assert highlights[1].start == 900.0
+        assert highlights[1].end == 950.0
+
+    def test_rejects_nan_infinity_bool_and_negative_timestamps(self, scorer: OllamaScorer):
+        """NaN, Infinity, booleans, and negative starts are skipped; bad scores become 0.0."""
+        raw = (
+            '['
+            '{"start": NaN, "end": 50.0, "score": 8, "title": "A", "reason": "r"},'
+            '{"start": 10.0, "end": Infinity, "score": 8, "title": "B", "reason": "r"},'
+            '{"start": -5.0, "end": 30.0, "score": 8, "title": "C", "reason": "r"},'
+            '{"start": true, "end": 30.0, "score": 8, "title": "D", "reason": "r"},'
+            '{"start": 10.0, "end": 50.0, "score": NaN, "title": "Valid", "reason": "r"},'
+            '{"start": 60.0, "end": 100.0, "score": true, "title": "BoolScore", "reason": "r"}'
+            ']'
+        )
+        highlights = scorer._parse_response(raw, chunk_offset=0.0)
+        assert len(highlights) == 2
+        assert highlights[0].title == "Valid"
+        assert highlights[0].score == 0.0
+        assert highlights[1].title == "BoolScore"
+        assert highlights[1].score == 0.0
+
+    def test_parses_mm_ss_and_hh_mm_ss_timestamp_strings(self, scorer: OllamaScorer):
+        """String timestamps like '02:15', '01:02:30', and '120.5s' are parsed accurately."""
+        payload = [
+            {
+                "start": "02:15",
+                "end": "03:00",
+                "score": 8.5,
+                "title": "Formatted Time",
+                "reason": "MM:SS string timestamps",
+                "sub_clips": [
+                    {"start": "135.0s", "end": "02:30", "label": "Setup"},
+                    {"start": "02:40", "end": "03:00", "label": "Payoff"},
+                ],
+            },
+            {
+                "start": "01:02:30",
+                "end": "01:03:15",
+                "score": 9.0,
+                "title": "Hour Timestamp",
+                "reason": "HH:MM:SS string timestamps",
+            },
+        ]
+        highlights = scorer._parse_response(json.dumps(payload), chunk_offset=0.0)
+        assert len(highlights) == 2
+        assert highlights[0].start == 135.0
+        assert highlights[0].end == 180.0
+        assert highlights[0].sub_clips[0]["start"] == 135.0
+        assert highlights[0].sub_clips[0]["end"] == 150.0
+        assert highlights[1].start == 3750.0
+        assert highlights[1].end == 3795.0
+
+    def test_hashtags_honor_game_and_streamer_flags_and_deduplicate(self, tmp_path: Path):
+        """include_game_tag / include_streamer_tag append missing tags and deduplicate case-insensitively."""
+        caption_json = json.dumps(
+            {
+                "caption": "Wild getaway clip!",
+                "hashtags": ["#Viral", "viral", None, "#GamingClips"],
+            }
+        )
+        cfg = Config(user_config_path=tmp_path / "nonexistent.yaml")
+        with patch("streamclipper.scoring.ollama_scorer.ollama.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            mock_client.generate.side_effect = [
+                GenerateResponse(response="Hook Title"),
+                GenerateResponse(response=caption_json),
+            ]
+            scorer = OllamaScorer(cfg)
+            h = _make_highlight(
+                10.0, 50.0, 8.0,
+                narration_intro="intro", narration_outro="outro", context_badge="🔥 Badge",
+            )
+            meta = scorer.generate_metadata(h, streamer="xQc", game="GTA 6", source_url="https://youtu.be/1")
+
+        assert meta.hashtags == ["Viral", "GamingClips", "GTA6", "xQc"]
+
+    def test_raw_or_disabled_transformation_skips_narrative_backfill(self, tmp_path: Path):
+        """When transformation.enabled=false, transformation_mode is 'raw' and narrative_writer is skipped."""
+        user_cfg = tmp_path / "config.yaml"
+        user_cfg.write_text("transformation:\n  enabled: false\n  mode: 'narrative'\n", encoding="utf-8")
+        cfg = Config(user_config_path=user_cfg)
+        caption_json = json.dumps({"caption": "Clean clip!", "hashtags": ["GTA6", "Tim"]})
+
+        with patch("streamclipper.scoring.ollama_scorer.ollama.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            mock_client.generate.side_effect = [
+                GenerateResponse(response="Tim reacts to Vice City"),
+                GenerateResponse(response=caption_json),
+            ]
+            scorer = OllamaScorer(cfg)
+            h = _make_highlight(10.0, 50.0, 8.5, reason="Pure gameplay clip")
+            meta = scorer.generate_metadata(h, streamer="Tim", game="GTA 6", source_url="https://youtu.be/2")
+
+        assert mock_client.generate.call_count == 2  # hook + caption only, no narrative call
+        assert meta.transformation_mode == "raw"
+        assert meta.narration_intro == ""
+        assert meta.narration_outro == ""
+        assert meta.context_badge == ""
+
+    def test_narrative_and_caption_retries_reinforce_json_instruction(self, config: Config):
+        """Retry attempts in generate_narrative and caption generation append strict JSON reminder."""
+        with patch("streamclipper.scoring.ollama_scorer.ollama.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            mock_client.generate.side_effect = [
+                {"response": "bad json"},
+                GenerateResponse(
+                    response=json.dumps(
+                        {
+                            "narration_intro": "Watch closely here.",
+                            "narration_outro": "That timing was unreal.",
+                            "context_badge": "🔥 Timing",
+                        }
+                    )
+                ),
+            ]
+            scorer = OllamaScorer(config)
+            h = _make_highlight(10.0, 50.0, 8.0, reason="Crazy timing")
+            intro, outro, badge = scorer.generate_narrative(h, "Tim", "GTA 6")
+
+        assert intro == "Watch closely here."
+        assert outro == "That timing was unreal."
+        assert badge == "🔥 Timing"
+        retry_prompt = mock_client.generate.call_args_list[1].kwargs["prompt"]
+        assert "IMPORTANT: Return ONLY a valid JSON object" in retry_prompt
+
+

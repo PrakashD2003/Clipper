@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,64 @@ class OllamaConnectionError(RuntimeError):
     """Raised when Ollama is unreachable or the configured model is not available."""
 
 
+def _as_str(value: Any, default: str = "") -> str:
+    """Convert value to a stripped string, mapping None cleanly to default."""
+    if value is None:
+        return default
+    return str(value).strip()
+
+
+def _parse_seconds(value: Any) -> float | None:
+    """Parse a non-negative finite timestamp in seconds or MM:SS / HH:MM:SS format."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        val = float(value)
+        return val if math.isfinite(val) and val >= 0.0 else None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        numeric_text = text[:-1].strip() if text.endswith(("s", "S")) else text
+        try:
+            val = float(numeric_text)
+            return val if math.isfinite(val) and val >= 0.0 else None
+        except ValueError:
+            pass
+        if ":" in text:
+            parts = text.split(":")
+            try:
+                nums = [float(p) for p in parts]
+            except ValueError:
+                return None
+            if not all(math.isfinite(n) and n >= 0.0 for n in nums):
+                return None
+            if len(nums) == 2:
+                mins, secs = nums
+                if secs >= 60.0:
+                    return None
+                return mins * 60.0 + secs
+            if len(nums) == 3:
+                hrs, mins, secs = nums
+                if mins >= 60.0 or secs >= 60.0:
+                    return None
+                return hrs * 3600.0 + mins * 60.0 + secs
+    return None
+
+
+def _parse_score(value: Any) -> float:
+    """Parse a finite score value and clamp to [0.0, 10.0]."""
+    if value is None or isinstance(value, bool):
+        return 0.0
+    try:
+        raw = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(raw):
+        return 0.0
+    return max(0.0, min(10.0, raw))
+
+
 def _format_timestamp(seconds: float) -> str:
     """Format seconds into HH:MM:SS for readable LLM prompt context."""
     total = max(0, int(seconds))
@@ -60,15 +119,19 @@ def _clean_llm_text(raw_text: str) -> str:
 
 def _extract_response_text(response: Any) -> str:
     """Extract text from an ollama GenerateResponse, dict, or raw string."""
+    if response is None:
+        return ""
     if isinstance(response, str):
         return response
     if isinstance(response, dict):
-        return str(response.get("response", ""))
+        val = response.get("response")
+        return "" if val is None else str(val)
     text = getattr(response, "response", None)
     if text is not None:
         return str(text)
     if hasattr(response, "get"):
-        return str(response.get("response", ""))
+        val = response.get("response")
+        return "" if val is None else str(val)
     return str(response)
 
 
@@ -112,8 +175,11 @@ class OllamaScorer(Scorer):
 
     def __init__(self, config: Config):
         super().__init__(config)
-        self.model: str = str(config.get("llm.model", "qwen3:4b"))
-        self.base_url: str = str(config.get("llm.base_url", "http://localhost:11434"))
+        self.model: str = _as_str(config.get("llm.model", "qwen3:4b"), "qwen3:4b")
+        self.base_url: str = _as_str(
+            config.get("llm.base_url", "http://localhost:11434"),
+            "http://localhost:11434",
+        )
         self.temperature: float = float(config.get("llm.temperature", 0.3))
         self.timeout: float = float(config.get("llm.timeout_seconds", 120))
         self.client = ollama.Client(host=self.base_url, timeout=self.timeout)
@@ -205,10 +271,12 @@ class OllamaScorer(Scorer):
             return "None detected in this window."
         lines: list[str] = []
         for spike in loudness:
-            peak = spike.metadata.get("peak_time", (spike.start + spike.end) / 2.0)
+            peak = _parse_seconds(spike.metadata.get("peak_time"))
+            if peak is None:
+                peak = (spike.start + spike.end) / 2.0
             lines.append(
                 f"- {spike.start:.1f}s to {spike.end:.1f}s "
-                f"(score: {spike.score:.1f}/10, peak: {float(peak):.1f}s)"
+                f"(score: {spike.score:.1f}/10, peak: {peak:.1f}s)"
             )
         return "\n".join(lines)
 
@@ -219,11 +287,11 @@ class OllamaScorer(Scorer):
             return "None detected in this window."
         lines: list[str] = []
         for spike in chat:
-            samples = spike.metadata.get("sample_messages", [])
+            samples = spike.metadata.get("sample_messages") or []
             snippet = ""
             if samples:
                 texts = [
-                    str(m.get("message", m.get("text", ""))).strip()
+                    _as_str(m.get("message") if m.get("message") is not None else m.get("text"))
                     for m in samples[:3]
                     if isinstance(m, dict)
                 ]
@@ -322,33 +390,29 @@ class OllamaScorer(Scorer):
                 f"Expected JSON list or object from Ollama, got {type(data).__name__}."
             )
 
+        max_relative_end = min(chunk_offset, float(self.chunk_minutes) * 60.0)
+
         highlights: list[Highlight] = []
         for item in raw_items:
             if not isinstance(item, dict):
                 continue
-            try:
-                start = float(item["start"])
-                end = float(item["end"])
-            except (KeyError, TypeError, ValueError):
+
+            start = _parse_seconds(item.get("start"))
+            end = _parse_seconds(item.get("end"))
+            if start is None or end is None or end <= start:
                 continue
 
-            if end <= start:
-                continue
-
-            # If model emitted chunk-relative offsets for a non-zero chunk, shift to stream time.
+            # If model emitted chunk-relative offsets (within both chunk duration and
+            # chunk_offset) for a non-zero chunk, shift to absolute stream time.
             applied_offset = 0.0
-            if chunk_offset > 0.0 and start >= 0.0 and end <= chunk_offset:
+            if chunk_offset > 0.0 and end <= max_relative_end:
                 applied_offset = chunk_offset
                 start += applied_offset
                 end += applied_offset
 
-            try:
-                raw_score = float(item.get("score", 0.0))
-            except (TypeError, ValueError):
-                raw_score = 0.0
-            score = max(0.0, min(10.0, raw_score))
+            score = _parse_score(item.get("score"))
 
-            moment_type = str(item.get("moment_type", "hype")).strip().lower()
+            moment_type = _as_str(item.get("moment_type"), "hype").lower()
             if moment_type not in VALID_MOMENT_TYPES:
                 moment_type = "hype"
 
@@ -358,28 +422,27 @@ class OllamaScorer(Scorer):
                 for beat in raw_sub_clips:
                     if not isinstance(beat, dict):
                         continue
-                    try:
-                        b_start = float(beat["start"])
-                        b_end = float(beat["end"])
-                    except (KeyError, TypeError, ValueError):
+                    b_start = _parse_seconds(beat.get("start"))
+                    b_end = _parse_seconds(beat.get("end"))
+                    if b_start is None or b_end is None or b_end <= b_start:
                         continue
-                    if applied_offset > 0.0 and b_start >= 0.0 and b_end <= chunk_offset:
+                    if applied_offset > 0.0 and b_end <= max_relative_end:
                         b_start += applied_offset
                         b_end += applied_offset
                     sub_clips.append(
                         {
                             "start": b_start,
                             "end": b_end,
-                            "label": str(beat.get("label", "")).strip(),
+                            "label": _as_str(beat.get("label")),
                         }
                     )
 
-            title = str(item.get("title", "")).strip() or "Stream Highlight"
-            reason = str(item.get("reason", "")).strip()
-            best_quote = str(item.get("best_quote", "")).strip()
-            narration_intro = str(item.get("narration_intro", "")).strip()
-            narration_outro = str(item.get("narration_outro", "")).strip()
-            context_badge = str(item.get("context_badge", "")).strip()
+            title = _as_str(item.get("title")) or "Stream Highlight"
+            reason = _as_str(item.get("reason"))
+            best_quote = _as_str(item.get("best_quote"))
+            narration_intro = _as_str(item.get("narration_intro"))
+            narration_outro = _as_str(item.get("narration_outro"))
+            context_badge = _as_str(item.get("context_badge"))
 
             highlights.append(
                 Highlight(
@@ -407,24 +470,35 @@ class OllamaScorer(Scorer):
         self, highlight: Highlight, streamer: str, game: str
     ) -> tuple[str, str, str]:
         """Backfill (narration_intro, narration_outro, context_badge) via narrative_writer.txt."""
-        prompt = self.narrative_prompt.format(
+        base_prompt = self.narrative_prompt.format(
             streamer=streamer or "the streamer",
             game=game or "the game",
-            moment_type=highlight.moment_type or "hype",
-            hook_title=highlight.title,
-            description=highlight.reason,
-            quote=highlight.best_quote,
+            moment_type=_as_str(highlight.moment_type, "hype") or "hype",
+            hook_title=_as_str(highlight.title),
+            description=_as_str(highlight.reason),
+            quote=_as_str(highlight.best_quote),
         )
+        existing_intro = _as_str(highlight.narration_intro)
+        existing_outro = _as_str(highlight.narration_outro)
+        existing_badge = _as_str(highlight.context_badge)
 
         for attempt in range(1, self.MAX_JSON_RETRIES + 1):
+            prompt = base_prompt
+            if attempt > 1:
+                prompt = (
+                    f"{base_prompt}\n\n"
+                    'IMPORTANT: Return ONLY a valid JSON object with keys '
+                    '"narration_intro", "narration_outro", and "context_badge".'
+                )
+
             raw_text = self._call_generate(prompt, json_format=True)
             try:
                 data = json.loads(_clean_llm_text(raw_text))
                 if not isinstance(data, dict):
                     raise ValueError("Expected JSON object for narrative response.")
-                intro = str(data.get("narration_intro", "")).strip() or highlight.narration_intro
-                outro = str(data.get("narration_outro", "")).strip() or highlight.narration_outro
-                badge = str(data.get("context_badge", "")).strip() or highlight.context_badge
+                intro = _as_str(data.get("narration_intro")) or existing_intro
+                outro = _as_str(data.get("narration_outro")) or existing_outro
+                badge = _as_str(data.get("context_badge")) or existing_badge
                 return intro, outro, badge
             except (json.JSONDecodeError, ValueError) as exc:
                 logger.warning(
@@ -434,11 +508,7 @@ class OllamaScorer(Scorer):
                     exc,
                 )
 
-        return (
-            highlight.narration_intro,
-            highlight.narration_outro,
-            highlight.context_badge,
-        )
+        return existing_intro, existing_outro, existing_badge
 
     def _generate_hook_title(
         self, highlight: Highlight, streamer: str, game: str
@@ -447,8 +517,8 @@ class OllamaScorer(Scorer):
         prompt = self.hook_prompt.format(
             streamer=streamer or "the streamer",
             game=game or "the game",
-            description=highlight.reason,
-            quote=highlight.best_quote,
+            description=_as_str(highlight.reason),
+            quote=_as_str(highlight.best_quote),
         )
         raw_text = self._call_generate(prompt, json_format=False)
         cleaned = _clean_llm_text(raw_text)
@@ -456,7 +526,34 @@ class OllamaScorer(Scorer):
             candidate = line.strip().strip("\"'")
             if candidate:
                 return candidate
-        return highlight.title
+        return _as_str(highlight.title) or "Stream Highlight"
+
+    def _finalize_hashtags(
+        self, raw_tags: list[Any], streamer: str, game: str
+    ) -> list[str]:
+        """Normalize, deduplicate, and enforce configured game/streamer tags."""
+        hashtags: list[str] = []
+        seen_lower: set[str] = set()
+
+        for tag in raw_tags:
+            cleaned = _as_str(tag).lstrip("#").strip()
+            if cleaned and cleaned.lower() not in seen_lower:
+                seen_lower.add(cleaned.lower())
+                hashtags.append(cleaned)
+
+        if self.config.get("metadata.include_game_tag", True) and game:
+            game_tag = re.sub(r"\W+", "", game)
+            if game_tag and game_tag.lower() not in seen_lower:
+                seen_lower.add(game_tag.lower())
+                hashtags.append(game_tag)
+
+        if self.config.get("metadata.include_streamer_tag", True) and streamer:
+            streamer_tag = re.sub(r"\W+", "", streamer)
+            if streamer_tag and streamer_tag.lower() not in seen_lower:
+                seen_lower.add(streamer_tag.lower())
+                hashtags.append(streamer_tag)
+
+        return hashtags
 
     def _generate_caption_and_hashtags(
         self,
@@ -467,30 +564,34 @@ class OllamaScorer(Scorer):
     ) -> tuple[str, list[str]]:
         """Generate social media caption and hashtags using caption_writer.txt."""
         hashtag_count = int(self.config.get("metadata.hashtag_count", 15))
-        prompt = self.caption_prompt.format(
+        base_prompt = self.caption_prompt.format(
             streamer=streamer or "the streamer",
             game=game or "the game",
             hook_title=hook_title,
-            description=highlight.reason,
+            description=_as_str(highlight.reason),
             hashtag_count=hashtag_count,
         )
 
         for attempt in range(1, self.MAX_JSON_RETRIES + 1):
+            prompt = base_prompt
+            if attempt > 1:
+                prompt = (
+                    f"{base_prompt}\n\n"
+                    'IMPORTANT: Return ONLY a valid JSON object with keys '
+                    '"caption" and "hashtags".'
+                )
+
             raw_text = self._call_generate(prompt, json_format=True)
             try:
                 data = json.loads(_clean_llm_text(raw_text))
                 if not isinstance(data, dict):
                     raise ValueError("Expected JSON object for caption response.")
-                caption = str(data.get("caption", "")).strip()
-                raw_tags = data.get("hashtags", [])
-                hashtags: list[str] = []
-                if isinstance(raw_tags, list):
-                    for tag in raw_tags:
-                        cleaned_tag = str(tag).lstrip("#").strip()
-                        if cleaned_tag:
-                            hashtags.append(cleaned_tag)
+                caption = _as_str(data.get("caption"))
+                raw_tags = data.get("hashtags")
+                tag_list = raw_tags if isinstance(raw_tags, list) else []
+                hashtags = self._finalize_hashtags(tag_list, streamer, game)
                 if not caption:
-                    caption = highlight.reason or hook_title
+                    caption = _as_str(highlight.reason) or hook_title
                 return caption, hashtags
             except (json.JSONDecodeError, ValueError) as exc:
                 logger.warning(
@@ -501,13 +602,8 @@ class OllamaScorer(Scorer):
                 )
 
         # Graceful fallback if caption LLM returns malformed JSON across all retries
-        fallback_tags: list[str] = []
-        if self.config.get("metadata.include_game_tag", True) and game:
-            fallback_tags.append(re.sub(r"\W+", "", game))
-        if self.config.get("metadata.include_streamer_tag", True) and streamer:
-            fallback_tags.append(re.sub(r"\W+", "", streamer))
-        fallback_tags = [t for t in fallback_tags if t]
-        return highlight.reason or hook_title, fallback_tags
+        fallback_tags = self._finalize_hashtags([], streamer, game)
+        return _as_str(highlight.reason) or hook_title, fallback_tags
 
     def generate_metadata(
         self, highlight: Highlight, streamer: str, game: str, source_url: str
@@ -515,11 +611,20 @@ class OllamaScorer(Scorer):
         """Generate hook title, narrative fields, caption, and hashtags for a highlight."""
         hook_title = self._generate_hook_title(highlight, streamer, game)
 
-        narration_intro = highlight.narration_intro.strip()
-        narration_outro = highlight.narration_outro.strip()
-        context_badge = highlight.context_badge.strip()
+        transformation_enabled = bool(self.config.get("transformation.enabled", True))
+        configured_mode = (
+            _as_str(self.config.get("transformation.mode", "narrative"), "narrative").lower()
+            or "narrative"
+        )
+        transformation_mode = configured_mode if transformation_enabled else "raw"
 
-        if not (narration_intro and narration_outro and context_badge):
+        narration_intro = _as_str(highlight.narration_intro)
+        narration_outro = _as_str(highlight.narration_outro)
+        context_badge = _as_str(highlight.context_badge)
+
+        if transformation_mode != "raw" and not (
+            narration_intro and narration_outro and context_badge
+        ):
             gen_intro, gen_outro, gen_badge = self.generate_narrative(
                 highlight, streamer, game
             )
@@ -531,7 +636,6 @@ class OllamaScorer(Scorer):
             highlight, streamer, game, hook_title
         )
 
-        transformation_mode = str(self.config.get("transformation.mode", "narrative"))
         score = highlight.final_score if highlight.final_score > 0.0 else highlight.score
 
         return ClipMetadata(
@@ -544,7 +648,7 @@ class OllamaScorer(Scorer):
             clip_start=highlight.start,
             clip_end=highlight.end,
             highlight_score=score,
-            moment_type=highlight.moment_type,
+            moment_type=_as_str(highlight.moment_type, "hype") or "hype",
             narration_intro=narration_intro,
             narration_outro=narration_outro,
             context_badge=context_badge,
