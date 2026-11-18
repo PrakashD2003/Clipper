@@ -1,0 +1,218 @@
+"""Audio-only stream downloader producing 16kHz mono PCM WAV files via yt-dlp."""
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Any, Callable
+
+import yt_dlp
+
+from ..models import Platform, StreamInfo
+
+logger = logging.getLogger(__name__)
+
+
+class AudioDownloadError(RuntimeError):
+    """Raised when stream metadata extraction or audio download fails."""
+
+
+def _validate_url(url: str) -> str:
+    """Ensure the provided URL is a non-empty string and strip surrounding whitespace."""
+    if not isinstance(url, str) or not url.strip():
+        raise AudioDownloadError("Invalid URL: URL must be a non-empty string.")
+    return url.strip()
+
+
+def _classify_download_error(url: str, exc: Exception) -> AudioDownloadError:
+    """Translate yt-dlp exceptions into descriptive, user-facing AudioDownloadError messages."""
+    raw_message = str(exc).strip()
+    lower = raw_message.lower()
+
+    if any(
+        token in lower
+        for token in ("private video", "this video is private", "members-only", "members only")
+    ):
+        return AudioDownloadError(
+            f"Video is private or restricted and cannot be downloaded ({url}): {raw_message}"
+        )
+
+    if any(
+        token in lower
+        for token in (
+            "confirm your age",
+            "age-restricted",
+            "age restricted",
+            "sign in",
+            "login required",
+            "cookies",
+        )
+    ):
+        return AudioDownloadError(
+            f"Video is age-restricted or requires authentication ({url}): {raw_message}"
+        )
+
+    if any(
+        token in lower
+        for token in (
+            "not available in your country",
+            "available in your country",
+            "blocked it in your country",
+            "geo-restricted",
+            "geo restricted",
+            "region",
+        )
+    ):
+        return AudioDownloadError(
+            f"Video is region-locked and unavailable in your location ({url}): {raw_message}"
+        )
+
+    if any(
+        token in lower
+        for token in (
+            "video unavailable",
+            "has been removed",
+            "deleted",
+            "no longer available",
+            "terminated",
+            "isn't available",
+        )
+    ):
+        return AudioDownloadError(
+            f"Video is deleted or unavailable ({url}): {raw_message}"
+        )
+
+    if any(
+        token in lower
+        for token in (
+            "is not a valid url",
+            "not a valid url",
+            "unsupported url",
+            "incomplete youtube id",
+            "truncated id",
+            "unable to download webpage",
+        )
+    ):
+        return AudioDownloadError(
+            f"Invalid or unsupported stream URL ({url}): {raw_message}"
+        )
+
+    return AudioDownloadError(f"Failed to download audio from {url}: {raw_message}")
+
+
+def _detect_platform(info: dict[str, Any], url: str) -> Platform:
+    """Infer the streaming platform from yt-dlp extractor metadata or URL."""
+    extractor = str(info.get("extractor_key") or info.get("extractor") or "").lower()
+    url_lower = url.lower()
+
+    if "twitch" in extractor or "twitch.tv" in url_lower:
+        return Platform.TWITCH
+    if "kick" in extractor or "kick.com" in url_lower:
+        return Platform.KICK
+    return Platform.YOUTUBE
+
+
+def _info_dict_to_stream_info(info: dict[str, Any], url: str) -> StreamInfo:
+    """Convert a yt-dlp info dictionary into a StreamInfo dataclass."""
+    title = str(info.get("title") or "")
+    streamer = str(
+        info.get("uploader") or info.get("channel") or info.get("creator") or "Unknown"
+    )
+    game = str(info.get("game") or "")
+
+    duration_raw = info.get("duration")
+    duration_seconds = int(duration_raw) if duration_raw is not None else 0
+
+    views_raw = info.get("view_count")
+    view_count = int(views_raw) if views_raw is not None else 0
+
+    video_id = str(info.get("id") or "")
+    platform = _detect_platform(info, url)
+
+    return StreamInfo(
+        url=url,
+        title=title,
+        platform=platform,
+        streamer=streamer,
+        game=game,
+        duration_seconds=duration_seconds,
+        view_count=view_count,
+        video_id=video_id,
+    )
+
+
+def extract_stream_info(url: str) -> StreamInfo:
+    """Extract stream metadata without downloading media."""
+    clean_url = _validate_url(url)
+    ydl_opts: dict[str, Any] = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "skip_download": True,
+    }
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(clean_url, download=False)
+    except (yt_dlp.utils.DownloadError, yt_dlp.utils.ExtractorError) as exc:
+        raise _classify_download_error(clean_url, exc) from exc
+
+    if not isinstance(info, dict):
+        raise AudioDownloadError(f"Could not extract stream metadata for URL: {clean_url}")
+
+    return _info_dict_to_stream_info(info, clean_url)
+
+
+def download_audio(
+    url: str,
+    output_dir: Path,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> tuple[Path, StreamInfo]:
+    """Download 16kHz mono PCM WAV audio and extract stream metadata.
+
+    Returns ``(audio_path, stream_info)``. If ``{output_dir}/{video_id}.wav``
+    already exists on disk, skips downloading and returns the cached path.
+    """
+    clean_url = _validate_url(url)
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    stream_info = extract_stream_info(clean_url)
+    if not stream_info.video_id:
+        raise AudioDownloadError(f"Could not determine video ID for URL: {clean_url}")
+
+    audio_path = out_dir / f"{stream_info.video_id}.wav"
+    if audio_path.is_file():
+        logger.info("Cached 16kHz WAV audio found, skipping download: %s", audio_path)
+        return audio_path, stream_info
+
+    ydl_opts: dict[str, Any] = {
+        "format": "bestaudio/best",
+        "outtmpl": str(out_dir / "%(id)s.%(ext)s"),
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "postprocessors": [
+            {
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "wav",
+            }
+        ],
+        "postprocessor_args": {
+            "extractaudio": ["-ar", "16000", "-ac", "1"],
+        },
+    }
+    if progress_callback is not None:
+        ydl_opts["progress_hooks"] = [progress_callback]
+
+    logger.info("Downloading 16kHz mono WAV audio for %s -> %s", stream_info.video_id, audio_path)
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([clean_url])
+    except (
+        yt_dlp.utils.DownloadError,
+        yt_dlp.utils.ExtractorError,
+        yt_dlp.utils.PostProcessingError,
+    ) as exc:
+        raise _classify_download_error(clean_url, exc) from exc
+
+    return audio_path, stream_info
