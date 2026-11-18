@@ -359,6 +359,20 @@ class TestCLI:
         )
         monkeypatch.setattr(cli_mod, "console", Console(width=160, force_terminal=False))
 
+        captured_calls: list[dict] = []
+
+        class _StubPipeline:
+            def __init__(self, config: Config) -> None:
+                self.config = config
+
+            async def process_stream(self, **kwargs) -> list[ClipResult]:
+                captured_calls.append(kwargs)
+                return []
+
+        import streamclipper.pipeline as pipeline_mod
+
+        monkeypatch.setattr(pipeline_mod, "Pipeline", _StubPipeline)
+
         runner = CliRunner()
         result = runner.invoke(
             cli,
@@ -379,7 +393,12 @@ class TestCLI:
         )
         assert result.exit_code == 0
         assert "https://youtube.com/watch?v=demo123" in result.output
-        assert "Phase 3" in result.output
+        assert len(captured_calls) == 1
+        assert captured_calls[0]["url"] == "https://youtube.com/watch?v=demo123"
+        assert captured_calls[0]["max_clips"] == 5
+        assert captured_calls[0]["game"] == "GTA 6"
+        assert captured_calls[0]["streamer"] == "Kai"
+        assert captured_calls[0]["interactive"] is False
 
     def test_auto_command_uses_config_and_game_override(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -390,6 +409,20 @@ class TestCLI:
             encoding="utf-8",
         )
         monkeypatch.setattr(cli_mod, "console", Console(width=160, force_terminal=False))
+
+        discovered_games: list[str | None] = []
+
+        class _StubDiscovery:
+            def __init__(self, config: Config) -> None:
+                self.config = config
+
+            def discover(self, game: str | None = None) -> list[StreamInfo]:
+                discovered_games.append(game)
+                return []
+
+        import streamclipper.discovery.youtube as yt_mod
+
+        monkeypatch.setattr(yt_mod, "YouTubeDiscovery", _StubDiscovery)
 
         runner = CliRunner()
         res_default = runner.invoke(cli, ["--config", str(cfg_file), "auto"])
@@ -402,6 +435,7 @@ class TestCLI:
         )
         assert res_override.exit_code == 0
         assert "Elden Ring" in res_override.output
+        assert discovered_games == ["GTA 6", "Elden Ring"]
 
     def test_setup_renders_dependencies_gpu_and_hardware_profile_with_overrides(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

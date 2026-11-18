@@ -1,4 +1,5 @@
 """CLI entry point for StreamClipper."""
+import asyncio
 import subprocess
 from pathlib import Path
 
@@ -30,6 +31,26 @@ def cli(ctx: click.Context, config: str | None, verbose: bool) -> None:
 @click.option("--game", "-g", default=None, help="Game name (overrides config)")
 @click.option("--streamer", "-s", default=None, help="Streamer name (auto-detected if omitted)")
 @click.option("--interactive/--no-interactive", default=True, help="Prompt to select highlights")
+@click.option(
+    "--mode",
+    type=click.Choice(["narrative", "story", "raw"], case_sensitive=False),
+    default=None,
+    help="YPP transformation mode (overrides config)",
+)
+@click.option(
+    "--voice-intro",
+    "voice_intro",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Path to custom human intro voiceover WAV",
+)
+@click.option(
+    "--voice-outro",
+    "voice_outro",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Path to custom human outro voiceover WAV",
+)
 @click.pass_context
 def clip(
     ctx: click.Context,
@@ -38,34 +59,134 @@ def clip(
     game: str | None,
     streamer: str | None,
     interactive: bool,
+    mode: str | None,
+    voice_intro: Path | None,
+    voice_outro: Path | None,
 ) -> None:
     """Clip highlights from a stream URL.
 
-    Example: streamclipper clip "https://youtube.com/watch?v=XXXXX"
+    Example: streamclipper clip "https://youtube.com/watch?v=XXXXX" --mode narrative
     """
+    from .pipeline import Pipeline
+
+    config: Config = ctx.obj["config"]
+    normalized_mode = mode.lower() if mode else None
     console.print(f"[bold green]🎬 Processing stream:[/] {url}")
-    console.print("[yellow]⚠️ Pipeline not yet implemented. Coming in Phase 3.[/]")
+
+    pipeline = Pipeline(config)
+    clips = asyncio.run(
+        pipeline.process_stream(
+            url=url,
+            max_clips=max_clips,
+            game=game,
+            streamer=streamer,
+            interactive=interactive,
+            mode=normalized_mode,
+            voice_intro_path=voice_intro,
+            voice_outro_path=voice_outro,
+        )
+    )
+
+    if not clips:
+        console.print("[yellow]No clips were generated for this stream.[/]")
+        return
+
+    console.print(f"[bold green]✅ Generated {len(clips)} clip(s):[/]")
+    for idx, result in enumerate(clips, 1):
+        console.print(
+            f"  {idx}. [cyan]{result.video_path}[/] "
+            f"([dim]{result.metadata.transformation_mode}, {result.duration_seconds:.1f}s[/])"
+        )
 
 
 @cli.command()
 @click.option("--game", "-g", default=None, help="Game to search for")
 @click.option("--max-streams", "-n", default=None, type=int, help="Number of streams")
 @click.option("--max-clips", default=None, type=int, help="Clips per stream")
+@click.option(
+    "--mode",
+    type=click.Choice(["narrative", "story", "raw"], case_sensitive=False),
+    default=None,
+    help="YPP transformation mode (overrides config)",
+)
+@click.option(
+    "--voice-intro",
+    "voice_intro",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Path to custom human intro voiceover WAV",
+)
+@click.option(
+    "--voice-outro",
+    "voice_outro",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Path to custom human outro voiceover WAV",
+)
 @click.pass_context
 def auto(
     ctx: click.Context,
     game: str | None,
     max_streams: int | None,
     max_clips: int | None,
+    mode: str | None,
+    voice_intro: Path | None,
+    voice_outro: Path | None,
 ) -> None:
     """Auto-discover top streams and clip them all.
 
-    Example: streamclipper auto --game "GTA 6" --max-streams 5
+    Example: streamclipper auto --game "GTA 6" --max-streams 5 --mode narrative
     """
+    from .discovery.youtube import YouTubeDiscovery
+    from .pipeline import Pipeline
+
     config: Config = ctx.obj["config"]
-    game = game or config.get("discovery.default_game", "GTA 6")
-    console.print(f"[bold green]🔍 Discovering top {game} streams...[/]")
-    console.print("[yellow]⚠️ Discovery not yet implemented. Coming in Phase 3.[/]")
+    target_game = game or str(config.get("discovery.default_game", "GTA 6"))
+    normalized_mode = mode.lower() if mode else None
+    console.print(f"[bold green]🔍 Discovering top {target_game} streams...[/]")
+
+    discovery = YouTubeDiscovery(config)
+    streams = discovery.discover(game=target_game)
+    if max_streams is not None:
+        streams = streams[: max(0, max_streams)]
+
+    if not streams:
+        console.print(f"[yellow]No matching {target_game} streams found.[/]")
+        return
+
+    console.print(
+        f"[bold green]🚀 Processing {len(streams)} stream(s) in parallel...[/]"
+    )
+    max_concurrent = int(config.get("general.max_concurrent_streams", 2))
+    pipeline = Pipeline(config)
+    results = asyncio.run(
+        pipeline.process_streams_parallel(
+            [s.url for s in streams],
+            max_concurrent=max_concurrent,
+            max_clips=max_clips,
+            game=target_game,
+            mode=normalized_mode,
+            voice_intro_path=voice_intro,
+            voice_outro_path=voice_outro,
+        )
+    )
+
+    total_clips = 0
+    failures = 0
+    for stream, outcome in zip(streams, results):
+        if isinstance(outcome, BaseException):
+            failures += 1
+            console.print(f"  [red]✗[/] {stream.title or stream.url}: {outcome}")
+        else:
+            total_clips += len(outcome)
+            console.print(
+                f"  [green]✓[/] {stream.title or stream.url}: {len(outcome)} clip(s)"
+            )
+
+    console.print(
+        f"[bold green]✅ Finished auto-run:[/] {total_clips} clip(s) generated across "
+        f"{len(streams) - failures}/{len(streams)} stream(s)."
+    )
 
 
 @cli.command()
