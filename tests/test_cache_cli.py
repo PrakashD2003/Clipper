@@ -326,6 +326,26 @@ class TestStepCache:
         assert len(remaining) == 1
         assert remaining[0].stream_info.url == url_2
 
+    def test_find_by_audio_path_resolves_full_state_and_analysis_complete(
+        self, tmp_path: Path
+    ) -> None:
+        cache = StepCache(_make_config(tmp_path))
+        wav_path = tmp_path / "temp" / "gta6_test.wav"
+        wav_path.parent.mkdir(parents=True, exist_ok=True)
+        wav_path.write_bytes(b"RIFF")
+
+        state = _make_full_pipeline_state(status=PipelineStatus.SCORING)
+        state.audio_path = wav_path
+        state.analysis_complete = True
+        cache.save_state(state)
+
+        found = cache.find_by_audio_path(wav_path)
+        assert found is not None
+        assert found.stream_info.url == state.stream_info.url
+        assert found.transcript is not None
+        assert found.analysis_complete is True
+        assert cache.find_by_audio_path(tmp_path / "missing.wav") is None
+
 
 # ---------------------------------------------------------------------------
 # Click CLI Tests
@@ -577,3 +597,23 @@ class TestCLI:
         assert "analyzing" in populated_res.output
         assert "https://youtube.com/watch?v=vid2" in populated_res.output
         assert "complete" in populated_res.output
+
+    def test_missing_config_path_fails_cleanly_and_verbose_sets_debug_logging(
+        self, tmp_path: Path
+    ) -> None:
+        import logging
+
+        runner = CliRunner()
+        bad_res = runner.invoke(
+            cli, ["--config", str(tmp_path / "does_not_exist.yaml"), "status"]
+        )
+        assert bad_res.exit_code != 0
+
+        cfg_file = tmp_path / "cfg.yaml"
+        cfg_file.write_text(
+            yaml.safe_dump({"general": {"cache_dir": str(tmp_path / ".cache")}}),
+            encoding="utf-8",
+        )
+        ok_res = runner.invoke(cli, ["--config", str(cfg_file), "--verbose", "status"])
+        assert ok_res.exit_code == 0
+        assert logging.getLogger("streamclipper").level == logging.DEBUG

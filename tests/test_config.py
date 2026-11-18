@@ -419,6 +419,72 @@ class TestConfigSystem:
         with pytest.raises(ValueError, match="transcription.batch_size"):
             Config(user_config_path=bad_cfg, hardware_profile=self._gtx_1660_profile())
 
+    def test_packaged_default_config_matches_repo_root(self) -> None:
+        repo_cfg = Path(__file__).parent.parent / "config.default.yaml"
+        pkg_cfg = Path(__file__).parent.parent / "src" / "streamclipper" / "config.default.yaml"
+        assert pkg_cfg.is_file()
+        assert pkg_cfg.read_text(encoding="utf-8") == repo_cfg.read_text(encoding="utf-8")
+
+    @pytest.mark.parametrize(
+        "bad_weights",
+        [
+            None,
+            [],
+            {"loudness": -0.5, "chat_velocity": 0.5, "llm_score": 1.0},
+            {"loudness": 0.25, "chat_velocity": 0.25, "llm_score": 0.25, "bogus": 0.25},
+            {"loudness": True, "chat_velocity": 0.0, "llm_score": 0.0},
+        ],
+    )
+    def test_validation_rejects_malformed_or_negative_weights(
+        self, tmp_path: Path, bad_weights: object
+    ) -> None:
+        bad_cfg = tmp_path / "bad_weights_edge.yaml"
+        bad_cfg.write_text(
+            yaml.safe_dump({"analysis": {"weights": bad_weights}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError):
+            Config(user_config_path=bad_cfg, hardware_profile=self._gtx_1660_profile())
+
+    @pytest.mark.parametrize("bad_res", [[0, 1920], [1080, -1], [True, 1920], ["1080", "1920"]])
+    def test_validation_rejects_non_positive_or_non_int_resolution(
+        self, tmp_path: Path, bad_res: object
+    ) -> None:
+        bad_cfg = tmp_path / "bad_res_edge.yaml"
+        bad_cfg.write_text(
+            yaml.safe_dump({"video": {"resolution": bad_res}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="video.resolution"):
+            Config(user_config_path=bad_cfg, hardware_profile=self._gtx_1660_profile())
+
+    @pytest.mark.parametrize("valid_mode", ["auto", "narrative", "story", "raw"])
+    def test_validation_accepts_all_four_transformation_modes(
+        self, tmp_path: Path, valid_mode: str
+    ) -> None:
+        cfg_file = tmp_path / f"mode_{valid_mode}.yaml"
+        cfg_file.write_text(
+            yaml.safe_dump({"transformation": {"mode": valid_mode}}),
+            encoding="utf-8",
+        )
+        cfg = Config(user_config_path=cfg_file, hardware_profile=self._gtx_1660_profile())
+        assert cfg.get("transformation.mode") == valid_mode
+
+    def test_validation_rejects_invalid_transformation_mode(self, tmp_path: Path) -> None:
+        bad_cfg = tmp_path / "bad_mode.yaml"
+        bad_cfg.write_text(
+            yaml.safe_dump({"transformation": {"mode": "turbo"}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="transformation.mode"):
+            Config(user_config_path=bad_cfg, hardware_profile=self._gtx_1660_profile())
+
+    def test_validation_rejects_non_mapping_user_yaml(self, tmp_path: Path) -> None:
+        bad_cfg = tmp_path / "list_root.yaml"
+        bad_cfg.write_text("- item1\n- item2\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="YAML mapping"):
+            Config(user_config_path=bad_cfg, hardware_profile=self._gtx_1660_profile())
+
 
 # ---------------------------------------------------------------------------
 # Data Models, PipelineStatus IntEnum & Full JSON Round-Trip Tests
@@ -575,3 +641,84 @@ class TestDataModels:
         assert state_roundtrip.status is PipelineStatus.ASSEMBLING
         assert isinstance(state_roundtrip.audio_path, Path)
         assert isinstance(state_roundtrip.cache_dir, Path)
+
+    def test_from_dict_tolerates_explicit_json_null_fields(self) -> None:
+        """Cached JSON with explicit null list/dict/string fields must not raise TypeError."""
+        tr = TimeRange.from_dict({"start": 1.0, "end": 5.0, "score": None, "metadata": None})
+        assert tr.score == 0.0
+        assert tr.metadata == {}
+
+        seg = TranscriptSegment.from_dict({"text": "hi", "start": 0.0, "end": 1.0, "words": None})
+        assert seg.words == []
+
+        res = TranscriptionResult.from_dict({"segments": None, "full_text": None, "language": None})
+        assert res.segments == []
+        assert res.full_text == ""
+        assert res.language == "en"
+
+        hl = Highlight.from_dict(
+            {
+                "start": 0.0,
+                "end": 40.0,
+                "score": 8.0,
+                "title": None,
+                "reason": None,
+                "word_timestamps": None,
+                "chat_burst": None,
+                "sub_clips": None,
+                "peak_time": None,
+            }
+        )
+        assert hl.word_timestamps == []
+        assert hl.chat_burst == []
+        assert hl.sub_clips == []
+        assert hl.peak_time == 0.0
+
+        meta = ClipMetadata.from_dict(
+            {
+                "hook_title": "T",
+                "caption": "C",
+                "hashtags": None,
+                "streamer": "S",
+                "game": "G",
+                "source_url": "U",
+                "clip_start": 0.0,
+                "clip_end": 30.0,
+                "highlight_score": 8.0,
+            }
+        )
+        assert meta.hashtags == []
+
+        cr = ClipResult.from_dict(
+            {
+                "video_path": "clip.mp4",
+                "metadata_path": None,
+                "metadata": meta.to_dict(),
+                "duration_seconds": 30.0,
+            }
+        )
+        assert cr.metadata_path is None
+
+        ps = PipelineState.from_dict(
+            {
+                "stream_info": {
+                    "url": "https://youtu.be/x",
+                    "title": None,
+                    "platform": "youtube",
+                    "streamer": None,
+                    "game": None,
+                    "duration_seconds": None,
+                    "view_count": None,
+                    "video_id": None,
+                },
+                "status": None,
+                "loudness_spikes": None,
+                "chat_spikes": None,
+                "highlights": None,
+                "selected_highlights": None,
+                "clips": None,
+            }
+        )
+        assert ps.status is PipelineStatus.PENDING
+        assert ps.loudness_spikes == []
+        assert ps.clips == []

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date
+import inspect
 import logging
 from pathlib import Path
 import re
@@ -15,7 +16,7 @@ from .analysis.chat_velocity import ChatVelocityAnalyzer
 from .analysis.loudness import LoudnessDetector
 from .analysis.transcriber import Transcriber
 from .cache import StepCache
-from .config import Config
+from .config import Config, VALID_TRANSFORMATION_MODES
 from .download.audio import download_audio
 from .download.chat import ChatScraper
 from .download.video import download_multiple_segments, download_segment
@@ -34,6 +35,17 @@ from .scoring.scorer import Scorer
 logger = logging.getLogger(__name__)
 
 _INVALID_PATH_CHARS_RE = re.compile(r'[<>:"/\\|?*]+')
+_PHASE4_MODULES = frozenset(
+    {
+        "streamclipper.assembly",
+        "streamclipper.assembly.composer",
+        "streamclipper.assembly.facecam",
+        "streamclipper.assembly.hooks",
+        "streamclipper.output",
+        "streamclipper.output.exporter",
+        "streamclipper.output.organizer",
+    }
+)
 
 
 def format_time(seconds: float) -> str:
@@ -60,6 +72,7 @@ class Pipeline:
         self.console = Console()
         self.temp_dir = Path(config.get("general.temp_dir", "./temp"))
         self.output_dir = Path(config.get("general.output_dir", "./output"))
+        self._gpu_lock = asyncio.Lock()
 
     @staticmethod
     def _recover_failed_state(state: PipelineState) -> PipelineState:
@@ -68,15 +81,62 @@ class Pipeline:
             return state
         if state.highlights or state.selected_highlights:
             state.status = PipelineStatus.ASSEMBLING
-        elif state.loudness_spikes or state.chat_spikes:
+        elif state.analysis_complete or state.loudness_spikes or state.chat_spikes:
             state.status = PipelineStatus.SCORING
         elif state.transcript is not None:
-            state.status = PipelineStatus.ANALYZING
+            if state.audio_path is not None and not Path(state.audio_path).exists():
+                state.status = PipelineStatus.PENDING
+            else:
+                state.status = PipelineStatus.ANALYZING
         elif state.audio_path and Path(state.audio_path).exists():
             state.status = PipelineStatus.TRANSCRIBING
         else:
             state.status = PipelineStatus.PENDING
         return state
+
+    def _resolve_base_mode(self, mode: str | None) -> str:
+        """Resolve and validate the requested transformation mode respecting transformation.enabled."""
+        if mode is not None and str(mode).strip():
+            resolved = str(mode).strip().lower()
+            if resolved not in VALID_TRANSFORMATION_MODES:
+                raise ValueError(
+                    f"Invalid transformation mode {mode!r}; expected one of "
+                    f"{sorted(VALID_TRANSFORMATION_MODES)}"
+                )
+            return resolved
+        if not bool(self.config.get("transformation.enabled", True)):
+            return "raw"
+        configured = str(self.config.get("transformation.mode", "auto")).strip().lower() or "auto"
+        if configured not in VALID_TRANSFORMATION_MODES:
+            raise ValueError(
+                f"Invalid transformation.mode {configured!r}; expected one of "
+                f"{sorted(VALID_TRANSFORMATION_MODES)}"
+            )
+        return configured
+
+    def _resolve_highlight_mode(
+        self, base_mode: str, highlight: Highlight
+    ) -> tuple[str, list[dict[str, Any]]]:
+        """Resolve concrete per-highlight mode (raw | narrative | story) and validated beats."""
+        if base_mode == "raw":
+            return "raw", []
+        if base_mode == "narrative":
+            return "narrative", []
+
+        max_clip_seconds = float(self.config.get("analysis.max_clip_seconds", 90))
+        valid_beats = Scorer._validate_sub_clips(
+            highlight.sub_clips,
+            highlight.start,
+            highlight.end,
+            max_duration=max_clip_seconds,
+        )
+        if base_mode == "auto":
+            if len(valid_beats) >= 2:
+                return "story", valid_beats
+            return "narrative", []
+        if base_mode == "story":
+            return "story", valid_beats
+        return base_mode, []
 
     async def process_stream(
         self,
@@ -88,6 +148,7 @@ class Pipeline:
         mode: str | None = None,
         voice_intro_path: Path | None = None,
         voice_outro_path: Path | None = None,
+        force: bool = False,
     ) -> list[ClipResult]:
         """Process a single stream through the full resumable pipeline."""
         if not isinstance(url, str) or not url.strip():
@@ -96,6 +157,13 @@ class Pipeline:
 
         intro_path = Path(voice_intro_path) if voice_intro_path is not None else None
         outro_path = Path(voice_outro_path) if voice_outro_path is not None else None
+        if intro_path is not None and not intro_path.exists():
+            logger.warning("Custom intro voiceover path does not exist yet: %s", intro_path)
+        if outro_path is not None and not outro_path.exists():
+            logger.warning("Custom outro voiceover path does not exist yet: %s", outro_path)
+
+        if force:
+            self.cache.clear(clean_url)
 
         state = self.cache.load_state(clean_url) or PipelineState(
             stream_info=StreamInfo(
@@ -103,7 +171,7 @@ class Pipeline:
                 title="",
                 platform=Platform.YOUTUBE,
                 streamer=streamer or "",
-                game=game or str(self.config.get("discovery.default_game", "GTA 6")),
+                game=game or "",
                 duration_seconds=0,
             )
         )
@@ -111,6 +179,18 @@ class Pipeline:
             state.stream_info.game = game
         if streamer:
             state.stream_info.streamer = streamer
+
+        if state.status == PipelineStatus.COMPLETE and (
+            mode is not None
+            or max_clips is not None
+            or intro_path is not None
+            or outro_path is not None
+        ):
+            logger.warning(
+                "Returning cached COMPLETE results for %s; pass force=True (--force) "
+                "to re-run with updated options.",
+                clean_url,
+            )
 
         state = self._recover_failed_state(state)
 
@@ -120,19 +200,24 @@ class Pipeline:
                 state = await self._step_download_audio(state)
                 self.cache.save_state(state)
 
-            # Step 3: Transcribe (skip if cached)
+            # Step 3: Transcribe (skip if cached; serialized on GPU lock)
             if state.status < PipelineStatus.ANALYZING:
-                state = await self._step_transcribe(state)
+                async with self._gpu_lock:
+                    state = await self._step_transcribe(state)
                 self.cache.save_state(state)
 
-            # Step 4: Analyze signals (skip if cached)
+            # Step 4: Analyze signals (skip if cached; re-download missing WAV while preserving transcript)
             if state.status < PipelineStatus.SCORING:
+                if state.audio_path is None or not Path(state.audio_path).exists():
+                    state = await self._step_download_audio(state)
+                    self.cache.save_state(state)
                 state = await self._step_analyze(state)
                 self.cache.save_state(state)
 
-            # Step 5: Score with LLM (skip if cached)
+            # Step 5: Score with LLM (skip if cached; serialized on GPU lock)
             if state.status < PipelineStatus.ASSEMBLING:
-                state = await self._step_score(state)
+                async with self._gpu_lock:
+                    state = await self._step_score(state, max_clips=max_clips)
                 self.cache.save_state(state)
 
             # Step 6: Select highlights (interactive only when explicitly requested)
@@ -174,22 +259,25 @@ class Pipeline:
         mode: str | None = None,
         voice_intro_path: Path | None = None,
         voice_outro_path: Path | None = None,
+        force: bool = False,
     ) -> list[list[ClipResult] | BaseException]:
-        """Process multiple streams in parallel (always non-interactive)."""
+        """Process multiple streams in parallel (always non-interactive, GPU-serialized)."""
         concurrency = max(1, int(max_concurrent))
         semaphore = asyncio.Semaphore(concurrency)
 
         async def _bounded(url: str) -> list[ClipResult]:
             async with semaphore:
-                return await self.process_stream(
-                    url,
-                    max_clips=max_clips,
-                    game=game,
-                    interactive=False,
-                    mode=mode,
-                    voice_intro_path=voice_intro_path,
-                    voice_outro_path=voice_outro_path,
-                )
+                kwargs: dict[str, Any] = {
+                    "max_clips": max_clips,
+                    "game": game,
+                    "interactive": False,
+                    "mode": mode,
+                    "voice_intro_path": voice_intro_path,
+                    "voice_outro_path": voice_outro_path,
+                }
+                if force:
+                    kwargs["force"] = True
+                return await self.process_stream(url, **kwargs)
 
         tasks = [_bounded(url) for url in urls]
         return await asyncio.gather(*tasks, return_exceptions=True)
@@ -210,12 +298,17 @@ class Pipeline:
         )
 
         # Preserve canonical cache URL and explicit caller overrides while filling detected metadata
+        resolved_game = (
+            state.stream_info.game
+            or downloaded_info.game
+            or str(self.config.get("discovery.default_game", "GTA 6"))
+        )
         state.stream_info = StreamInfo(
             url=state.stream_info.url,
             title=downloaded_info.title or state.stream_info.title,
             platform=downloaded_info.platform,
             streamer=state.stream_info.streamer or downloaded_info.streamer,
-            game=state.stream_info.game or downloaded_info.game,
+            game=resolved_game,
             duration_seconds=(
                 downloaded_info.duration_seconds or state.stream_info.duration_seconds
             ),
@@ -223,7 +316,11 @@ class Pipeline:
             video_id=downloaded_info.video_id or state.stream_info.video_id,
         )
         state.audio_path = Path(audio_path)
-        state.status = PipelineStatus.TRANSCRIBING
+        state.status = (
+            PipelineStatus.ANALYZING
+            if state.transcript is not None
+            else PipelineStatus.TRANSCRIBING
+        )
         return state
 
     async def _step_transcribe(self, state: PipelineState) -> PipelineState:
@@ -237,12 +334,12 @@ class Pipeline:
         return state
 
     async def _step_analyze(self, state: PipelineState) -> PipelineState:
-        """Run streamed loudness spike detection and live chat velocity analysis."""
+        """Run streamed loudness spike detection and live chat velocity analysis atomically."""
         if state.audio_path is None:
             raise RuntimeError("Cannot analyze: audio_path is missing from pipeline state.")
 
         loudness_detector = LoudnessDetector(self.config)
-        state.loudness_spikes = await asyncio.to_thread(
+        loudness_spikes = await asyncio.to_thread(
             loudness_detector.detect, state.audio_path
         )
 
@@ -263,17 +360,25 @@ class Pipeline:
 
         chat_df = await asyncio.to_thread(_fetch_chat)
         chat_analyzer = ChatVelocityAnalyzer(self.config)
-        state.chat_spikes = await asyncio.to_thread(chat_analyzer.analyze, chat_df)
+        chat_spikes = await asyncio.to_thread(chat_analyzer.analyze, chat_df)
 
+        # Commit both signal lists atomically so partial failure never skips chat analysis on retry
+        state.loudness_spikes = loudness_spikes
+        state.chat_spikes = chat_spikes
+        state.analysis_complete = True
         state.status = PipelineStatus.SCORING
         return state
 
-    async def _step_score(self, state: PipelineState) -> PipelineState:
+    async def _step_score(
+        self, state: PipelineState, max_clips: int | None = None
+    ) -> PipelineState:
         """Verify Ollama connectivity and run tri-modal highlight scoring."""
         if state.transcript is None:
             raise RuntimeError("Cannot score: transcript is missing from pipeline state.")
 
         scorer = OllamaScorer(self.config)
+        if max_clips is not None:
+            scorer.max_clips = max(0, int(max_clips))
         await asyncio.to_thread(scorer.check_connection)
         state.highlights = await asyncio.to_thread(
             scorer.score_and_select,
@@ -292,9 +397,7 @@ class Pipeline:
         voice_outro_path: Path | None = None,
     ) -> PipelineState:
         """Download highlight video segments, generate metadata, and assemble/export clips."""
-        effective_mode = (
-            mode or str(self.config.get("transformation.mode", "narrative"))
-        ).strip().lower()
+        base_mode = self._resolve_base_mode(mode)
 
         if not state.selected_highlights:
             state.clips = []
@@ -302,6 +405,16 @@ class Pipeline:
             return state
 
         scorer = OllamaScorer(self.config)
+        supports_mode_kwarg = False
+        try:
+            meta_sig = inspect.signature(scorer.generate_metadata)
+            supports_mode_kwarg = "mode" in meta_sig.parameters or any(
+                p.kind == inspect.Parameter.VAR_KEYWORD
+                for p in meta_sig.parameters.values()
+            )
+        except (TypeError, ValueError):
+            supports_mode_kwarg = False
+
         segments_dir = self.temp_dir / "segments"
         segments_dir.mkdir(parents=True, exist_ok=True)
 
@@ -313,14 +426,8 @@ class Pipeline:
         clips: list[ClipResult] = []
         buffer_seconds = 3.0
         for idx, highlight in enumerate(state.selected_highlights, start=1):
-            valid_beats = (
-                Scorer._validate_sub_clips(
-                    highlight.sub_clips, highlight.start, highlight.end
-                )
-                if effective_mode != "raw"
-                else []
-            )
-            use_multi_beat = len(valid_beats) >= 2
+            clip_mode, valid_beats = self._resolve_highlight_mode(base_mode, highlight)
+            use_multi_beat = clip_mode == "story" and len(valid_beats) >= 2
             if use_multi_beat:
                 beat_ranges = [
                     (float(beat["start"]), float(beat["end"]))
@@ -344,27 +451,42 @@ class Pipeline:
                 )
                 segment_paths = [single_path]
 
-            metadata = await asyncio.to_thread(
-                scorer.generate_metadata,
-                highlight,
-                streamer_name,
-                game_name,
-                state.stream_info.url,
-            )
-            metadata.transformation_mode = effective_mode
+            async with self._gpu_lock:
+                if supports_mode_kwarg:
+                    metadata = await asyncio.to_thread(
+                        scorer.generate_metadata,
+                        highlight,
+                        streamer_name,
+                        game_name,
+                        state.stream_info.url,
+                        mode=clip_mode,
+                    )
+                else:
+                    metadata = await asyncio.to_thread(
+                        scorer.generate_metadata,
+                        highlight,
+                        streamer_name,
+                        game_name,
+                        state.stream_info.url,
+                    )
+                metadata.transformation_mode = clip_mode
+                if clip_mode == "raw":
+                    metadata.narration_intro = ""
+                    metadata.narration_outro = ""
+                    metadata.context_badge = ""
 
-            clip_result = await asyncio.to_thread(
-                self._assemble_highlight,
-                highlight,
-                metadata,
-                segment_paths,
-                idx,
-                effective_mode,
-                voice_intro_path,
-                voice_outro_path,
-                valid_beats=valid_beats,
-                buffer_seconds=buffer_seconds,
-            )
+                clip_result = await asyncio.to_thread(
+                    self._assemble_highlight,
+                    highlight,
+                    metadata,
+                    segment_paths,
+                    idx,
+                    clip_mode,
+                    voice_intro_path,
+                    voice_outro_path,
+                    valid_beats=valid_beats,
+                    buffer_seconds=buffer_seconds,
+                )
             clips.append(clip_result)
 
         state.clips = clips
@@ -385,17 +507,17 @@ class Pipeline:
         buffer_seconds: float = 3.0,
     ) -> ClipResult:
         """Run Phase 4 video assembly/export when installed, else persist raw segment + metadata."""
-        beats = (
-            valid_beats
-            if valid_beats is not None
-            else (
-                Scorer._validate_sub_clips(
-                    highlight.sub_clips, highlight.start, highlight.end
-                )
-                if mode != "raw"
-                else []
+        if valid_beats is not None:
+            beats = valid_beats
+        elif mode == "story":
+            beats = Scorer._validate_sub_clips(
+                highlight.sub_clips,
+                highlight.start,
+                highlight.end,
+                max_duration=float(self.config.get("analysis.max_clip_seconds", 90)),
             )
-        )
+        else:
+            beats = []
 
         try:
             from .assembly.composer import VideoComposer, remap_timeline_for_beats
@@ -403,10 +525,13 @@ class Pipeline:
             from .assembly.hooks import HookTitleOverlay
             from .output.exporter import Exporter
             from .output.organizer import FileOrganizer
-        except ImportError:
+        except ModuleNotFoundError as exc:
+            if exc.name not in _PHASE4_MODULES:
+                raise
             logger.info(
-                "Phase 4 assembly modules not yet available; saving downloaded segment "
+                "Phase 4 assembly modules not yet available (%s); saving downloaded segment "
                 "and metadata for clip_%02d (mode=%s).",
+                exc.name,
                 clip_index,
                 mode,
             )
@@ -422,7 +547,7 @@ class Pipeline:
         composer = VideoComposer(self.config)
 
         use_multi_beat = (
-            mode != "raw"
+            mode == "story"
             and len(beats) >= 2
             and len(segment_paths) == len(beats)
         )
@@ -445,16 +570,21 @@ class Pipeline:
                 segment_paths,
                 facecam,
                 beat_trim_ranges=beat_trim_ranges,
-                peak_offset=peak_offset if mode != "raw" else None,
+                peak_offset=peak_offset,
             )
             clip_start_offset = 0.0
             words_for_export = remapped_words
             chat_for_export = remapped_chat
         else:
             actual_start = max(0.0, float(highlight.start) - buffer_seconds)
+            has_peak = highlight.peak_time > 0.0 or (
+                highlight.peak_time == 0.0
+                and highlight.start == 0.0
+                and highlight.loudness_score > 0.0
+            )
             peak_offset = (
                 max(0.0, highlight.peak_time - actual_start)
-                if (highlight.peak_time > 0.0 and mode != "raw")
+                if (has_peak and mode != "raw")
                 else None
             )
             composed = composer.compose(
@@ -486,8 +616,8 @@ class Pipeline:
             clip_start_offset=clip_start_offset,
             output_path=output_video_path,
             chat_burst=chat_for_export if mode != "raw" else None,
-            narration_intro=metadata.narration_intro,
-            narration_outro=metadata.narration_outro,
+            narration_intro=metadata.narration_intro if mode != "raw" else "",
+            narration_outro=metadata.narration_outro if mode != "raw" else "",
             voice_intro_path=voice_intro_path,
             voice_outro_path=voice_outro_path,
             mode=mode,
@@ -512,14 +642,36 @@ class Pipeline:
         streamer_dir = _sanitize_path_segment(metadata.streamer, "UnknownStreamer")
         date_str = date.today().isoformat()
 
-        clip_dir = self.output_dir / game_dir / streamer_dir / date_str
+        structure_template = str(
+            self.config.get("output.structure", "{game}/{streamer}/{date}")
+        )
+        try:
+            rel_structure = structure_template.format(
+                game=game_dir,
+                streamer=streamer_dir,
+                date=date_str,
+            )
+        except (KeyError, ValueError, IndexError):
+            rel_structure = f"{game_dir}/{streamer_dir}/{date_str}"
+
+        safe_parts = [
+            _sanitize_path_segment(part)
+            for part in re.split(r"[/\\]+", rel_structure)
+            if part and part not in (".", "..")
+        ]
+        clip_dir = self.output_dir.joinpath(*safe_parts) if safe_parts else self.output_dir
         clip_dir.mkdir(parents=True, exist_ok=True)
 
         stem_template = str(self.config.get("output.filename_template", "clip_{index:02d}"))
-        stem = stem_template.format(index=clip_index)
+        try:
+            raw_stem = stem_template.format(index=clip_index)
+        except (KeyError, ValueError, IndexError):
+            raw_stem = f"clip_{clip_index:02d}"
+        stem = _sanitize_path_segment(raw_stem, f"clip_{clip_index:02d}")
 
-        metadata_path = clip_dir / f"{stem}.json"
+        metadata_path: Path | None = None
         if self.config.get("output.save_metadata_json", True):
+            metadata_path = clip_dir / f"{stem}.json"
             metadata_path.write_text(metadata.to_json(), encoding="utf-8")
 
         if self.config.get("output.save_transcript_txt", True) and highlight.transcript_chunk:
@@ -527,7 +679,7 @@ class Pipeline:
             transcript_path.write_text(highlight.transcript_chunk, encoding="utf-8")
 
         beats = valid_beats or []
-        if len(beats) >= 2 and metadata.transformation_mode != "raw":
+        if len(beats) >= 2 and metadata.transformation_mode == "story":
             duration = sum(
                 max(0.0, float(b["end"]) - float(b["start"])) for b in beats
             )

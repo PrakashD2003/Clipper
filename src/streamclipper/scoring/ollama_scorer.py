@@ -10,7 +10,7 @@ from typing import Any
 
 import ollama
 
-from ..config import Config
+from ..config import Config, VALID_TRANSFORMATION_MODES
 from ..models import ClipMetadata, Highlight, TimeRange
 from .scorer import Scorer, TranscriptChunk
 
@@ -205,20 +205,55 @@ class OllamaScorer(Scorer):
     # ------------------------------------------------------------------
 
     def _call_generate(self, prompt: str, *, json_format: bool = True) -> str:
-        """Invoke Ollama generate API and translate connection/model errors."""
+        """Invoke Ollama generate API (disabling slow Qwen3 thinking tokens) and translate errors."""
         kwargs: dict[str, Any] = {
             "model": self.model,
             "prompt": prompt,
             "options": {"temperature": self.temperature},
+            "think": False,
         }
         if json_format:
             kwargs["format"] = "json"
 
         try:
             response = self.client.generate(**kwargs)
+        except TypeError as exc:
+            if "think" in str(exc).lower():
+                fallback_kwargs = {k: v for k, v in kwargs.items() if k != "think"}
+                try:
+                    response = self.client.generate(**fallback_kwargs)
+                    return _extract_response_text(response)
+                except Exception as retry_exc:
+                    raise OllamaConnectionError(
+                        f"Cannot connect to Ollama at {self.base_url} for model '{self.model}': "
+                        f"{retry_exc}. Ensure Ollama is running (`ollama serve`) and run "
+                        f"`ollama pull {self.model}`."
+                    ) from retry_exc
+            raise OllamaConnectionError(
+                f"Cannot connect to Ollama at {self.base_url} for model '{self.model}': "
+                f"{exc}. Ensure Ollama is running (`ollama serve`) and run "
+                f"`ollama pull {self.model}`."
+            ) from exc
         except ollama.ResponseError as exc:
             status = getattr(exc, "status_code", None)
             detail = str(exc)
+            # Some older Ollama servers/models reject the `think` parameter; retry once without it.
+            if status == 400 and "think" in detail.lower():
+                fallback_kwargs = {k: v for k, v in kwargs.items() if k != "think"}
+                try:
+                    response = self.client.generate(**fallback_kwargs)
+                    return _extract_response_text(response)
+                except ollama.ResponseError as retry_exc:
+                    exc = retry_exc
+                    status = getattr(retry_exc, "status_code", None)
+                    detail = str(retry_exc)
+                except Exception as retry_exc:
+                    raise OllamaConnectionError(
+                        f"Cannot connect to Ollama at {self.base_url} for model '{self.model}': "
+                        f"{retry_exc}. Ensure Ollama is running (`ollama serve`) and run "
+                        f"`ollama pull {self.model}`."
+                    ) from retry_exc
+
             if status == 404 or "not found" in detail.lower():
                 raise OllamaConnectionError(
                     f"Ollama model '{self.model}' is not installed at {self.base_url}. "
@@ -336,11 +371,7 @@ class OllamaScorer(Scorer):
 
             raw_text = self._call_generate(prompt, json_format=True)
             try:
-                highlights = self._parse_response(raw_text, chunk_offset=chunk.start)
-                for h in highlights:
-                    if not h.transcript_chunk:
-                        h.transcript_chunk = chunk.text
-                return highlights
+                return self._parse_response(raw_text, chunk_offset=chunk.start)
             except (json.JSONDecodeError, ValueError) as exc:
                 last_error = exc
                 logger.warning(
@@ -390,7 +421,7 @@ class OllamaScorer(Scorer):
                 f"Expected JSON list or object from Ollama, got {type(data).__name__}."
             )
 
-        max_relative_end = min(chunk_offset, float(self.chunk_minutes) * 60.0)
+        chunk_duration = float(self.chunk_minutes) * 60.0
 
         highlights: list[Highlight] = []
         for item in raw_items:
@@ -402,10 +433,10 @@ class OllamaScorer(Scorer):
             if start is None or end is None or end <= start:
                 continue
 
-            # If model emitted chunk-relative offsets (within both chunk duration and
-            # chunk_offset) for a non-zero chunk, shift to absolute stream time.
+            # If model emitted chunk-relative offsets (starts before chunk_offset and ends
+            # within chunk_duration) for a non-zero chunk, shift to absolute stream time.
             applied_offset = 0.0
-            if chunk_offset > 0.0 and end <= max_relative_end:
+            if chunk_offset > 0.0 and start < chunk_offset and end <= chunk_duration:
                 applied_offset = chunk_offset
                 start += applied_offset
                 end += applied_offset
@@ -426,7 +457,7 @@ class OllamaScorer(Scorer):
                     b_end = _parse_seconds(beat.get("end"))
                     if b_start is None or b_end is None or b_end <= b_start:
                         continue
-                    if applied_offset > 0.0 and b_end <= max_relative_end:
+                    if applied_offset > 0.0 and b_end <= chunk_duration:
                         b_start += applied_offset
                         b_end += applied_offset
                     sub_clips.append(
@@ -531,7 +562,11 @@ class OllamaScorer(Scorer):
     def _finalize_hashtags(
         self, raw_tags: list[Any], streamer: str, game: str
     ) -> list[str]:
-        """Normalize, deduplicate, and enforce configured game/streamer tags."""
+        """Normalize, deduplicate, enforce required game/streamer tags, and cap to hashtag_count."""
+        max_tags = max(0, int(self.config.get("metadata.hashtag_count", 15)))
+        if max_tags == 0:
+            return []
+
         hashtags: list[str] = []
         seen_lower: set[str] = set()
 
@@ -541,19 +576,33 @@ class OllamaScorer(Scorer):
                 seen_lower.add(cleaned.lower())
                 hashtags.append(cleaned)
 
+        required_tags: list[str] = []
         if self.config.get("metadata.include_game_tag", True) and game:
             game_tag = re.sub(r"\W+", "", game)
-            if game_tag and game_tag.lower() not in seen_lower:
-                seen_lower.add(game_tag.lower())
-                hashtags.append(game_tag)
+            if game_tag:
+                required_tags.append(game_tag)
 
         if self.config.get("metadata.include_streamer_tag", True) and streamer:
             streamer_tag = re.sub(r"\W+", "", streamer)
-            if streamer_tag and streamer_tag.lower() not in seen_lower:
-                seen_lower.add(streamer_tag.lower())
-                hashtags.append(streamer_tag)
+            if streamer_tag:
+                required_tags.append(streamer_tag)
 
-        return hashtags
+        for req in required_tags:
+            if req.lower() not in seen_lower:
+                seen_lower.add(req.lower())
+                hashtags.append(req)
+
+        if len(hashtags) <= max_tags:
+            return hashtags
+
+        # Cap to max_tags while preserving required game/streamer tags
+        required_lower = {r.lower() for r in required_tags}
+        kept_required = [t for t in hashtags if t.lower() in required_lower][:max_tags]
+        remaining_slots = max_tags - len(kept_required)
+        kept_regular = [t for t in hashtags if t.lower() not in required_lower][:remaining_slots]
+        # Preserve relative order of kept tags
+        keep_set = {t.lower() for t in kept_required} | {t.lower() for t in kept_regular}
+        return [t for t in hashtags if t.lower() in keep_set][:max_tags]
 
     def _generate_caption_and_hashtags(
         self,
@@ -606,31 +655,58 @@ class OllamaScorer(Scorer):
         return _as_str(highlight.reason) or hook_title, fallback_tags
 
     def generate_metadata(
-        self, highlight: Highlight, streamer: str, game: str, source_url: str
+        self,
+        highlight: Highlight,
+        streamer: str,
+        game: str,
+        source_url: str,
+        mode: str | None = None,
     ) -> ClipMetadata:
         """Generate hook title, narrative fields, caption, and hashtags for a highlight."""
         hook_title = self._generate_hook_title(highlight, streamer, game)
 
-        transformation_enabled = bool(self.config.get("transformation.enabled", True))
-        configured_mode = (
-            _as_str(self.config.get("transformation.mode", "narrative"), "narrative").lower()
-            or "narrative"
-        )
-        transformation_mode = configured_mode if transformation_enabled else "raw"
-
-        narration_intro = _as_str(highlight.narration_intro)
-        narration_outro = _as_str(highlight.narration_outro)
-        context_badge = _as_str(highlight.context_badge)
-
-        if transformation_mode != "raw" and not (
-            narration_intro and narration_outro and context_badge
-        ):
-            gen_intro, gen_outro, gen_badge = self.generate_narrative(
-                highlight, streamer, game
+        if mode is not None and str(mode).strip():
+            requested_mode = str(mode).strip().lower()
+            if requested_mode not in VALID_TRANSFORMATION_MODES:
+                raise ValueError(
+                    f"Invalid transformation mode {mode!r}; expected one of "
+                    f"{sorted(VALID_TRANSFORMATION_MODES)}"
+                )
+        else:
+            transformation_enabled = bool(self.config.get("transformation.enabled", True))
+            configured_mode = (
+                _as_str(self.config.get("transformation.mode", "auto"), "auto").lower()
+                or "auto"
             )
-            narration_intro = narration_intro or gen_intro
-            narration_outro = narration_outro or gen_outro
-            context_badge = context_badge or gen_badge
+            requested_mode = configured_mode if transformation_enabled else "raw"
+
+        if requested_mode == "auto":
+            valid_beats = Scorer._validate_sub_clips(
+                highlight.sub_clips,
+                highlight.start,
+                highlight.end,
+                max_duration=self.max_clip_seconds,
+            )
+            transformation_mode = "story" if len(valid_beats) >= 2 else "narrative"
+        else:
+            transformation_mode = requested_mode
+
+        if transformation_mode == "raw":
+            narration_intro = ""
+            narration_outro = ""
+            context_badge = ""
+        else:
+            narration_intro = _as_str(highlight.narration_intro)
+            narration_outro = _as_str(highlight.narration_outro)
+            context_badge = _as_str(highlight.context_badge)
+
+            if not (narration_intro and narration_outro and context_badge):
+                gen_intro, gen_outro, gen_badge = self.generate_narrative(
+                    highlight, streamer, game
+                )
+                narration_intro = narration_intro or gen_intro
+                narration_outro = narration_outro or gen_outro
+                context_badge = context_badge or gen_badge
 
         caption, hashtags = self._generate_caption_and_hashtags(
             highlight, streamer, game, hook_title

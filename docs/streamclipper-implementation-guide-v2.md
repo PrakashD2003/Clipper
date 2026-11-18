@@ -1,7 +1,7 @@
 # 🎮 StreamClipper — Implementation Guide (v2.2 — Patched + Auto-Hardware + YPP Transformative Engine)
 
 > **A free, open-source, game-agnostic AI stream clipping system with MCP + CLI modes and built-in YouTube Partner Program (YPP) Transformative Narrative & Story synthesis**  
-> **Milestone Status:** **Phase 1 (`phase-1-foundation`, Packages `1.1–1.3`) is ✅ COMPLETE (`36/36` tests passing) and MERGED into `main`.** All YPP transformative additions are scoped cleanly to **Phase 2 (`2.2`, `2.4`, `2.5` metadata & multi-segment hooks)**, **Phase 3 (`3.1–3.3` adaptive `moment_type` commentary + conditional multi-beat story scoring)**, **Phase 4 (`4.2–4.6` conditional story cuts, spike punch-in zoom, live chat ASS ticker, pluggable TTS/ElevenLabs/custom-mic narrator + dynamic FFmpeg audio ducking)**, and **Phase 5 (`5.1–5.2` FastMCP tools & docs)** so Phase 1 requires zero rework.  
+> **Milestone Status:** **Phase 1 (`phase-1-foundation`) and Phase 2 (`phase-2-core-pipeline`) are ✅ COMPLETE and MERGED into `main`. Phase 3 (`phase-3-ai-scoring`, Packages `3.1–3.3` + pre-review audit hardening) is implemented and awaiting Phase 3 Review (`3.R`).** Upcoming phases: **Phase 4 (`4.1–4.6`: facecam, MoviePy v2 9:16 composer + story cuts + zoom, ASS captions + chat ticker, hook/badge overlays, pluggable TTS/ElevenLabs/mic narrator + `:eval=frame` audio ducking, exporter + `FileOrganizer`)** and **Phase 5 (`5.1–5.2`: MCP SDK v2 `MCPServer` tools & README)**.  
 > *v2.2 preserves all 12 v2 runtime/architectural fixes, all 6 Windows & edge-case patches (`FAILED` retry recovery, `librosa.stream` `fill_value=0.0`, Windows-safe FFmpeg `cwd` ASS burn-in + file-lock cleanup + `crf=18` single-loss temp encode, aspect-preserving facecam crop, non-negative chat offsets, dynamic ASS highlight color), and 5-tier `HardwareProfile` auto-configuration (`h264_nvenc` → `libx264`).*
 
 ## Architecture Overview
@@ -10,7 +10,7 @@
 flowchart TD
     subgraph Interfaces["🖥️ User Interfaces"]
         CLI["CLI (click + rich)"]
-        MCP["FastMCP Server"]
+        MCP["MCPServer (MCP SDK v2)"]
         ChatApp["Chat App<br/>(Claude / Antigravity / etc.)"]
     end
 
@@ -74,7 +74,7 @@ flowchart TD
 | Caption & Chat Burn-In | [FFmpeg `ass` Filter](https://trac.ffmpeg.org/wiki/HowToBurnSubtitlesIntoVideo) + optional `h264_nvenc` | System CLI | Windows-safe `cwd` `.ass` active-word captions + live chat burst ticker with GPU/CPU H.264 encode |
 | YPP Narrator & Ducking | [`Kokoro-82M`](https://github.com/hexgrad/kokoro) / [`edge-tts`](https://github.com/rany2/edge-tts) / optional **ElevenLabs API (incl. Voice Clone)** / custom mic WAV + FFmpeg | Optional / CLI | Adaptive intro/outro voiceover mixed over 18% ducked stream audio to satisfy [YouTube Monetization Policies](https://support.google.com/youtube/answer/1311392?hl=en) |
 | Local LLM | `ollama` (Python SDK) | `>=0.3.0` | Standalone mode AI highlight scoring, adaptive narrative scripting, and metadata generation |
-| MCP Server | [`mcp` (`FastMCP`)](https://github.com/modelcontextprotocol/python-sdk) | `>=1.2.0` | Decorator-driven Model Context Protocol server ([FastMCP Tools Docs](https://gofastmcp.com/docs/servers/tools)) |
+| MCP Server | [`mcp` (`MCPServer`)](https://github.com/modelcontextprotocol/python-sdk) | `>=2.0.0` | Decorator-driven Model Context Protocol SDK v2 server (`from mcp.server.mcpserver import MCPServer`) |
 | Data & Config | `pandas` + `numpy` + `pyyaml` | `>=2.0.0` / `>=1.24.0` / `>=6.0` | Chat time-series binning and hierarchical YAML configuration |
 | GPU Diagnostics & Auto-Tuning | [`torch.cuda`](https://docs.pytorch.org/docs/stable/cuda.html) | `>=2.0.0` | Device detection (`total_memory`, `major`, `minor`, `name`), `HardwareProfile` auto-tuning, and VRAM cache clearing |
 
@@ -87,7 +87,7 @@ When `"auto"` is configured in `config.default.yaml` for `transcription.device`,
 | **`cuda_high_vram`** | `cuda` & `vram_gb >= 10.0` | `cuda` | `large-v2` | `float16` | `16` | `qwen3:8b` | `h264_nvenc` (else `libx264`) |
 | **`cuda_mid_tensor`** (e.g. RTX 4050 6GB) | `cuda` & `5.5 <= vram_gb < 10.0` & (`major >= 8` or `"RTX"` in `name.upper()`) | `cuda` | `large-v2` | `int8_float16` | `8` | `qwen3:8b` | `h264_nvenc` (else `libx264`) |
 | **`cuda_mid_no_tensor`** (e.g. GTX 1660 SUPER 6GB) | `cuda` & `5.5 <= vram_gb < 10.0` & not Tensor Core (`major < 8` and `"RTX"` not in `name.upper()`) | `cuda` | `medium` | `int8` | `4` | `qwen3:4b` | `h264_nvenc` (else `libx264`) |
-| **`cpu_fallback`** | `cuda` present but `vram_gb < 5.5` | `cpu` | `base` | `int8` | `4` | `qwen3:4b` | `h264_nvenc` (else `libx264`) |
+| **`cpu_fallback`** | `cuda` present but `vram_gb < 5.5` | `cpu` | `base` | `int8` | `4` | `qwen3:4b` | `libx264` |
 | **`cpu_only`** | No CUDA available | `cpu` | `base` | `int8` | `4` | `qwen3:4b` | `libx264` |
 
 > [!IMPORTANT]
@@ -425,7 +425,10 @@ dependencies = [
 
 [project.optional-dependencies]
 whisperx = ["whisperx @ git+https://github.com/m-bain/whisperX.git"]
-mcp = ["mcp>=1.2.0"]
+mcp = ["mcp>=2.0.0"]
+tts = ["edge-tts>=6.1.0", "kokoro>=0.9.0"]
+edge-tts = ["edge-tts>=6.1.0"]
+kokoro = ["kokoro>=0.9.0"]
 dev = ["pytest>=7.0", "pytest-asyncio>=0.21"]
 
 [project.scripts]
@@ -434,6 +437,12 @@ streamclipper-mcp = "streamclipper.mcp_server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+streamclipper = ["config.default.yaml", "prompts/*.txt"]
+
+[tool.pytest.ini_options]
+asyncio_default_fixture_loop_scope = "function"
 ```
 
 ##### [NEW] Directory structure
@@ -478,7 +487,7 @@ GTA6-Clipper/
 │       │   └── organizer.py         # {game}/{streamer}/{date}/ structure
 │       ├── mcp_server/
 │       │   ├── __init__.py
-│       │   └── server.py            # FastMCP tool definitions
+│       │   └── server.py            # MCPServer (MCP SDK v2) tool definitions
 │       ├── pipeline.py              # orchestrates the full pipeline
 │       └── prompts/
 │           ├── highlight_scorer.txt
@@ -1760,9 +1769,10 @@ The prompt engineering and scoring logic determine both viral quality and [YouTu
 ```yaml
 transformation:
   enabled: true                        # Enable YPP anti-reused-content transformation
-  mode: "narrative"                    # narrative (intro/outro voiceover + zoom + chat) | story (multi-beat cuts) | raw
+  mode: "auto"                         # auto (story if valid sub_clips else narrative) | narrative (single-cut + voiceover/overlays) | story (multi-beat cuts + voiceover/overlays) | raw (uncut + captions only)
   tts_engine: "auto"                   # auto (kokoro -> edge-tts) | kokoro | edge-tts | elevenlabs | none
-  tts_voice: "af_heart"                # Kokoro voice ID (or en-US-GuyNeural for edge-tts)
+  tts_voice: "af_heart"                # Kokoro voice ID (used when engine is kokoro)
+  edge_tts_voice: "en-US-GuyNeural"    # Edge-TTS voice ID (used when engine is edge-tts or auto fallback)
   elevenlabs_voice_id: ""              # Optional ElevenLabs voice/clone ID (uses ELEVENLABS_API_KEY env var)
   elevenlabs_model_id: "eleven_multilingual_v2"
   duck_stream_volume: 0.18             # Duck original stream audio to 18% during narrator voiceover
@@ -1776,7 +1786,7 @@ transformation:
 ##### [NEW] `src/streamclipper/scoring/scorer.py`
 
 **Specification:**
-- Abstract `Scorer` base class with `score_and_select()` and shared `get_candidate_chunks()` (reused by both standalone `OllamaScorer` and the Phase 5 `FastMCP` server)
+- Abstract `Scorer` base class with `score_and_select()` and shared `get_candidate_chunks()` (reused by both standalone `OllamaScorer` and the Phase 5 `MCPServer`)
 - Implements **signal fusion** — combines loudness, chat, and LLM scores with configurable weights
 - Transcript chunking logic (12-minute windows with 1-minute overlap)
 - IoU-based deduplication of overlapping highlights (keeping the higher `final_score`)
@@ -2574,7 +2584,15 @@ class VideoComposer:
     ) -> CompositeVideoClip:
         """Trim any download buffer padding per beat, compose each beat into 9:16,
         stitch via concatenate_videoclips(..., method='compose'), optionally apply spike zoom,
-        and track all underlying VideoFileClips in result._source_clips."""
+        and track all underlying VideoFileClips in result._source_clips.
+
+        CRITICAL (MoviePy 2.2.1): Clamp each (t_start, t_end) to [0.0, beat_clip.duration]
+        and guard t_end > t_start before calling beat_clip.subclipped(t_start, t_end),
+        because MoviePy 2.2.1 raises ValueError if end_time > clip.duration (common when
+        yt-dlp download_ranges returns a slightly shorter segment).
+        Note: Single-cut mode intentionally retains the ±3s context buffer with
+        clip_start_offset = max(0.0, highlight.start - buffer_seconds).
+        """
 
     def apply_spike_zoom(
         self, clip: CompositeVideoClip, peak_offset: float
@@ -2585,7 +2603,7 @@ class VideoComposer:
 #### Acceptance Criteria
 - [ ] Layout A stacks aspect-preserving facecam on top (35%, zero stretching) and gameplay below (65%) using MoviePy v2 `.cropped()` and `.resized()`
 - [ ] Layout B center-crops gameplay to 1080×1920 without stretching
-- [ ] `compose_story_beats()` trims download buffer padding per beat, stitches 2+ beat segments cleanly, and falls back safely to single-segment `compose()` when only 1 path is provided
+- [ ] `compose_story_beats()` clamps per-beat trim ranges to `[0.0, beat_clip.duration]` before `.subclipped()`, stitches 2+ beat segments cleanly, and falls back safely to single-segment `compose()` when only 1 path is provided
 - [ ] `remap_timeline_for_beats()` accurately remaps word timestamps, `chat_burst` messages, and `peak_offset` onto the stitched `0.0`-based timeline while dropping dead-air entries
 - [ ] `apply_spike_zoom()` applies a `1.20x` center punch-in zoom around `peak_offset` when `transformation.punch_in_zoom > 1.0` without changing output resolution or total duration
 - [ ] Original audio is preserved via `.with_audio(...)`
@@ -2609,22 +2627,32 @@ Compositing hundreds of per-word Pillow `ImageClip` layers in Python slows Movie
 ##### [NEW] `src/streamclipper/assembly/captions.py`
 ```python
 from pathlib import Path
+import re
 import subprocess
 from ..models import WordTimestamp
 from ..config import Config
 
+_NAMED_ASS_COLORS = {
+    "white": "&H00FFFFFF",
+    "black": "&H00000000",
+    "yellow": "&H0000FFFF",
+    "gold": "&H0000D7FF",
+    "red": "&H000000FF",
+    "cyan": "&H00FFFF00",
+}
+
 
 def _sec_to_ass_time(seconds: float) -> str:
-    """Convert seconds to ASS timestamp format H:MM:SS.cc."""
-    seconds = max(0.0, seconds)
-    hrs = int(seconds // 3600)
-    mins = int((seconds % 3600) // 60)
-    secs = seconds % 60
-    return f"{hrs}:{mins:02d}:{secs:05.2f}"
+    """Convert seconds to ASS timestamp format H:MM:SS.cc without 60.00 rollover overflow."""
+    total_cs = round(max(0.0, float(seconds)) * 100)
+    hrs, rem_cs = divmod(total_cs, 360000)
+    mins, rem_cs = divmod(rem_cs, 6000)
+    secs, cs = divmod(rem_cs, 100)
+    return f"{hrs}:{mins:02d}:{secs:02d}.{cs:02d}"
 
 
 def _hex_to_ass_bgr(hex_color: str, default: str = "&H00D7FF&") -> str:
-    """Convert CSS hex color '#RRGGBB' into ASS BGR override tag '&HBBGGRR&'."""
+    """Convert CSS hex color '#RRGGBB' into ASS inline BGR override tag '&HBBGGRR&'."""
     cleaned = hex_color.strip().lstrip("#")
     if len(cleaned) != 6:
         return default
@@ -2636,18 +2664,39 @@ def _hex_to_ass_bgr(hex_color: str, default: str = "&H00D7FF&") -> str:
     return f"&H{b}{g}{r}&".upper()
 
 
+def _color_to_ass_style(color: str, default: str = "&H00FFFFFF") -> str:
+    """Convert CSS named color or '#RRGGBB' into ASS style color '&H00BBGGRR'."""
+    raw = str(color or "").strip().lower()
+    if raw in _NAMED_ASS_COLORS:
+        return _NAMED_ASS_COLORS[raw]
+    bgr = _hex_to_ass_bgr(raw, default="")
+    if bgr:
+        return "&H00" + bgr[2:-1]
+    return default
+
+
 def _escape_ass_text(text: str) -> str:
-    """Escape ASS override delimiters in spoken transcript tokens."""
-    return text.replace("\\", r"\\").replace("{", r"\{").replace("}", r"\}")
+    """Sanitize newlines and escape ASS override delimiters safely for libass."""
+    sanitized = text.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
+    sanitized = sanitized.replace("{", r"\{").replace("}", r"\}")
+    # Neutralize ASS control codes (\N, \n, \h) without doubling literal backslashes in libass
+    return re.sub(r"\\([Nnh])", "\\\\\u200b\\1", sanitized)
 
 
 class AssCaptionBurner:
-    """Generates Hormozi-style ASS subtitles and burns them via FFmpeg libass."""
+    """Generates Hormozi/single-word/sentence ASS subtitles and burns them via FFmpeg libass."""
 
     def __init__(self, config: Config):
-        self.words_per_group = config.get("captions.words_per_group", 4)
+        self.style = str(config.get("captions.style", "hormozi")).strip().lower()
+        self.words_per_group = int(config.get("captions.words_per_group", 4))
         self.font = config.get("captions.font", "Arial")
         self.font_size = config.get("captions.font_size", 72)
+        self.primary_color = _color_to_ass_style(
+            config.get("captions.color", "white"), default="&H00FFFFFF"
+        )
+        self.stroke_color = _color_to_ass_style(
+            config.get("captions.stroke_color", "black"), default="&H00000000"
+        )
         self.stroke_width = config.get("captions.stroke_width", 4)
         self.highlight_bgr = _hex_to_ass_bgr(
             config.get("captions.highlight_color", "#FFD700")
@@ -2666,8 +2715,9 @@ class AssCaptionBurner:
         ass_path: Path,
         chat_burst: list[dict] | None = None,
     ) -> Path:
-        """Write an .ass subtitle file with Hormozi active-word highlighting and optional ChatTicker events."""
+        """Write an .ass subtitle file honoring captions.style (hormozi | single_word | sentence) and optional ChatTicker events."""
         secondary_style_color = "&H00" + self.highlight_bgr[2:-1]
+        # Note: For BorderStyle=3 (opaque box) on ChatTicker, OutlineColour controls the box fill!
         header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {self.width}
@@ -2676,20 +2726,31 @@ WrapStyle: 0
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Hormozi,{self.font},{self.font_size},&H00FFFFFF,{secondary_style_color},&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,{self.stroke_width},0,2,60,60,{self.margin_v},1
-Style: ChatTicker,{self.font},34,&H00FFFFFF,&H00FFFFFF,&H00000000,&H99000000,-1,0,0,0,100,100,0,0,3,2,0,9,40,40,260,1
+Style: Hormozi,{self.font},{self.font_size},{self.primary_color},{secondary_style_color},{self.stroke_color},&H80000000,-1,0,0,0,100,100,0,0,1,{self.stroke_width},0,2,60,60,{self.margin_v},1
+Style: ChatTicker,{self.font},34,&H00FFFFFF,&H00FFFFFF,&H99000000,&H99000000,-1,0,0,0,100,100,0,0,3,2,0,9,40,40,260,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
         events: list[str] = []
+        effective_group_size = (
+            1 if self.style == "single_word" else max(1, self.words_per_group)
+        )
         groups = [
-            words[i : i + self.words_per_group]
-            for i in range(0, len(words), self.words_per_group)
+            words[i : i + effective_group_size]
+            for i in range(0, len(words), effective_group_size)
         ]
 
+        primary_inline_bgr = "&H" + self.primary_color[4:] + "&"
         for group in groups:
             upper_words = [_escape_ass_text(w.text.upper()) for w in group]
+            if self.style == "sentence":
+                start_ts = _sec_to_ass_time(max(0.0, group[0].start - clip_start_offset))
+                end_ts = _sec_to_ass_time(max(0.0, group[-1].end - clip_start_offset))
+                events.append(
+                    f"Dialogue: 0,{start_ts},{end_ts},Hormozi,,0,0,0,,{' '.join(upper_words)}"
+                )
+                continue
             for idx, active_word in enumerate(group):
                 start_ts = _sec_to_ass_time(
                     max(0.0, active_word.start - clip_start_offset)
@@ -2701,7 +2762,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 for j, token in enumerate(upper_words):
                     if j == idx:
                         rendered_tokens.append(
-                            rf"{{\c{self.highlight_bgr}}}" + token + r"{\c&HFFFFFF&}"
+                            rf"{{\c{self.highlight_bgr}}}" + token + rf"{{\c{primary_inline_bgr}}}"
                         )
                     else:
                         rendered_tokens.append(token)
@@ -2712,7 +2773,12 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
         if self.show_chat_ticker and chat_burst:
             for msg in chat_burst[:5]:
-                msg_offset = max(0.0, float(msg.get("offset_seconds", clip_start_offset)) - clip_start_offset)
+                raw_offset = msg.get("offset_seconds")
+                msg_offset = max(
+                    0.0,
+                    float(raw_offset if raw_offset is not None else clip_start_offset)
+                    - clip_start_offset,
+                )
                 msg_start = _sec_to_ass_time(msg_offset)
                 msg_end = _sec_to_ass_time(msg_offset + 2.5)
                 author = _escape_ass_text(str(msg.get("author", "viewer"))[:20])
@@ -2840,9 +2906,9 @@ class HookTitleOverlay:
 ```
 
 #### Acceptance Criteria
-- [ ] Hook title appears near the top of the video for 4 seconds then disappears
+- [ ] Hook title appears near the top of the video for 4 seconds then disappears when `hook_title.enabled` is `True`
 - [ ] Optional `context_badge` pill renders cleanly via Pillow + MoviePy v2 `ImageClip` without requiring ImageMagick
-- [ ] Can be disabled via `hook_title.enabled: false` in config
+- [ ] When `hook_title.enabled` is `False`, the hook title banner is skipped (and if `context_badge` is also empty, `video_clip` is returned unchanged)
 - [ ] Preserves audio and `_source_clip` / `_source_clips` handle references
 
 ### 📦 Package 4.5 — YPP Transformative Narrator & Dynamic FFmpeg Audio Ducking
@@ -2880,9 +2946,12 @@ class TransformativeNarrator:
 
     def __init__(self, config: Config):
         self.enabled = bool(config.get("transformation.enabled", True))
-        self.mode = config.get("transformation.mode", "narrative")
+        self.mode = config.get("transformation.mode", "auto")
         self.engine = config.get("transformation.tts_engine", "auto")
         self.voice = config.get("transformation.tts_voice", "af_heart")
+        self.edge_tts_voice = config.get(
+            "transformation.edge_tts_voice", "en-US-GuyNeural"
+        )
         self.elevenlabs_voice_id = config.get("transformation.elevenlabs_voice_id", "")
         self.elevenlabs_model_id = config.get(
             "transformation.elevenlabs_model_id", "eleven_multilingual_v2"
@@ -2890,13 +2959,18 @@ class TransformativeNarrator:
         self.duck_volume = float(config.get("transformation.duck_stream_volume", 0.18))
 
     def synthesize_speech(self, text: str, output_wav: Path) -> Path | None:
-        """Synthesize text to WAV via configured provider (kokoro | edge-tts | elevenlabs | auto)."""
+        """Synthesize text to WAV via configured provider (kokoro | edge-tts | elevenlabs | auto).
+
+        Note: When engine is 'edge-tts' (or 'auto' falls back from kokoro to edge-tts),
+        use self.edge_tts_voice (e.g., 'en-US-GuyNeural') rather than a Kokoro voice ID
+        like 'af_heart'. Optional extras in pyproject.toml: `tts`, `edge-tts`, `kokoro`.
+        """
 
     def _synthesize_kokoro(self, text: str, output_wav: Path) -> Path | None:
         """Synthesize locally with Kokoro-82M if installed."""
 
     def _synthesize_edge_tts(self, text: str, output_wav: Path) -> Path | None:
-        """Synthesize with edge-tts (converting mp3 output to WAV via ffmpeg)."""
+        """Synthesize with edge-tts using self.edge_tts_voice (converting mp3 output to WAV via ffmpeg)."""
 
     def _synthesize_elevenlabs(self, text: str, output_wav: Path) -> Path | None:
         """Synthesize with ElevenLabs API (incl. personal voice clone) when ELEVENLABS_API_KEY & voice_id are set."""
@@ -2916,7 +2990,9 @@ class TransformativeNarrator:
           using stereo `adelay={delay_ms}|{delay_ms}` for the outro track.
         - Clamps narration windows on short clips so intro and outro never overlap
           (if intro_dur + outro_dur > clip_duration * 0.75, trims outro or scales windows safely).
-        - Ducks [0:a] to self.duck_volume during narration windows and restores 1.0 in between.
+        - CRITICAL: Ducks [0:a] using `volume='if(between(t,...),0.18,1.0)':eval=frame`
+          (MUST include `:eval=frame` because FFmpeg's `volume` defaults to `eval=once`
+          at t=0, which would leave the entire clip stuck at 18% volume!).
         """
 
     def mix_narration_with_ducking(
@@ -2955,7 +3031,7 @@ class TransformativeNarrator:
 - Runs the end-to-end assembly & export pipeline without double-compression degradation:
   1. Renders the composed 9:16 clip (with conditional multi-beat cuts, spike punch-in zoom, hook banner, and adaptive context badge) to an intermediate temp MP4 via MoviePy's `write_videofile()` at high quality (`codec="libx264"`, `preset="ultrafast"`, `ffmpeg_params=["-crf", "18"]`).
   2. **Windows file-lock safety:** Explicitly closes `clip`, `getattr(clip, "_source_clip", None)`, and any `getattr(clip, "_source_clips", [])` inside a `try/finally` block BEFORE running FFmpeg transforms or deleting temp files!
-  3. Resolve effective mode (`effective_mode = mode or self.narrator.mode`). If `self.narrator.enabled` and `effective_mode != "raw"`, synthesize/load `intro_wav` / `outro_wav` (respecting `--voice-intro` / `--voice-outro` overrides) and run `mix_narration_with_ducking()` (`-c:v copy` so video isn't re-encoded).
+  3. Resolve effective mode: when an explicit `mode` argument is provided (`mode is not None`), honor `effective_mode = mode.strip().lower()`; otherwise resolve `"raw"` if `not self.narrator.enabled`, else `self.narrator.mode`. When `effective_mode != "raw"`, synthesize/load `intro_wav` / `outro_wav` (respecting `--voice-intro` / `--voice-outro` overrides) and run `mix_narration_with_ducking()` (`-c:v copy` so video isn't re-encoded).
   4. If `words` is non-empty OR (`self.caption_burner.show_chat_ticker` and `chat_burst` is non-empty): generate `.ass` subtitles (`Hormozi` + `ChatTicker`) and run `AssCaptionBurner.burn_captions()` using the resolved `video.codec` (`h264_nvenc` → `libx264` fallback) and `video.crf`. Otherwise finalize the intermediate/mixed MP4 directly to `output_path` at configured codec/CRF.
   5. Cleans up intermediate temp MP4, `.ass`, and TTS WAV files in `finally`.
 
@@ -2998,11 +3074,32 @@ class Exporter:
 
 ##### [NEW] `src/streamclipper/output/organizer.py`
 
-**Specification:**
-- Creates the output directory structure: `{output_dir}/{game}/{streamer}/{date}/`
-- Sanitizes folder names (removes characters invalid on Windows/Linux filesystems: `<>:"/\|?*`)
-- Names clips sequentially: `clip_01.mp4`, `clip_02.mp4`
-- Saves companion `clip_01.json` with full metadata (including `moment_type`, `narration_intro`, `narration_outro`, `context_badge`, and `transformation_mode`) and `clip_01_transcript.txt`
+**Specification (Standardized `FileOrganizer` API — matched in `pipeline.py` and `tests/test_pipeline.py`):**
+- Class `FileOrganizer(config: Config)`:
+  - `_sanitize_name(name: str, fallback: str = "unknown") -> str`: strips characters invalid on Windows/Linux filesystems (`<>:"/\|?*`) and leading/trailing dots/spaces.
+  - `get_clip_path(game: str, streamer: str, index: int, date_str: str | None = None) -> Path`: resolves `output.structure` (`{game}/{streamer}/{date}`) and `output.filename_template` (`clip_{index:02d}`), creates parent directories, and returns `{clip_dir}/{stem}.mp4`.
+  - `save_clip(video_path: Path, metadata: ClipMetadata, transcript_text: str = "") -> ClipResult`: saves companion `{stem}.json` (when `output.save_metadata_json` is `True`, including `moment_type`, `narration_intro`, `narration_outro`, `context_badge`, `transformation_mode`) and `{stem}_transcript.txt` (when `output.save_transcript_txt` is `True` and `transcript_text` is non-empty), computes duration, and returns `ClipResult`.
+
+```python
+from pathlib import Path
+from ..config import Config
+from ..models import ClipMetadata, ClipResult
+
+
+class FileOrganizer:
+    def __init__(self, config: Config) -> None: ...
+
+    @staticmethod
+    def _sanitize_name(name: str, fallback: str = "unknown") -> str: ...
+
+    def get_clip_path(
+        self, game: str, streamer: str, index: int, date_str: str | None = None
+    ) -> Path: ...
+
+    def save_clip(
+        self, video_path: Path, metadata: ClipMetadata, transcript_text: str = ""
+    ) -> ClipResult: ...
+```
 
 **Example output structure:**
 ```text
@@ -3039,10 +3136,10 @@ output/
 | **Assigned Model** | Claude Opus 4.6 |
 | **Estimated Effort** | ~2 hours |
 | **Dependencies** | Phase 4 |
-| **Commit Message** | `feat: FastMCP server with signal-filtered transcript chunking` |
+| **Commit Message** | `feat: MCP SDK v2 (MCPServer) with signal-filtered transcript chunking` |
 
 #### Why This is Critical
-The MCP server is the primary interface for users with Claude Desktop or Antigravity subscriptions. It must use `FastMCP` from the [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk) ([FastMCP Tools Documentation](https://gofastmcp.com/docs/servers/tools)) and filter out dead-air transcript chunks (`only_with_signals=True`) so a 4-hour VOD does not overflow the AI client's context window.
+The MCP server is the primary interface for users with Claude Desktop or Antigravity subscriptions. It must use **`MCPServer` from MCP Python SDK v2 (`mcp>=2.0.0`)** (`from mcp.server.mcpserver import MCPServer`) and filter out dead-air transcript chunks (`only_with_signals=True`) so a 4-hour VOD does not overflow the AI client's context window.
 
 #### Files to Create
 
@@ -3053,21 +3150,21 @@ The MCP server is the primary interface for users with Claude Desktop or Antigra
 | Tool Name | Description | Returns |
 | :--- | :--- | :--- |
 | `discover_streams` | Find top streams for a game on YouTube | JSON list of streams with URLs, titles, viewers |
-| `download_stream_audio` | Download 16kHz mono WAV audio from a stream URL | File path + stream metadata |
-| `transcribe_audio` | Run hardware-aware WhisperX on downloaded audio | Summary of transcript (cached to disk) |
-| `analyze_signals` | Run streamed loudness + `yt-dlp` chat velocity detection | JSON list of signal spikes + overlap moments |
-| `get_transcript_chunks` | Return transcript chunks (filtered to chunks with signal spikes by default via `Scorer.get_candidate_chunks`) | JSON array of candidate chunks + overlapping signals |
-| `submit_highlights` | Accept the host LLM's scored highlight selections | Confirmation with accepted highlight count |
-| `render_clip` | Render a single highlight into a final 9:16 clip with ASS captions | File path + metadata of rendered clip |
+| `download_stream_audio` | Download 16kHz mono WAV audio from a stream URL and persist `StepCache` state | File path + stream metadata |
+| `transcribe_audio` | Run hardware-aware WhisperX on downloaded audio (resolves `StepCache` via `url` or `StepCache.find_by_audio_path(audio_path)`) | Summary of transcript (cached to disk) |
+| `analyze_signals` | Run streamed loudness + `yt-dlp` chat velocity detection (persists to `StepCache`) | JSON list of signal spikes + overlap moments |
+| `get_transcript_chunks` | Return timestamped transcript chunks (filtered to chunks with signal spikes by default via `Scorer.get_candidate_chunks`) | JSON array of candidate chunks + overlapping signals |
+| `submit_highlights` | Accept the host LLM's scored highlight selections (with YPP fields & `sub_clips`) | Confirmation with accepted highlight count |
+| `render_clip` | Render a single highlight into a final 9:16 clip (`auto` \| `narrative` \| `story` \| `raw`) with ASS captions | File path + metadata of rendered clip |
 | `render_all_selected` | Render all selected highlights for a stream | JSON list of rendered clip paths |
 | `get_pipeline_status` | Check status of current/cached pipelines | JSON status summary |
-| `generate_post_metadata` | Generate social media caption + hashtags | JSON with caption and hashtags |
+| `generate_post_metadata` | Generate structured post metadata & normalized hashtags offline without requiring Ollama (optional `use_ollama: bool = False`) | JSON with caption template/draft and hashtags |
 | `cleanup_temp` | Delete temp files for a completed pipeline | Confirmation |
 
 ```python
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
-mcp = FastMCP("streamclipper")
+mcp = MCPServer("streamclipper")
 
 
 @mcp.tool()
@@ -3078,30 +3175,35 @@ async def discover_streams(game: str = "GTA 6", max_results: int = 10) -> str:
 
 @mcp.tool()
 async def download_stream_audio(url: str) -> str:
-    """Download 16kHz mono WAV audio from a YouTube stream/VOD URL."""
+    """Download 16kHz mono WAV audio from a YouTube stream/VOD URL and save initial StepCache state."""
     ...
 
 
 @mcp.tool()
-async def transcribe_audio(audio_path: str) -> str:
-    """Transcribe downloaded audio using WhisperX with word-level timestamps."""
+async def transcribe_audio(url: str = "", audio_path: str = "") -> str:
+    """Transcribe downloaded audio using WhisperX with word-level timestamps.
+
+    Resolves cached PipelineState via `url` or `StepCache.find_by_audio_path(audio_path)`.
+    """
     ...
 
 
 @mcp.tool()
-async def analyze_signals(audio_path: str, video_url: str) -> str:
-    """Run streamed loudness spike detection and yt-dlp chat velocity analysis."""
+async def analyze_signals(url: str, audio_path: str = "") -> str:
+    """Run streamed loudness spike detection and yt-dlp chat velocity analysis, saving results to StepCache."""
     ...
 
 
 @mcp.tool()
 async def get_transcript_chunks(
-    audio_path: str,
+    url: str = "",
     chunk_minutes: int = 12,
     only_with_signals: bool = True,
+    audio_path: str = "",
 ) -> str:
-    """Get transcript divided into chunks for highlight scoring by the MCP client LLM.
+    """Get timestamped transcript divided into chunks for highlight scoring by the MCP client LLM.
 
+    Resolves cached PipelineState via `url` or `StepCache.find_by_audio_path(audio_path)`.
     When only_with_signals=True (default), returns only chunks overlapping at least one
     loudness or chat spike (reduces token usage by 60-80%).
     """
@@ -3116,7 +3218,7 @@ async def submit_highlights(url: str, highlights: str) -> str:
 
 @mcp.tool()
 async def render_clip(
-    video_url: str,
+    url: str,
     start: float,
     end: float,
     hook_title: str,
@@ -3127,16 +3229,16 @@ async def render_clip(
     narration_outro: str = "",
     context_badge: str = "",
     sub_clips_json: str = "[]",
-    mode: str = "narrative",
+    mode: str = "auto",
     voice_intro_path: str = "",
     voice_outro_path: str = "",
 ) -> str:
-    """Render a single highlight into a final 9:16 vertical clip with YPP transformative narration, zoom, and ASS captions+chat ticker."""
+    """Render a single highlight into a final 9:16 vertical clip (mode: auto | narrative | story | raw) with YPP transformative narration, zoom, and ASS captions+chat ticker."""
     ...
 
 
 @mcp.tool()
-async def render_all_selected(video_url: str) -> str:
+async def render_all_selected(url: str, mode: str = "auto") -> str:
     """Render all selected highlights stored in StepCache for a stream."""
     ...
 
@@ -3149,9 +3251,13 @@ async def get_pipeline_status() -> str:
 
 @mcp.tool()
 async def generate_post_metadata(
-    hook_title: str, streamer: str, game: str, description: str
+    hook_title: str,
+    streamer: str,
+    game: str,
+    description: str,
+    use_ollama: bool = False,
 ) -> str:
-    """Generate social media post caption and hashtags for a clip."""
+    """Build normalized hashtags and social media caption draft without requiring Ollama (set use_ollama=True to invoke local Ollama)."""
     ...
 
 
@@ -3163,7 +3269,7 @@ async def cleanup_temp(url: str = "") -> str:
 
 ##### [NEW] `src/streamclipper/mcp_server/__init__.py`
 ```python
-"""MCP Server entry point using FastMCP stdio transport."""
+"""MCP Server entry point using MCP SDK v2 (MCPServer) stdio transport."""
 from .server import mcp
 
 
@@ -3190,10 +3296,12 @@ if __name__ == "__main__":
 ```
 
 #### Acceptance Criteria
-- [ ] `streamclipper-mcp` starts cleanly over stdio via `FastMCP.run()`
-- [ ] All 11 tools register with valid JSON schemas
-- [ ] `submit_highlights` and `render_clip` accept YPP transformative fields (`moment_type`, `narration_intro`, `narration_outro`, `context_badge`, `sub_clips`, `mode`, `voice_intro_path`, `voice_outro_path`)
-- [ ] `get_transcript_chunks` filters to signal-active chunks by default (`only_with_signals=True`)
+- [ ] `streamclipper-mcp` starts cleanly over stdio via `MCPServer.run()` (`mcp>=2.0.0`)
+- [ ] All 11 tools register with valid JSON schemas (`await mcp.list_tools()`, checking `tool.input_schema`)
+- [ ] `transcribe_audio`, `analyze_signals`, and `get_transcript_chunks` cleanly resolve `StepCache` by `url` OR `StepCache.find_by_audio_path(audio_path)`
+- [ ] `submit_highlights` and `render_clip` accept YPP transformative fields (`moment_type`, `narration_intro`, `narration_outro`, `context_badge`, `sub_clips`, `mode` in `auto|narrative|story|raw`, `voice_intro_path`, `voice_outro_path`)
+- [ ] `get_transcript_chunks` filters to signal-active timestamped chunks by default (`only_with_signals=True`)
+- [ ] `generate_post_metadata` works offline without requiring Ollama by default (`use_ollama=False`)
 - [ ] Error handling returns structured JSON error messages instead of raw tracebacks
 
 ### 📦 Package 5.2 — README & Setup Guide
@@ -3262,15 +3370,15 @@ flowchart LR
 
 | Phase | Status | Test Type | Command | What It Verifies |
 | :--- | :---: | :--- | :--- | :--- |
-| 1 | ✅ **DONE** | Unit | `pytest tests/test_config.py tests/test_cache_cli.py` | 36/36 passing: config loading/merging/validation, 5-tier `HardwareProfile` + user overrides, `IntEnum` & recursive JSON models, CLI, `StepCache` |
-| 2 | Pending | Unit | `pytest tests/test_download.py` | 16kHz mono WAV download, single & multi-beat video segment download, stream discovery |
-| 2 | Pending | Unit | `pytest tests/test_transcriber.py` | Hardware-aware WhisperX transcription + 2-stage VRAM cleanup |
-| 2 | Pending | Unit | `pytest tests/test_loudness.py` | Streamed RMS spike detection (`librosa.stream` with `fill_value=0.0`) + `metadata["peak_time"]` |
-| 2 | Pending | Unit | `pytest tests/test_chat.py` | `yt-dlp` `.live_chat.json` parsing (skipping negative offsets) + velocity binning + `metadata["sample_messages"]` |
-| 3 | Pending | Unit | `pytest tests/test_scorer.py` | Signal fusion, adaptive `moment_type` narrative prompts, `sub_clips` validation, `get_candidate_chunks`, deduplication |
-| 3 | Pending | Integration | `pytest tests/test_pipeline.py` | Full pipeline state transitions (`1 -> 7`), `FAILED (99)` retry recovery, `--mode` / `--voice-intro`, parallel non-interactive mode |
-| 4 | Pending | Unit | `pytest tests/test_assembly.py` | Facecam corner filter, aspect-preserving MoviePy v2 composer (+ story beats & 1.2x spike zoom), ASS `Hormozi` + `ChatTicker` + `h264_nvenc`/`libx264` fallback, pluggable TTS/ElevenLabs/mic narrator + dynamic 18% audio ducking, Windows handle cleanup |
-| 5 | Pending | Unit | `pytest tests/test_mcp_server.py` | FastMCP tool registration (incl. YPP narrative/voiceover params), signal-filtered chunking, cache integration |
+| 1 | ✅ **DONE** | Unit | `pytest tests/test_config.py tests/test_cache_cli.py` | Config loading/merging/validation, 5-tier `HardwareProfile` + user overrides, `IntEnum` & recursive JSON models, CLI, `StepCache` |
+| 2 | ✅ **DONE** | Unit | `pytest tests/test_download.py tests/test_discovery.py` | 16kHz mono WAV download, single & multi-beat video segment download, stream discovery |
+| 2 | ✅ **DONE** | Unit | `pytest tests/test_transcriber.py` | Hardware-aware WhisperX transcription + 2-stage VRAM cleanup |
+| 2 | ✅ **DONE** | Unit | `pytest tests/test_loudness.py` | Streamed RMS spike detection (`librosa.stream` with `fill_value=0.0`) + `metadata["peak_time"]` |
+| 2 | ✅ **DONE** | Unit | `pytest tests/test_chat.py` | `yt-dlp` `.live_chat.json` parsing (skipping negative offsets) + velocity binning + `metadata["sample_messages"]` |
+| 3 | 🔄 **IN REVIEW** | Unit | `pytest tests/test_scorer.py` | Dynamic signal fusion, timestamped chunking, clip duration enforcement, adaptive `moment_type` narrative prompts, `sub_clips` validation, `get_candidate_chunks`, deduplication |
+| 3 | 🔄 **IN REVIEW** | Integration | `pytest tests/test_pipeline.py` | Full pipeline state transitions (`1 -> 7`), `FAILED (99)` retry recovery, `--mode auto|narrative|story|raw` / `--force` / `--voice-intro`, GPU lock serialization in parallel non-interactive mode |
+| 4 | Pending | Unit | `pytest tests/test_assembly.py` | Facecam corner filter, aspect-preserving MoviePy v2 composer (+ clamped story beats & 1.2x spike zoom), ASS `Hormozi` + `ChatTicker` + `h264_nvenc`/`libx264` fallback, pluggable TTS/ElevenLabs/mic narrator + `:eval=frame` dynamic 18% audio ducking, `FileOrganizer`, Windows handle cleanup |
+| 5 | Pending | Unit | `pytest tests/test_mcp_server.py` | MCP SDK v2 (`MCPServer`) tool registration (incl. YPP narrative/story/auto/raw/voiceover params), signal-filtered chunking, `StepCache.find_by_audio_path()` integration, offline `generate_post_metadata` |
 
 ### End-to-End Smoke Test
 
@@ -3278,8 +3386,8 @@ flowchart LR
 # 1. Dependency, GPU VRAM/CC, and HardwareProfile resolution check
 streamclipper setup
 
-# 2. Single stream clip (interactive selection + YPP narrative mode)
-streamclipper clip "https://youtube.com/watch?v=SOME_STREAM_VOD" --game "GTA 6" --mode narrative
+# 2. Single stream clip (interactive selection + YPP full auto mode)
+streamclipper clip "https://youtube.com/watch?v=SOME_STREAM_VOD" --game "GTA 6" --mode auto
 
 # 3. Single stream clip with custom human voice intro + multi-beat story mode
 streamclipper clip "https://youtube.com/watch?v=SOME_STREAM_VOD" --game "GTA 6" --mode story --voice-intro my_intro.wav

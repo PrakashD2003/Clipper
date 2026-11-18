@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any
 
 import yt_dlp
@@ -13,14 +14,16 @@ logger = logging.getLogger(__name__)
 
 
 def _coerce_non_negative_int(value: Any) -> int | None:
-    """Safely coerce a metadata field to a non-negative int, or return None."""
+    """Safely coerce a metadata field to a non-negative finite int, or return None."""
     if value is None or isinstance(value, bool):
         return None
     try:
-        parsed = int(value)
+        numeric = float(value)
     except (TypeError, ValueError):
         return None
-    return parsed if parsed >= 0 else None
+    if not math.isfinite(numeric) or numeric < 0.0:
+        return None
+    return int(numeric)
 
 
 def _resolve_stream_url(entry: dict[str, Any], video_id: str) -> str:
@@ -85,15 +88,24 @@ class YouTubeDiscovery:
 
         return target_game, queries or [target_game]
 
-    def discover(self, game: str | None = None) -> list[StreamInfo]:
+    def discover(
+        self, game: str | None = None, max_streams: int | None = None
+    ) -> list[StreamInfo]:
         """Find top recent streams for a game."""
+        effective_max = (
+            self.max_streams if max_streams is None else max(0, int(max_streams))
+        )
+        if effective_max <= 0:
+            return []
+
         target_game, queries = self._build_queries(game)
+        per_query_limit = max(20, effective_max * 2)
 
         all_results: list[dict[str, Any]] = []
         for query in queries:
-            all_results.extend(self._search_youtube(query))
+            all_results.extend(self._search_youtube(query, max_results=per_query_limit))
 
-        return self._filter_streams(all_results, target_game)
+        return self._filter_streams(all_results, target_game, max_streams=effective_max)
 
     def _search_youtube(self, query: str, max_results: int = 20) -> list[dict[str, Any]]:
         """Raw yt-dlp search using extract_flat=False."""
@@ -126,9 +138,15 @@ class YouTubeDiscovery:
 
         return [entry for entry in entries if isinstance(entry, dict)]
 
-    def _filter_streams(self, results: list[dict[str, Any]], game: str) -> list[StreamInfo]:
+    def _filter_streams(
+        self,
+        results: list[dict[str, Any]],
+        game: str,
+        max_streams: int | None = None,
+    ) -> list[StreamInfo]:
         """Filter for actual streams (long duration, high views)."""
-        if self.max_streams <= 0:
+        limit = self.max_streams if max_streams is None else max(0, int(max_streams))
+        if limit <= 0:
             return []
 
         seen_ids: set[str] = set()
@@ -165,4 +183,4 @@ class YouTubeDiscovery:
             )
 
         streams.sort(key=lambda s: s.view_count, reverse=True)
-        return streams[: self.max_streams]
+        return streams[:limit]

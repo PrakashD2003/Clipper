@@ -1,7 +1,9 @@
 """CLI entry point for StreamClipper."""
 import asyncio
+import logging
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import click
 from rich.console import Console
@@ -13,15 +15,34 @@ from .config import Config
 console = Console()
 
 
+def _configure_logging(config: Config, verbose: bool) -> None:
+    """Configure root and package logging from --verbose or general.log_level."""
+    if verbose:
+        level = logging.DEBUG
+    else:
+        level_name = str(config.get("general.log_level", "INFO")).upper()
+        level = getattr(logging, level_name, logging.INFO)
+    logging.basicConfig(level=level, format="%(levelname)s [%(name)s] %(message)s")
+    logging.getLogger("streamclipper").setLevel(level)
+
+
 @click.group()
 @click.version_option(version=__version__, prog_name="streamclipper")
-@click.option("--config", "-c", type=click.Path(), default=None, help="Path to config.yaml")
+@click.option(
+    "--config",
+    "-c",
+    type=click.Path(exists=True, dir_okay=False),
+    default=None,
+    help="Path to config.yaml",
+)
 @click.option("--verbose", "-v", is_flag=True, help="Verbose output")
 @click.pass_context
 def cli(ctx: click.Context, config: str | None, verbose: bool) -> None:
     """🎮 StreamClipper — AI-powered stream clipping tool"""
     ctx.ensure_object(dict)
-    ctx.obj["config"] = Config(Path(config) if config else None)
+    cfg = Config(Path(config) if config else None)
+    _configure_logging(cfg, verbose)
+    ctx.obj["config"] = cfg
     ctx.obj["verbose"] = verbose
 
 
@@ -33,7 +54,7 @@ def cli(ctx: click.Context, config: str | None, verbose: bool) -> None:
 @click.option("--interactive/--no-interactive", default=True, help="Prompt to select highlights")
 @click.option(
     "--mode",
-    type=click.Choice(["narrative", "story", "raw"], case_sensitive=False),
+    type=click.Choice(["auto", "narrative", "story", "raw"], case_sensitive=False),
     default=None,
     help="YPP transformation mode (overrides config)",
 )
@@ -51,6 +72,12 @@ def cli(ctx: click.Context, config: str | None, verbose: bool) -> None:
     default=None,
     help="Path to custom human outro voiceover WAV",
 )
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Ignore cached pipeline state and re-run from scratch",
+)
 @click.pass_context
 def clip(
     ctx: click.Context,
@@ -62,30 +89,38 @@ def clip(
     mode: str | None,
     voice_intro: Path | None,
     voice_outro: Path | None,
+    force: bool,
 ) -> None:
     """Clip highlights from a stream URL.
 
-    Example: streamclipper clip "https://youtube.com/watch?v=XXXXX" --mode narrative
+    Example: streamclipper clip "https://youtube.com/watch?v=XXXXX" --mode auto
     """
     from .pipeline import Pipeline
 
     config: Config = ctx.obj["config"]
     normalized_mode = mode.lower() if mode else None
+    if voice_intro is not None and not voice_intro.exists():
+        console.print(f"[yellow]⚠ Intro voiceover file not found yet:[/] {voice_intro}")
+    if voice_outro is not None and not voice_outro.exists():
+        console.print(f"[yellow]⚠ Outro voiceover file not found yet:[/] {voice_outro}")
+
     console.print(f"[bold green]🎬 Processing stream:[/] {url}")
 
     pipeline = Pipeline(config)
-    clips = asyncio.run(
-        pipeline.process_stream(
-            url=url,
-            max_clips=max_clips,
-            game=game,
-            streamer=streamer,
-            interactive=interactive,
-            mode=normalized_mode,
-            voice_intro_path=voice_intro,
-            voice_outro_path=voice_outro,
-        )
-    )
+    call_kwargs: dict[str, Any] = {
+        "url": url,
+        "max_clips": max_clips,
+        "game": game,
+        "streamer": streamer,
+        "interactive": interactive,
+        "mode": normalized_mode,
+        "voice_intro_path": voice_intro,
+        "voice_outro_path": voice_outro,
+    }
+    if force:
+        call_kwargs["force"] = True
+
+    clips = asyncio.run(pipeline.process_stream(**call_kwargs))
 
     if not clips:
         console.print("[yellow]No clips were generated for this stream.[/]")
@@ -105,7 +140,7 @@ def clip(
 @click.option("--max-clips", default=None, type=int, help="Clips per stream")
 @click.option(
     "--mode",
-    type=click.Choice(["narrative", "story", "raw"], case_sensitive=False),
+    type=click.Choice(["auto", "narrative", "story", "raw"], case_sensitive=False),
     default=None,
     help="YPP transformation mode (overrides config)",
 )
@@ -123,6 +158,12 @@ def clip(
     default=None,
     help="Path to custom human outro voiceover WAV",
 )
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Ignore cached pipeline state and re-run from scratch",
+)
 @click.pass_context
 def auto(
     ctx: click.Context,
@@ -132,10 +173,11 @@ def auto(
     mode: str | None,
     voice_intro: Path | None,
     voice_outro: Path | None,
+    force: bool,
 ) -> None:
     """Auto-discover top streams and clip them all.
 
-    Example: streamclipper auto --game "GTA 6" --max-streams 5 --mode narrative
+    Example: streamclipper auto --game "GTA 6" --max-streams 5 --mode auto
     """
     from .discovery.youtube import YouTubeDiscovery
     from .pipeline import Pipeline
@@ -143,9 +185,16 @@ def auto(
     config: Config = ctx.obj["config"]
     target_game = game or str(config.get("discovery.default_game", "GTA 6"))
     normalized_mode = mode.lower() if mode else None
+    if voice_intro is not None and not voice_intro.exists():
+        console.print(f"[yellow]⚠ Intro voiceover file not found yet:[/] {voice_intro}")
+    if voice_outro is not None and not voice_outro.exists():
+        console.print(f"[yellow]⚠ Outro voiceover file not found yet:[/] {voice_outro}")
+
     console.print(f"[bold green]🔍 Discovering top {target_game} streams...[/]")
 
     discovery = YouTubeDiscovery(config)
+    if max_streams is not None:
+        discovery.max_streams = max(0, max_streams)
     streams = discovery.discover(game=target_game)
     if max_streams is not None:
         streams = streams[: max(0, max_streams)]
@@ -159,15 +208,20 @@ def auto(
     )
     max_concurrent = int(config.get("general.max_concurrent_streams", 2))
     pipeline = Pipeline(config)
+    parallel_kwargs: dict[str, Any] = {
+        "max_concurrent": max_concurrent,
+        "max_clips": max_clips,
+        "game": target_game,
+        "mode": normalized_mode,
+        "voice_intro_path": voice_intro,
+        "voice_outro_path": voice_outro,
+    }
+    if force:
+        parallel_kwargs["force"] = True
     results = asyncio.run(
         pipeline.process_streams_parallel(
             [s.url for s in streams],
-            max_concurrent=max_concurrent,
-            max_clips=max_clips,
-            game=target_game,
-            mode=normalized_mode,
-            voice_intro_path=voice_intro,
-            voice_outro_path=voice_outro,
+            **parallel_kwargs,
         )
     )
 
@@ -205,6 +259,7 @@ def setup(ctx: click.Context) -> None:
     _check_dependency("OpenCV", "cv2")
     _check_dependency("MoviePy v2", "moviepy")
     _check_dependency("Ollama SDK", "ollama")
+    _check_dependency("MCP SDK v2 (MCPServer)", "mcp.server.mcpserver")
     _check_gpu()
     _render_hardware_profile(config)
 

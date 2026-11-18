@@ -294,6 +294,36 @@ class TestTranscriberHardwareProfiles:
         }
         assert calls["transcribe"]["batch_size"] == 4
 
+    def test_whisperx_forwards_configured_language_when_supported(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        dummy_wav: Path,
+    ) -> None:
+        monkeypatch.setattr(config_mod, "USER_CONFIG_PATH", tmp_path / "missing.yaml")
+        _install_fake_torch(monkeypatch, cuda_available=False)
+
+        captured_transcribe: dict[str, Any] = {}
+
+        class _LangAwareASRModel:
+            def transcribe(
+                self, audio: Any, batch_size: int = 4, language: str | None = None
+            ) -> dict[str, Any]:
+                captured_transcribe["batch_size"] = batch_size
+                captured_transcribe["language"] = language
+                return {"language": language or "en", "segments": []}
+
+        fake_wx = types.ModuleType("whisperx")
+        fake_wx.load_model = lambda *a, **kw: _LangAwareASRModel()  # type: ignore[attr-defined]
+        fake_wx.load_audio = lambda p: f"buf:{p}"  # type: ignore[attr-defined]
+        fake_wx.load_align_model = lambda **kw: (object(), {})  # type: ignore[attr-defined]
+        fake_wx.align = lambda *a, **kw: {"segments": []}  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "whisperx", fake_wx)
+
+        cfg = Config(hardware_profile=_make_cpu_profile())
+        Transcriber(cfg).transcribe(dummy_wav)
+        assert captured_transcribe == {"batch_size": 4, "language": "en"}
+
 
 class TestTranscriberWordConversion:
     def test_word_level_timestamp_conversion_and_unaligned_tokens(
@@ -571,3 +601,36 @@ class TestTranscriptCaching:
         corrupt = tmp_path / "corrupt.json"
         corrupt.write_text("{invalid json", encoding="utf-8")
         assert transcriber.load_transcript(corrupt) is None
+
+    def test_faster_whisper_maps_auto_language_to_none(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        user_cfg = tmp_path / "fw_auto.yaml"
+        user_cfg.write_text(
+            "transcription:\n  engine: faster-whisper\n  language: auto\n",
+            encoding="utf-8",
+        )
+        cfg = Config(user_config_path=user_cfg, hardware_profile=_make_cpu_profile())
+        audio_file = tmp_path / "sample.wav"
+        audio_file.write_bytes(b"RIFF")
+
+        captured_lang: list[object] = []
+
+        class _FakeFWModel:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            def transcribe(self, path: str, **kwargs: object) -> tuple[list[object], object]:
+                captured_lang.append(kwargs.get("language"))
+                return [], type("_Info", (), {"language": "en"})()
+
+        monkeypatch.setitem(
+            sys.modules,
+            "faster_whisper",
+            type("_Mod", (), {"WhisperModel": _FakeFWModel})(),
+        )
+        result = Transcriber(cfg).transcribe(audio_file)
+        assert captured_lang == [None]
+        assert result.language == "en"

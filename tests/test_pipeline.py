@@ -501,10 +501,14 @@ class TestPipelineEndToEnd:
         assert len(cached.clips) == 2
 
         # Verify companion metadata JSON written with YPP fields
-        meta_json = json.loads(clips[0].metadata_path.read_text(encoding="utf-8"))
-        assert meta_json["moment_type"] == "clutch"
-        assert meta_json["transformation_mode"] == "narrative"
-        assert meta_json["streamer"] == "CustomStreamer"
+        # Default mode is 'auto': clip 1 has valid sub_clips -> 'story'; clip 2 is single-cut -> 'narrative'
+        meta_json_0 = json.loads(clips[0].metadata_path.read_text(encoding="utf-8"))
+        assert meta_json_0["moment_type"] == "clutch"
+        assert meta_json_0["transformation_mode"] == "story"
+        assert meta_json_0["streamer"] == "CustomStreamer"
+
+        meta_json_1 = json.loads(clips[1].metadata_path.read_text(encoding="utf-8"))
+        assert meta_json_1["transformation_mode"] == "narrative"
 
     @pytest.mark.asyncio
     async def test_resume_from_cached_analyzing_skips_download_and_transcribe(
@@ -1334,3 +1338,274 @@ class TestCLIPipelineWiring:
             "voice_intro_path": intro_wav,
             "voice_outro_path": outro_wav,
         }
+
+
+# ---------------------------------------------------------------------------
+# Audit Hardening & User Decision Regression Tests
+# ---------------------------------------------------------------------------
+
+
+class TestAuditHardeningAndModes:
+    @pytest.mark.asyncio
+    async def test_narrative_mode_forces_single_cut_even_when_sub_clips_exist(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """mode='narrative' must keep single continuous cut + voiceover/overlays (no multi-beat stitching)."""
+        call_log: list[str] = []
+        segment_calls: list[tuple[str, Any]] = []
+        _install_mock_stage_deps(
+            monkeypatch, tmp_path, call_log=call_log, segment_calls=segment_calls
+        )
+        pipeline = Pipeline(_make_config(tmp_path))
+        clips = await pipeline.process_stream(
+            "https://youtube.com/watch?v=narrative_single",
+            max_clips=1,
+            interactive=False,
+            mode="narrative",
+        )
+        assert len(clips) == 1
+        assert segment_calls == [("single", (110.0, 160.0))]
+        assert clips[0].metadata.transformation_mode == "narrative"
+        assert clips[0].metadata.narration_intro != ""
+
+    @pytest.mark.asyncio
+    async def test_transformation_disabled_defaults_to_raw_mode(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """transformation.enabled=false must resolve to raw mode (single cut, cleared narration/badge)."""
+        call_log: list[str] = []
+        segment_calls: list[tuple[str, Any]] = []
+        _install_mock_stage_deps(
+            monkeypatch, tmp_path, call_log=call_log, segment_calls=segment_calls
+        )
+        cfg = _make_config(tmp_path, overrides={"transformation": {"enabled": False, "mode": "story"}})
+        pipeline = Pipeline(cfg)
+        clips = await pipeline.process_stream(
+            "https://youtube.com/watch?v=disabled_ypp",
+            max_clips=1,
+            interactive=False,
+        )
+        assert len(clips) == 1
+        assert segment_calls == [("single", (110.0, 160.0))]
+        assert clips[0].metadata.transformation_mode == "raw"
+        assert clips[0].metadata.narration_intro == ""
+        assert clips[0].metadata.narration_outro == ""
+        assert clips[0].metadata.context_badge == ""
+
+    @pytest.mark.asyncio
+    async def test_analyze_failure_during_chat_does_not_skip_chat_on_retry(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """If chat scraping fails after loudness succeeds, loudness is NOT prematurely committed."""
+        call_log: list[str] = []
+        _install_mock_stage_deps(monkeypatch, tmp_path, call_log=call_log)
+
+        class _FailingChatScraper:
+            def load_cache(self, path: Path) -> None:
+                return None
+
+            def scrape(self, url: str, temp_dir: Path) -> Any:
+                raise RuntimeError("transient chat error")
+
+        monkeypatch.setattr(pipeline_mod, "ChatScraper", _FailingChatScraper)
+        pipeline = Pipeline(_make_config(tmp_path))
+        url = "https://youtube.com/watch?v=chat_fail_retry"
+
+        with pytest.raises(RuntimeError, match="transient chat error"):
+            await pipeline.process_stream(url, max_clips=1, interactive=False)
+
+        failed = pipeline.cache.load_state(url)
+        assert failed is not None
+        assert failed.status is PipelineStatus.FAILED
+        assert failed.loudness_spikes == []
+        assert failed.analysis_complete is False
+
+        # On retry, recovery must return to ANALYZING and run chat analysis
+        retry_log: list[str] = []
+        _install_mock_stage_deps(monkeypatch, tmp_path, call_log=retry_log)
+        clips = await pipeline.process_stream(url, max_clips=1, interactive=False)
+        assert len(clips) == 1
+        assert "chat_scrape" in retry_log
+        assert "chat_velocity" in retry_log
+
+    def test_recover_failed_state_handles_zero_spike_analysis_and_missing_audio(
+        self, tmp_path: Path
+    ) -> None:
+        # Zero-spike completed analysis must recover to SCORING instead of re-running ANALYZING
+        zero_spike_state = PipelineState(
+            stream_info=_sample_stream_info(),
+            status=PipelineStatus.FAILED,
+            transcript=_sample_transcript(),
+            analysis_complete=True,
+        )
+        assert Pipeline._recover_failed_state(zero_spike_state).status is PipelineStatus.SCORING
+
+        # Transcript present + deleted temp audio must reset to PENDING (breaking FileNotFoundError loop)
+        missing_wav_state = PipelineState(
+            stream_info=_sample_stream_info(),
+            status=PipelineStatus.FAILED,
+            audio_path=tmp_path / "deleted.wav",
+            transcript=_sample_transcript(),
+        )
+        assert Pipeline._recover_failed_state(missing_wav_state).status is PipelineStatus.PENDING
+
+    def test_assemble_highlight_reraises_non_phase4_import_error(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Class-name mismatches or missing third-party deps must NOT silently fall back."""
+        broken_organizer = types.ModuleType("streamclipper.output.organizer")
+        # Deliberately omit FileOrganizer to simulate API mismatch
+        monkeypatch.setitem(sys.modules, "streamclipper.assembly.composer", types.ModuleType("streamclipper.assembly.composer"))
+        sys.modules["streamclipper.assembly.composer"].VideoComposer = object  # type: ignore[attr-defined]
+        sys.modules["streamclipper.assembly.composer"].remap_timeline_for_beats = object  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "streamclipper.assembly.facecam", types.ModuleType("streamclipper.assembly.facecam"))
+        sys.modules["streamclipper.assembly.facecam"].FacecamDetector = object  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "streamclipper.assembly.hooks", types.ModuleType("streamclipper.assembly.hooks"))
+        sys.modules["streamclipper.assembly.hooks"].HookTitleOverlay = object  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "streamclipper.output.exporter", types.ModuleType("streamclipper.output.exporter"))
+        sys.modules["streamclipper.output.exporter"].Exporter = object  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "streamclipper.output.organizer", broken_organizer)
+
+        pipeline = Pipeline(_make_config(tmp_path))
+        h = _sample_highlights()[0]
+        meta = ClipMetadata(
+            hook_title=h.title, caption="Cap", hashtags=["GTA6"],
+            streamer="S", game="GTA 6", source_url="u",
+            clip_start=h.start, clip_end=h.end, highlight_score=9.0,
+        )
+        with pytest.raises(ImportError):
+            pipeline._assemble_highlight(h, meta, [tmp_path / "s.mp4"], 1, "narrative", None, None)
+
+    @pytest.mark.asyncio
+    async def test_parallel_streams_serialize_gpu_stages_and_preserve_detected_game_and_force(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Parallel runs never overlap GPU stages; detected game is preserved; force=True reruns."""
+        call_log: list[str] = []
+        _install_mock_stage_deps(monkeypatch, tmp_path, call_log=call_log)
+
+        # Override download_audio to return detected game='Valorant'
+        def _dl_with_game(url: str, output_dir: Path) -> tuple[Path, StreamInfo]:
+            call_log.append("download_audio")
+            vid = url.split("=")[-1]
+            p = Path(output_dir) / f"{vid}.wav"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(b"RIFF....WAVE")
+            return p, _sample_stream_info(url=url, video_id=vid, game="Valorant")
+
+        monkeypatch.setattr(pipeline_mod, "download_audio", _dl_with_game)
+
+        active_gpu = 0
+        max_gpu_overlap = 0
+
+        class _GpuTrackingTranscriber:
+            def __init__(self, config: Config) -> None:
+                pass
+
+            def transcribe(self, audio_path: Path) -> TranscriptionResult:
+                nonlocal active_gpu, max_gpu_overlap
+                import time
+
+                active_gpu += 1
+                max_gpu_overlap = max(max_gpu_overlap, active_gpu)
+                try:
+                    time.sleep(0.03)
+                    return _sample_transcript()
+                finally:
+                    active_gpu -= 1
+
+        monkeypatch.setattr(pipeline_mod, "Transcriber", _GpuTrackingTranscriber)
+
+        cfg = _make_config(
+            tmp_path,
+            overrides={
+                "output": {
+                    "structure": "{streamer}/{game}",
+                    "save_metadata_json": False,
+                }
+            },
+        )
+        pipeline = Pipeline(cfg)
+        urls = [
+            "https://youtube.com/watch?v=gpu_1",
+            "https://youtube.com/watch?v=gpu_2",
+        ]
+        results = await pipeline.process_streams_parallel(urls, max_concurrent=2, max_clips=1)
+        assert max_gpu_overlap == 1
+        assert all(isinstance(r, list) and len(r) == 1 for r in results)
+
+        # Detected game 'Valorant' was NOT overwritten by default 'GTA 6'
+        first_clip = results[0][0]  # type: ignore[index]
+        assert first_clip.metadata.game == "Valorant"
+        # save_metadata_json=False returns metadata_path=None instead of nonexistent Path
+        assert first_clip.metadata_path is None
+
+        # force=True clears COMPLETE cache and re-runs pipeline stages
+        call_log.clear()
+        rerun = await pipeline.process_stream(urls[0], max_clips=1, interactive=False, force=True)
+        assert len(rerun) == 1
+        assert "download_audio" in call_log
+        assert "score_and_select" in call_log
+
+    @pytest.mark.asyncio
+    async def test_process_stream_redownloads_missing_audio_at_analyzing_without_retranscribing(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """If cached state is FAILED/ANALYZING with transcript but audio_path is None, re-download WAV and skip transcription."""
+        call_log: list[str] = []
+        _install_mock_stage_deps(monkeypatch, tmp_path, call_log=call_log)
+        cfg = _make_config(tmp_path)
+        pipeline = Pipeline(cfg)
+
+        url = "https://youtube.com/watch?v=missing_audio_path"
+        state = PipelineState(
+            stream_info=StreamInfo(
+                url=url,
+                title="Test",
+                platform=Platform.YOUTUBE,
+                streamer="S",
+                game="G",
+                duration_seconds=100,
+            ),
+            status=PipelineStatus.FAILED,
+            audio_path=None,
+            transcript=_sample_transcript(),
+        )
+        pipeline.cache.save_state(state)
+
+        clips = await pipeline.process_stream(url, max_clips=1, interactive=False)
+        assert len(clips) == 1
+        assert "download_audio" in call_log
+        assert "transcribe" not in call_log
+        assert "loudness" in call_log
+
+    def test_invalid_mode_override_raises_and_fallback_sanitizes_filename_template(
+        self, tmp_path: Path
+    ) -> None:
+        cfg = _make_config(
+            tmp_path,
+            overrides={"output": {"filename_template": "../../bad_{unknown}"}},
+        )
+        pipeline = Pipeline(cfg)
+        with pytest.raises(ValueError, match="Invalid transformation mode"):
+            pipeline._resolve_base_mode("invalid_mode")
+
+        seg_path = tmp_path / "seg.mp4"
+        seg_path.write_bytes(b"mp4")
+        h = _sample_highlights()[1]
+        meta = ClipMetadata(
+            hook_title="Hook",
+            caption="Cap",
+            hashtags=["GTA6"],
+            streamer="TestStreamer",
+            game="GTA 6",
+            source_url="https://youtu.be/1",
+            clip_start=h.start,
+            clip_end=h.end,
+            highlight_score=8.5,
+            transformation_mode="narrative",
+        )
+        res = pipeline._fallback_save_segment(h, meta, [seg_path], clip_index=1)
+        assert res.metadata_path is not None
+        assert res.metadata_path.name == "clip_01.json"
+        assert tmp_path in res.metadata_path.resolve().parents

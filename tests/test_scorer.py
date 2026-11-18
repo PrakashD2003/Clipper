@@ -381,11 +381,42 @@ class TestWeightedScoreFusion:
         assert abs(final - 6.5) < 0.001
 
     def test_weighted_score_with_no_signals(self, config: Config):
-        """With no overlapping signals, final = 0.50 * llm_score."""
+        """When both loudness and chat modalities are unavailable, weights renormalize to llm_score (1.0)."""
         scorer = _StubScorer(config)
         h = _make_highlight(100.0, 200.0, 10.0)
         final = scorer._compute_weighted_score(h, [], [])
-        assert abs(final - 5.0) < 0.001
+        assert abs(final - 10.0) < 0.001
+
+    def test_weighted_score_renormalizes_when_chat_unavailable(self, config: Config):
+        """Without live chat replay (chat_spikes=[]), llm (0.50) & loudness (0.25) renormalize to 2/3 & 1/3."""
+        scorer = _StubScorer(config)
+        h = _make_highlight(100.0, 150.0, 8.0)
+        loudness = [TimeRange(start=110.0, end=130.0, score=10.0)]
+        final = scorer._compute_weighted_score(h, loudness, [])
+        expected = (2.0 / 3.0) * 8.0 + (1.0 / 3.0) * 10.0
+        assert abs(final - expected) < 0.001
+        assert final >= 7.0
+
+    def test_weighted_score_quiet_top_tier_ai_pick_passes_while_signal_backed_ranks_higher(
+        self, config: Config
+    ):
+        """A quiet 9.0 AI pick gets a 0.85*score floor (7.65 >= 7.0), while a signal-backed 9.0 still beats it."""
+        scorer = _StubScorer(config)
+        distant_loud = [TimeRange(start=500.0, end=520.0, score=9.0)]
+        distant_chat = [TimeRange(start=505.0, end=525.0, score=9.0)]
+
+        quiet_gem = _make_highlight(100.0, 145.0, 9.0, moment_type="funny")
+        loud_hype = _make_highlight(490.0, 540.0, 9.0, moment_type="hype")
+        quiet_mediocre = _make_highlight(100.0, 145.0, 7.5, moment_type="funny")
+
+        s_quiet = scorer._compute_weighted_score(quiet_gem, distant_loud, distant_chat)
+        s_loud = scorer._compute_weighted_score(loud_hype, distant_loud, distant_chat)
+        s_mediocre = scorer._compute_weighted_score(quiet_mediocre, distant_loud, distant_chat)
+
+        assert s_quiet == pytest.approx(7.65)
+        assert s_loud == pytest.approx(9.0)
+        assert s_loud > s_quiet >= 7.0
+        assert s_mediocre < 7.0
 
     def test_weighted_score_sets_loudness_and_chat_fields(self, config: Config):
         """_compute_weighted_score should set h.loudness_score and h.chat_score."""
@@ -1419,5 +1450,245 @@ class TestOllamaScorerEdgeCasesAndHardening:
         assert badge == "🔥 Timing"
         retry_prompt = mock_client.generate.call_args_list[1].kwargs["prompt"]
         assert "IMPORTANT: Return ONLY a valid JSON object" in retry_prompt
+
+    def test_chunk_transcript_includes_timestamps_no_explosion_and_no_tail_dup(
+        self, config: Config, long_transcript: TranscriptionResult
+    ):
+        """Chunks contain [start - end] timestamps, stay bounded at chunk_minutes=1, and skip redundant tail."""
+        scorer = _StubScorer(config)
+
+        # 12-min transcript should yield exactly 1 chunk (no redundant trailing [660, 720])
+        twelve_min = TranscriptionResult(
+            segments=long_transcript.segments[:12], full_text="twelve min"
+        )
+        chunks_12 = scorer._chunk_transcript(twelve_min, chunk_minutes=12)
+        assert len(chunks_12) == 1
+        assert "[0.0s - 60.0s]" in chunks_12[0].text
+
+        # chunk_minutes=1 on 48-min transcript must NOT explode to ~2880 chunks (step=45s -> ~64 chunks)
+        chunks_1 = scorer._chunk_transcript(long_transcript, chunk_minutes=1)
+        assert 40 <= len(chunks_1) <= 80
+
+        with pytest.raises(ValueError, match="chunk_minutes"):
+            scorer._chunk_transcript(long_transcript, chunk_minutes=0)
+
+    def test_score_and_select_enforces_clip_bounds_scopes_transcript_and_max_clips_override(
+        self, config: Config, long_transcript: TranscriptionResult
+    ):
+        """Enforces min/max_clip_seconds, allows valid stitched beats, scopes transcript_chunk, and honors max_clips."""
+        canned = [
+            _make_highlight(10.0, 20.0, 9.5, title="Too Short"),          # 10s < 30s -> rejected
+            _make_highlight(100.0, 400.0, 9.5, title="Too Long"),         # 300s > 90s -> rejected
+            _make_highlight(60.0, 105.0, 9.2, title="Valid Single"),      # 45s -> kept
+            _make_highlight(
+                300.0, 420.0, 9.0, title="Valid MultiBeat",
+                sub_clips=[
+                    {"start": 300.0, "end": 325.0, "label": "Setup"},
+                    {"start": 385.0, "end": 415.0, "label": "Payoff"},
+                ],  # stitched = 55s (within 30..90) -> kept
+            ),
+        ]
+        # Add 5 more valid highlights to test max_clips override > config default (5)
+        for idx in range(5):
+            base = 600.0 + idx * 120.0
+            canned.append(_make_highlight(base, base + 40.0, 8.8, title=f"Extra {idx}"))
+
+        scorer = _StubScorer(config, canned=canned)
+        selected = scorer.score_and_select(long_transcript, [], [], max_clips=7)
+        titles = [h.title for h in selected]
+        assert "Too Short" not in titles
+        assert "Too Long" not in titles
+        assert "Valid Single" in titles
+        assert "Valid MultiBeat" in titles
+        assert len(selected) == 7
+
+        single = next(h for h in selected if h.title == "Valid Single")
+        assert "Segment 1" in single.transcript_chunk or "word0" in single.transcript_chunk
+        assert "Segment 40" not in single.transcript_chunk
+
+    def test_validate_sub_clips_rejects_nan_bool_and_oversized_duration(self, config: Config):
+        scorer = _StubScorer(config)
+        assert scorer._validate_sub_clips(
+            [{"start": float("nan"), "end": 20.0}, {"start": 30.0, "end": 45.0}],
+            start=0.0, end=50.0,
+        ) == []
+        assert scorer._validate_sub_clips(
+            [{"start": True, "end": 20.0}, {"start": 30.0, "end": 45.0}],
+            start=0.0, end=50.0,
+        ) == []
+        assert scorer._validate_sub_clips(
+            [{"start": 0.0, "end": 60.0}, {"start": 70.0, "end": 120.0}],
+            start=0.0, end=120.0, max_duration=90.0,
+        ) == []
+
+    def test_peak_time_clamped_and_boundary_straddling_words_included(self, config: Config):
+        scorer = _StubScorer(config)
+        h = _make_highlight(100.0, 145.0, 8.5)
+        spikes = [TimeRange(start=85.0, end=110.0, score=9.0, metadata={"peak_time": 88.0})]
+        peak = scorer._extract_peak_time(h, spikes)
+        assert 100.0 <= peak <= 145.0
+
+        tr = TranscriptionResult(
+            segments=[
+                TranscriptSegment(
+                    text="boundary word",
+                    start=99.0,
+                    end=101.0,
+                    words=[
+                        WordTimestamp(text="straddle", start=99.8, end=100.3, confidence=0.9),
+                        WordTimestamp(text="inside", start=100.4, end=100.9, confidence=0.95),
+                    ],
+                )
+            ],
+            full_text="straddle inside",
+        )
+        words = scorer._extract_words_for_range(tr, 100.0, 145.0)
+        assert [w.text for w in words] == ["straddle", "inside"]
+
+    def test_ollama_think_false_late_chunk1_offset_hashtag_cap_and_explicit_raw_mode(
+        self, tmp_path: Path
+    ):
+        user_cfg = tmp_path / "config.yaml"
+        user_cfg.write_text("metadata:\n  hashtag_count: 4\n", encoding="utf-8")
+        cfg = Config(user_config_path=user_cfg)
+
+        with patch("streamclipper.scoring.ollama_scorer.ollama.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            mock_client.generate.side_effect = [
+                GenerateResponse(response="Hook Title"),
+                GenerateResponse(
+                    response=json.dumps(
+                        {
+                            "caption": "Cap!",
+                            "hashtags": ["t1", "t2", "t3", "t4", "t5", "t6"],
+                        }
+                    )
+                ),
+            ]
+            scorer = OllamaScorer(cfg)
+
+            # Late Chunk 1 relative range [650, 700] on chunk_offset=660 must shift to [1310, 1360]
+            late_payload = json.dumps(
+                [{"start": 650.0, "end": 700.0, "score": 8.5, "title": "Late", "reason": "r"}]
+            )
+            parsed = scorer._parse_response(late_payload, chunk_offset=660.0)
+            assert parsed[0].start == 1310.0
+            assert parsed[0].end == 1360.0
+
+            # Explicit mode='raw' skips narrative_writer LLM call and clears narration/badge fields
+            h = _make_highlight(
+                100.0, 145.0, 9.0,
+                narration_intro="Should be cleared",
+                narration_outro="Should be cleared",
+                context_badge="🔥 Badge",
+            )
+            meta = scorer.generate_metadata(
+                h, streamer="xQc", game="GTA 6", source_url="https://youtu.be/1", mode="raw"
+            )
+            assert mock_client.generate.call_count == 2
+            assert mock_client.generate.call_args_list[0].kwargs["think"] is False
+            assert meta.transformation_mode == "raw"
+            assert meta.narration_intro == ""
+            assert meta.narration_outro == ""
+            assert meta.context_badge == ""
+            # Hashtags capped to 4 while preserving required GTA6 & xQc tags
+            assert len(meta.hashtags) == 4
+            assert "GTA6" in meta.hashtags
+            assert "xQc" in meta.hashtags
+
+    def test_zero_llm_weight_nan_chunk_minutes_transcript_range_and_subclip_normalization(
+        self, config: Config
+    ):
+        scorer = _StubScorer(config)
+
+        # 1. w_llm == 0.0 with no active signals returns 0.0 (does not leak raw LLM score or 8.5 floor)
+        scorer.weights = {"llm_score": 0.0, "loudness": 0.5, "chat_velocity": 0.5}
+        h = _make_highlight(10.0, 50.0, 9.5)
+        assert scorer._compute_weighted_score(h, [], []) == 0.0
+
+        # 2. _extract_transcript_for_range does not fall through to full seg.text when seg.words don't overlap
+        tr = TranscriptionResult(
+            segments=[
+                TranscriptSegment(
+                    text="OUTSIDE SEGMENT TEXT",
+                    start=95.0,
+                    end=105.0,
+                    words=[WordTimestamp(text="early", start=95.0, end=99.0, confidence=0.9)],
+                )
+            ],
+            full_text="OUTSIDE SEGMENT TEXT",
+        )
+        assert scorer._extract_transcript_for_range(tr, 100.0, 145.0) == ""
+
+        # 3. _chunk_transcript rejects NaN / Inf chunk_minutes and overlap_seconds
+        with pytest.raises(ValueError, match="chunk_minutes"):
+            scorer._chunk_transcript(tr, chunk_minutes=float("nan"))  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match="overlap_seconds"):
+            scorer._chunk_transcript(tr, chunk_minutes=1, overlap_seconds=float("inf"))
+
+        # 4. _validate_sub_clips normalizes numeric string timestamps to floats
+        beats = scorer._validate_sub_clips(
+            [
+                {"start": "10.0", "end": "20.0", "label": "setup"},
+                {"start": "30.0", "end": "45.0", "label": "payoff"},
+            ],
+            start=0.0,
+            end=50.0,
+        )
+        assert len(beats) == 2
+        assert isinstance(beats[0]["start"], float) and beats[0]["start"] == 10.0
+        assert isinstance(beats[1]["end"], float) and beats[1]["end"] == 45.0
+
+    def test_ollama_chunk1_relative_subclips_all_shift_and_invalid_mode_raises(
+        self, config: Config
+    ):
+        with patch("streamclipper.scoring.ollama_scorer.ollama.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            # First call raises TypeError for unexpected 'think', second succeeds
+            mock_client.generate.side_effect = [
+                TypeError("generate() got an unexpected keyword argument 'think'"),
+                GenerateResponse(response="Hook Title"),
+            ]
+            scorer = OllamaScorer(config)
+
+            # Parent [600, 700] on Chunk 1 (offset=660) with beat 2 starting at 670 >= 660:
+            # BOTH beats must shift by +660 to stay aligned with parent [1260, 1360].
+            payload = json.dumps(
+                [
+                    {
+                        "start": 600.0,
+                        "end": 700.0,
+                        "score": 9.0,
+                        "title": "Late Story",
+                        "reason": "great setup and payoff",
+                        "sub_clips": [
+                            {"start": 600.0, "end": 620.0, "label": "Setup"},
+                            {"start": 670.0, "end": 700.0, "label": "Payoff"},
+                        ],
+                    }
+                ]
+            )
+            parsed = scorer._parse_response(payload, chunk_offset=660.0)
+            assert parsed[0].start == 1260.0
+            assert parsed[0].end == 1360.0
+            assert parsed[0].sub_clips == [
+                {"start": 1260.0, "end": 1280.0, "label": "Setup"},
+                {"start": 1330.0, "end": 1360.0, "label": "Payoff"},
+            ]
+            assert len(
+                Scorer._validate_sub_clips(parsed[0].sub_clips, parsed[0].start, parsed[0].end)
+            ) == 2
+
+            # Invalid explicit mode raises ValueError
+            with pytest.raises(ValueError, match="Invalid transformation mode"):
+                scorer.generate_metadata(
+                    parsed[0],
+                    streamer="xQc",
+                    game="GTA 6",
+                    source_url="https://youtu.be/1",
+                    mode="turbo",
+                )
+            assert mock_client.generate.call_count == 2
+            assert "think" not in mock_client.generate.call_args_list[1].kwargs
 
 
