@@ -338,8 +338,9 @@ def _collect_temp_files_for_stream(
 
     if state is not None and state.audio_path is not None:
         audio_candidate = Path(state.audio_path)
-        if audio_candidate.is_file() and _is_within_directory(audio_candidate, temp_dir):
-            candidates.append(audio_candidate)
+        if _is_within_directory(audio_candidate, temp_dir):
+            if audio_candidate.is_file():
+                candidates.append(audio_candidate)
             if _is_safe_id_prefix(audio_candidate.stem):
                 video_ids.add(audio_candidate.stem)
 
@@ -392,11 +393,20 @@ def _collect_temp_files_for_stream(
 def _next_available_clip_index(
     config: Config, game: str, streamer: str, min_index: int = 1
 ) -> int:
-    """Find the lowest clip index >= min_index that does not overwrite an existing output MP4."""
+    """Find the lowest clip index >= min_index that does not overwrite an existing output MP4.
+
+    Terminates immediately if ``output.filename_template`` does not vary with ``{index}``.
+    """
     organizer = FileOrganizer(config)
     idx = max(1, int(min_index))
-    while organizer.get_clip_path(game=game, streamer=streamer, index=idx).exists():
-        idx += 1
+    path = organizer.get_clip_path(game=game, streamer=streamer, index=idx)
+    while path.exists():
+        next_idx = idx + 1
+        next_path = organizer.get_clip_path(game=game, streamer=streamer, index=next_idx)
+        if next_path == path:
+            break
+        idx = next_idx
+        path = next_path
     return idx
 
 
@@ -737,12 +747,19 @@ async def analyze_signals(url: str = "", audio_path: str = "") -> str:
             temp_dir = Path(config.get("general.temp_dir", "./temp"))
             temp_dir.mkdir(parents=True, exist_ok=True)
             scraper = ChatScraper()
-            video_id = (
+            raw_video_id = (
                 initial_state.stream_info.video_id
                 if (initial_state is not None and initial_state.stream_info.video_id)
-                else (_extract_youtube_id_from_url(target_url) or cache.get_cache_key(target_url))
+                else (_extract_youtube_id_from_url(target_url) or "")
+            )
+            video_id = (
+                raw_video_id
+                if _is_safe_id_prefix(raw_video_id)
+                else cache.get_cache_key(target_url)
             )
             chat_cache_path = temp_dir / f"{video_id}_chat.csv"
+            if not _is_within_directory(chat_cache_path, temp_dir):
+                chat_cache_path = temp_dir / f"{cache.get_cache_key(target_url)}_chat.csv"
 
             def _fetch_chat() -> Any:
                 cached = scraper.load_cache(chat_cache_path)
@@ -1051,11 +1068,14 @@ async def submit_highlights(url: str, highlights: str) -> str:
                 state.status >= PipelineStatus.ASSEMBLING
                 and state.status != PipelineStatus.FAILED
             ):
-                state.status = (
-                    PipelineStatus.SCORING
-                    if (state.analysis_complete or state.transcript is not None)
-                    else PipelineStatus.PENDING
-                )
+                if state.transcript is not None and state.analysis_complete:
+                    state.status = PipelineStatus.SCORING
+                elif state.transcript is not None:
+                    state.status = PipelineStatus.ANALYZING
+                elif state.audio_path is not None and Path(state.audio_path).is_file():
+                    state.status = PipelineStatus.TRANSCRIBING
+                else:
+                    state.status = PipelineStatus.PENDING
             cache.save_state(state)
 
         return _json_ok(

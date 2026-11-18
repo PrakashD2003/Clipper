@@ -1979,4 +1979,222 @@ async def test_submit_highlights_preserves_explicit_peak_time_for_quiet_highligh
     assert by_title["Loud Reaction"]["peak_time"] == 15.0
 
 
+def test_next_available_clip_index_terminates_for_constant_filename_template(
+    mcp_env: tuple[Config, StepCache, Path],
+) -> None:
+    """_next_available_clip_index must not hang when output.filename_template omits {index}."""
+    from streamclipper.output.organizer import FileOrganizer
+
+    config, _, _ = mcp_env
+    config._data["output"]["filename_template"] = "{game}_{streamer}"
+    organizer = FileOrganizer(config)
+    existing = organizer.get_clip_path(game="GTA 6", streamer="Tim", index=1)
+    existing.write_bytes(b"mp4")
+
+    # Without a fixed-point check this would loop infinitely under _get_gpu_lock()
+    idx = mcp_server._next_available_clip_index(config, "GTA 6", "Tim", min_index=1)
+    assert idx == 1
+
+
+@pytest.mark.asyncio
+async def test_analyze_signals_blocks_chat_cache_path_traversal(
+    mcp_env: tuple[Config, StepCache, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unsafe stream_info.video_id must never write *_chat.csv outside general.temp_dir."""
+    from streamclipper import pipeline as pipeline_mod
+    from streamclipper.pipeline import Pipeline
+
+    config, cache, _ = mcp_env
+    temp_dir = Path(config.get("general.temp_dir"))
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    wav_path = temp_dir / "safe_audio.wav"
+    wav_path.write_bytes(b"RIFF")
+
+    url = "https://www.twitch.tv/videos/traversal_test"
+    cache.save_state(
+        PipelineState(
+            stream_info=StreamInfo(
+                url=url,
+                title="Traversal Test",
+                platform=Platform.TWITCH,
+                streamer="Tim",
+                game="GTA 6",
+                duration_seconds=60,
+                video_id="../../escaped_chat",
+            ),
+            status=PipelineStatus.TRANSCRIBING,
+            audio_path=wav_path,
+        )
+    )
+
+    monkeypatch.setattr(mcp_server.LoudnessDetector, "detect", lambda self, p: [])
+    monkeypatch.setattr(
+        mcp_server.ChatScraper,
+        "scrape",
+        lambda self, u, d: pd.DataFrame(
+            [{"offset_seconds": 1.0, "author": "u", "message": "pog"}]
+        ),
+    )
+    monkeypatch.setattr(mcp_server.ChatVelocityAnalyzer, "analyze", lambda self, df: [])
+
+    res = _extract_json(await mcp.call_tool("analyze_signals", {"url": url}))
+    assert "error" not in res
+    escaped_target = (temp_dir / "../../escaped_chat_chat.csv").resolve()
+    assert not escaped_target.exists()
+    expected_safe_csv = temp_dir / f"{cache.get_cache_key(url)}_chat.csv"
+    assert expected_safe_csv.is_file()
+
+    # Also verify Pipeline._step_analyze enforces the same containment
+    expected_safe_csv.unlink()
+    monkeypatch.setattr(pipeline_mod.LoudnessDetector, "detect", lambda self, p: [])
+    monkeypatch.setattr(
+        pipeline_mod.ChatScraper,
+        "scrape",
+        lambda self, u, d: pd.DataFrame(
+            [{"offset_seconds": 1.0, "author": "u", "message": "pog"}]
+        ),
+    )
+    monkeypatch.setattr(pipeline_mod.ChatVelocityAnalyzer, "analyze", lambda self, df: [])
+
+    state = cache.load_state(url)
+    assert state is not None
+    pipe = Pipeline(config)
+    await pipe._step_analyze(state)
+    assert not escaped_target.exists()
+    assert expected_safe_csv.is_file()
+
+
+@pytest.mark.asyncio
+async def test_submit_highlights_empty_gates_status_reset_on_transcript_and_analysis(
+    mcp_env: tuple[Config, StepCache, Path],
+) -> None:
+    """Clearing highlights via submit_highlights([]) must never advance status past missing prerequisites."""
+    config, cache, _ = mcp_env
+    temp_dir = Path(config.get("general.temp_dir"))
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    wav_path = temp_dir / "gate1234567.wav"
+    wav_path.write_bytes(b"RIFF")
+
+    url = "https://www.youtube.com/watch?v=gate1234567"
+    info = StreamInfo(
+        url=url,
+        title="Gate Test",
+        platform=Platform.YOUTUBE,
+        streamer="Tim",
+        game="GTA 6",
+        duration_seconds=120,
+        video_id="gate1234567",
+    )
+
+    # Case 1: analysis_complete=True, transcript=None -> must reset to TRANSCRIBING (not SCORING)
+    cache.save_state(
+        PipelineState(
+            stream_info=info,
+            status=PipelineStatus.ASSEMBLING,
+            audio_path=wav_path,
+            transcript=None,
+            analysis_complete=True,
+        )
+    )
+    res1 = _extract_json(
+        await mcp.call_tool("submit_highlights", {"url": url, "highlights": "[]"})
+    )
+    assert res1["status"] == "transcribing"
+    reloaded1 = cache.load_state(url)
+    assert reloaded1 is not None
+    assert reloaded1.status is PipelineStatus.TRANSCRIBING
+
+    # Case 2: transcript present, analysis_complete=False -> must reset to ANALYZING (not SCORING)
+    transcript = TranscriptionResult(
+        segments=[
+            TranscriptSegment(
+                text="hello world",
+                start=0.0,
+                end=5.0,
+                words=[
+                    WordTimestamp(text="hello", start=0.0, end=2.0),
+                    WordTimestamp(text="world", start=2.1, end=5.0),
+                ],
+            )
+        ],
+        full_text="hello world",
+        language="en",
+    )
+    cache.save_state(
+        PipelineState(
+            stream_info=info,
+            status=PipelineStatus.ASSEMBLING,
+            audio_path=wav_path,
+            transcript=transcript,
+            analysis_complete=False,
+        )
+    )
+    res2 = _extract_json(
+        await mcp.call_tool("submit_highlights", {"url": url, "highlights": "[]"})
+    )
+    assert res2["status"] == "analyzing"
+    reloaded2 = cache.load_state(url)
+    assert reloaded2 is not None
+    assert reloaded2.status is PipelineStatus.ANALYZING
+
+    # Case 3: both transcript and analysis_complete -> resets cleanly to SCORING
+    cache.save_state(
+        PipelineState(
+            stream_info=info,
+            status=PipelineStatus.ASSEMBLING,
+            audio_path=wav_path,
+            transcript=transcript,
+            analysis_complete=True,
+        )
+    )
+    res3 = _extract_json(
+        await mcp.call_tool("submit_highlights", {"url": url, "highlights": "[]"})
+    )
+    assert res3["status"] == "scoring"
+    reloaded3 = cache.load_state(url)
+    assert reloaded3 is not None
+    assert reloaded3.status is PipelineStatus.SCORING
+
+
+@pytest.mark.asyncio
+async def test_cleanup_temp_removes_orphaned_segments_after_wav_already_deleted(
+    mcp_env: tuple[Config, StepCache, Path],
+) -> None:
+    """cleanup_temp must still remove orphaned segments/chat for non-YT streams after the WAV is gone."""
+    config, cache, _ = mcp_env
+    temp_dir = Path(config.get("general.temp_dir"))
+    seg_dir = temp_dir / "segments"
+    seg_dir.mkdir(parents=True, exist_ok=True)
+
+    twitch_url = "https://www.twitch.tv/videos/555444333"
+    missing_wav = temp_dir / "v555444333.wav"  # already deleted earlier
+    orphan_seg = seg_dir / "v555444333_10_40.mp4"
+    orphan_chat = temp_dir / "v555444333_chat.csv"
+    orphan_seg.write_bytes(b"mp4-bytes")
+    orphan_chat.write_text("offset_seconds,author,message\n", encoding="utf-8")
+
+    cache.save_state(
+        PipelineState(
+            stream_info=StreamInfo(
+                url=twitch_url,
+                title="Twitch VOD",
+                platform=Platform.TWITCH,
+                streamer="Tim",
+                game="GTA 6",
+                duration_seconds=3600,
+                video_id="",
+            ),
+            status=PipelineStatus.COMPLETE,
+            audio_path=missing_wav,
+        )
+    )
+
+    res = _extract_json(await mcp.call_tool("cleanup_temp", {"url": twitch_url}))
+    assert "error" not in res
+    assert res["deleted_count"] == 2
+    assert not orphan_seg.exists()
+    assert not orphan_chat.exists()
+
+
+
 

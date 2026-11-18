@@ -364,9 +364,19 @@ class Pipeline:
         )
 
         scraper = ChatScraper()
-        video_id = state.stream_info.video_id or self.cache.get_cache_key(
-            state.stream_info.url
-        )
+        raw_video_id = str(state.stream_info.video_id or "").strip()
+        if (
+            raw_video_id
+            and "/" not in raw_video_id
+            and "\\" not in raw_video_id
+            and ":" not in raw_video_id
+            and ".." not in raw_video_id
+        ):
+            video_id = _sanitize_path_segment(
+                raw_video_id, fallback=self.cache.get_cache_key(state.stream_info.url)
+            )
+        else:
+            video_id = self.cache.get_cache_key(state.stream_info.url)
         chat_cache_path = self.temp_dir / f"{video_id}_chat.csv"
 
         def _fetch_chat() -> Any:
