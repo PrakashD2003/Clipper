@@ -69,13 +69,13 @@ class StreamInfo(SerializableModel):
     def from_dict(cls, data: dict[str, Any]) -> "StreamInfo":
         return cls(
             url=data["url"],
-            title=data["title"],
+            title=data.get("title") or "",
             platform=Platform(data["platform"]),
-            streamer=data["streamer"],
-            game=data["game"],
-            duration_seconds=int(data["duration_seconds"]),
-            view_count=int(data.get("view_count", 0)),
-            video_id=data.get("video_id", ""),
+            streamer=data.get("streamer") or "",
+            game=data.get("game") or "",
+            duration_seconds=int(data.get("duration_seconds") or 0),
+            view_count=int(data.get("view_count") or 0),
+            video_id=data.get("video_id") or "",
         )
 
 
@@ -89,12 +89,15 @@ class TimeRange(SerializableModel):
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "TimeRange":
+        raw_meta = data.get("metadata")
         return cls(
             start=float(data["start"]),
             end=float(data["end"]),
-            score=float(data.get("score", 0.0)),
-            signal_type=SignalType(data.get("signal_type", SignalType.LOUDNESS.value)),
-            metadata=dict(data.get("metadata", {})),
+            score=float(data.get("score") if data.get("score") is not None else 0.0),
+            signal_type=SignalType(
+                data.get("signal_type") or SignalType.LOUDNESS.value
+            ),
+            metadata=dict(raw_meta) if isinstance(raw_meta, dict) else {},
         )
 
 
@@ -111,7 +114,9 @@ class WordTimestamp(SerializableModel):
             text=data["text"],
             start=float(data["start"]),
             end=float(data["end"]),
-            confidence=float(data.get("confidence", 0.0)),
+            confidence=float(
+                data.get("confidence") if data.get("confidence") is not None else 0.0
+            ),
         )
 
 
@@ -128,7 +133,7 @@ class TranscriptSegment(SerializableModel):
             text=data["text"],
             start=float(data["start"]),
             end=float(data["end"]),
-            words=[WordTimestamp.from_dict(w) for w in data.get("words", [])],
+            words=[WordTimestamp.from_dict(w) for w in (data.get("words") or [])],
         )
 
 
@@ -141,9 +146,11 @@ class TranscriptionResult(SerializableModel):
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "TranscriptionResult":
         return cls(
-            segments=[TranscriptSegment.from_dict(s) for s in data.get("segments", [])],
-            full_text=data.get("full_text", ""),
-            language=data.get("language", "en"),
+            segments=[
+                TranscriptSegment.from_dict(s) for s in (data.get("segments") or [])
+            ],
+            full_text=data.get("full_text") or "",
+            language=data.get("language") or "en",
         )
 
 
@@ -160,6 +167,14 @@ class Highlight(SerializableModel):
     final_score: float = 0.0      # weighted composite score
     transcript_chunk: str = ""    # the spoken words in this range
     word_timestamps: list[WordTimestamp] = field(default_factory=list)
+    # YPP Transformative Narrative fields (Phase 3+, default-valued for backward compat)
+    moment_type: str = "hype"          # funny | fail | graphics_detail | hype | clutch | chat_chaos | lore_secret | analysis
+    narration_intro: str = ""          # 3-4s tone-matched spoken setup (10-15 words)
+    narration_outro: str = ""          # 3-4s tone-matched spoken punchline / callout / takeaway (10-15 words)
+    context_badge: str = ""            # Short adaptive pill (e.g., "🎨 Insane Detail", "💀 Instant Karma", "🔥 Clutch Escape")
+    peak_time: float = 0.0             # Exact second of loudness peak for 1.2x punch-in zoom
+    chat_burst: list[dict[str, Any]] = field(default_factory=list)  # Up to 5 viewer chat messages in range
+    sub_clips: list[dict[str, Any]] = field(default_factory=list)   # Optional [{"start": s, "end": e, "label": "Setup"}]
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Highlight":
@@ -167,16 +182,31 @@ class Highlight(SerializableModel):
             start=float(data["start"]),
             end=float(data["end"]),
             score=float(data["score"]),
-            title=data["title"],
-            reason=data["reason"],
-            best_quote=data.get("best_quote", ""),
-            loudness_score=float(data.get("loudness_score", 0.0)),
-            chat_score=float(data.get("chat_score", 0.0)),
-            final_score=float(data.get("final_score", 0.0)),
-            transcript_chunk=data.get("transcript_chunk", ""),
+            title=data.get("title") or "",
+            reason=data.get("reason") or "",
+            best_quote=data.get("best_quote") or "",
+            loudness_score=float(
+                data.get("loudness_score") if data.get("loudness_score") is not None else 0.0
+            ),
+            chat_score=float(
+                data.get("chat_score") if data.get("chat_score") is not None else 0.0
+            ),
+            final_score=float(
+                data.get("final_score") if data.get("final_score") is not None else 0.0
+            ),
+            transcript_chunk=data.get("transcript_chunk") or "",
             word_timestamps=[
-                WordTimestamp.from_dict(w) for w in data.get("word_timestamps", [])
+                WordTimestamp.from_dict(w) for w in (data.get("word_timestamps") or [])
             ],
+            moment_type=data.get("moment_type") or "hype",
+            narration_intro=data.get("narration_intro") or "",
+            narration_outro=data.get("narration_outro") or "",
+            context_badge=data.get("context_badge") or "",
+            peak_time=float(
+                data.get("peak_time") if data.get("peak_time") is not None else 0.0
+            ),
+            chat_burst=list(data.get("chat_burst") or []),
+            sub_clips=list(data.get("sub_clips") or []),
         )
 
 
@@ -195,7 +225,9 @@ class FacecamRegion(SerializableModel):
             y=int(data["y"]),
             w=int(data["w"]),
             h=int(data["h"]),
-            confidence=float(data.get("confidence", 0.0)),
+            confidence=float(
+                data.get("confidence") if data.get("confidence") is not None else 0.0
+            ),
         )
 
 
@@ -210,34 +242,46 @@ class ClipMetadata(SerializableModel):
     clip_start: float
     clip_end: float
     highlight_score: float
+    # YPP Transformative Narrative fields (Phase 3+, default-valued for backward compat)
+    moment_type: str = "hype"
+    narration_intro: str = ""
+    narration_outro: str = ""
+    context_badge: str = ""
+    transformation_mode: str = "narrative"
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ClipMetadata":
         return cls(
-            hook_title=data["hook_title"],
-            caption=data["caption"],
-            hashtags=list(data.get("hashtags", [])),
-            streamer=data["streamer"],
-            game=data["game"],
-            source_url=data["source_url"],
+            hook_title=data.get("hook_title") or "",
+            caption=data.get("caption") or "",
+            hashtags=list(data.get("hashtags") or []),
+            streamer=data.get("streamer") or "",
+            game=data.get("game") or "",
+            source_url=data.get("source_url") or "",
             clip_start=float(data["clip_start"]),
             clip_end=float(data["clip_end"]),
             highlight_score=float(data["highlight_score"]),
+            moment_type=data.get("moment_type") or "hype",
+            narration_intro=data.get("narration_intro") or "",
+            narration_outro=data.get("narration_outro") or "",
+            context_badge=data.get("context_badge") or "",
+            transformation_mode=data.get("transformation_mode") or "narrative",
         )
 
 
 @dataclass
 class ClipResult(SerializableModel):
     video_path: Path
-    metadata_path: Path
+    metadata_path: Optional[Path]
     metadata: ClipMetadata
     duration_seconds: float
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ClipResult":
+        raw_meta_path = data.get("metadata_path")
         return cls(
             video_path=Path(data["video_path"]),
-            metadata_path=Path(data["metadata_path"]),
+            metadata_path=Path(raw_meta_path) if raw_meta_path else None,
             metadata=ClipMetadata.from_dict(data["metadata"]),
             duration_seconds=float(data["duration_seconds"]),
         )
@@ -256,12 +300,15 @@ class PipelineState(SerializableModel):
     selected_highlights: list[Highlight] = field(default_factory=list)
     clips: list[ClipResult] = field(default_factory=list)
     cache_dir: Optional[Path] = None
+    analysis_complete: bool = False
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "PipelineState":
         return cls(
             stream_info=StreamInfo.from_dict(data["stream_info"]),
-            status=PipelineStatus(int(data.get("status", PipelineStatus.PENDING))),
+            status=PipelineStatus(
+                int(data.get("status") if data.get("status") is not None else PipelineStatus.PENDING)
+            ),
             audio_path=Path(data["audio_path"]) if data.get("audio_path") else None,
             transcript=(
                 TranscriptionResult.from_dict(data["transcript"])
@@ -269,17 +316,18 @@ class PipelineState(SerializableModel):
                 else None
             ),
             loudness_spikes=[
-                TimeRange.from_dict(s) for s in data.get("loudness_spikes", [])
+                TimeRange.from_dict(s) for s in (data.get("loudness_spikes") or [])
             ],
             chat_spikes=[
-                TimeRange.from_dict(s) for s in data.get("chat_spikes", [])
+                TimeRange.from_dict(s) for s in (data.get("chat_spikes") or [])
             ],
             highlights=[
-                Highlight.from_dict(h) for h in data.get("highlights", [])
+                Highlight.from_dict(h) for h in (data.get("highlights") or [])
             ],
             selected_highlights=[
-                Highlight.from_dict(h) for h in data.get("selected_highlights", [])
+                Highlight.from_dict(h) for h in (data.get("selected_highlights") or [])
             ],
-            clips=[ClipResult.from_dict(c) for c in data.get("clips", [])],
+            clips=[ClipResult.from_dict(c) for c in (data.get("clips") or [])],
             cache_dir=Path(data["cache_dir"]) if data.get("cache_dir") else None,
+            analysis_complete=bool(data.get("analysis_complete", False)),
         )

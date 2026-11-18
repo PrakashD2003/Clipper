@@ -1,6 +1,7 @@
 """Step-level caching for pipeline resume capability."""
 import hashlib
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -41,6 +42,7 @@ class StepCache:
             "status": int(state.status),
             "audio_path": str(state.audio_path) if state.audio_path else None,
             "has_transcript": state.transcript is not None,
+            "analysis_complete": bool(state.analysis_complete),
             "loudness_spikes": [s.to_dict() for s in state.loudness_spikes],
             "chat_spikes": [s.to_dict() for s in state.chat_spikes],
             "highlights": [h.to_dict() for h in state.highlights],
@@ -70,18 +72,19 @@ class StepCache:
             stream_info=StreamInfo.from_dict(data["stream_info"]),
             status=PipelineStatus(int(data["status"])),
             loudness_spikes=[
-                TimeRange.from_dict(s) for s in data.get("loudness_spikes", [])
+                TimeRange.from_dict(s) for s in (data.get("loudness_spikes") or [])
             ],
             chat_spikes=[
-                TimeRange.from_dict(s) for s in data.get("chat_spikes", [])
+                TimeRange.from_dict(s) for s in (data.get("chat_spikes") or [])
             ],
             highlights=[
-                Highlight.from_dict(h) for h in data.get("highlights", [])
+                Highlight.from_dict(h) for h in (data.get("highlights") or [])
             ],
             selected_highlights=[
-                Highlight.from_dict(h) for h in data.get("selected_highlights", [])
+                Highlight.from_dict(h) for h in (data.get("selected_highlights") or [])
             ],
-            clips=[ClipResult.from_dict(c) for c in data.get("clips", [])],
+            clips=[ClipResult.from_dict(c) for c in (data.get("clips") or [])],
+            analysis_complete=bool(data.get("analysis_complete", False)),
         )
         if data.get("audio_path"):
             state.audio_path = Path(data["audio_path"])
@@ -116,12 +119,32 @@ class StepCache:
                     PipelineState(
                         stream_info=StreamInfo.from_dict(data["stream_info"]),
                         status=PipelineStatus(int(data["status"])),
+                        audio_path=Path(data["audio_path"]) if data.get("audio_path") else None,
                         highlights=[
-                            Highlight.from_dict(h) for h in data.get("highlights", [])
+                            Highlight.from_dict(h) for h in (data.get("highlights") or [])
                         ],
-                        clips=[ClipResult.from_dict(c) for c in data.get("clips", [])],
+                        clips=[ClipResult.from_dict(c) for c in (data.get("clips") or [])],
+                        analysis_complete=bool(data.get("analysis_complete", False)),
                     )
                 )
             except (json.JSONDecodeError, KeyError, ValueError, TypeError):
                 continue
         return states
+
+    def find_by_audio_path(self, audio_path: Path | str) -> PipelineState | None:
+        """Resolve a full cached PipelineState (with transcript & spikes) by its audio_path."""
+        target = Path(audio_path)
+        try:
+            target_norm = os.path.normcase(str(target.resolve()))
+        except OSError:
+            target_norm = os.path.normcase(str(target))
+        for state in self.list_all():
+            if state.audio_path is None:
+                continue
+            try:
+                candidate_norm = os.path.normcase(str(state.audio_path.resolve()))
+            except OSError:
+                candidate_norm = os.path.normcase(str(state.audio_path))
+            if state.audio_path == target or candidate_norm == target_norm:
+                return self.load_state(state.stream_info.url)
+        return None

@@ -1,0 +1,29 @@
+Write a short spoken INTRO and OUTRO voiceover (plus a 2-4 word on-screen badge) to frame a gaming stream clip so it feels like an original creator-led Short — NEVER robotic or generic clickbait.
+
+MATCH THE TONE TO `moment_type`:
+- funny / fail: witty, deadpan setup -> comedic punchline outro (badge e.g. "💀 Instant Karma")
+- graphics_detail: observational curiosity setup pointing viewers to what to watch -> detail appreciation outro (badge e.g. "🎨 Insane Detail")
+- hype / clutch: stakes-building setup -> payoff reaction outro (badge e.g. "🔥 Clutch Escape")
+- chat_chaos: streamer-vs-chat banter setup -> chat reaction punchline (badge e.g. "💬 Chat Trolled Him")
+- lore_secret / analysis: intriguing context setup -> mechanic or easter-egg takeaway (badge e.g. "🧠 Hidden Detail")
+
+STRICT RULES:
+1. `narration_intro`: 10-15 words (~3-4 seconds spoken). Give context or tell the viewer what to watch for WITHOUT spoiling the punchline.
+2. `narration_outro`: 10-15 words (~3-4 seconds spoken). Land the joke, point out a subtle visual/audio detail, or sum up chat's reaction.
+3. NEVER use generic filler like "You won't believe what happens next" or "Like and subscribe".
+4. Sound like a real gaming creator talking to friends.
+
+INPUT:
+- Streamer: {streamer}
+- Game: {game}
+- Moment type: {moment_type}
+- Hook title: "{hook_title}"
+- What happens: {description}
+- Key quote: "{quote}"
+
+OUTPUT (strict JSON):
+{{
+  "narration_intro": "<10-15 words>",
+  "narration_outro": "<10-15 words>",
+  "context_badge": "<2-4 words>"
+}}

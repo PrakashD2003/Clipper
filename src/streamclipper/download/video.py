@@ -1,7 +1,9 @@
 """Selective video segment downloader using yt-dlp download_ranges."""
 from __future__ import annotations
 
+import json
 import logging
+import math
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +12,7 @@ import yt_dlp
 logger = logging.getLogger(__name__)
 
 VIDEO_FORMAT_1080P = "bestvideo[height<=1080]+bestaudio/best[height<=1080]"
+_ALT_VIDEO_EXTENSIONS = (".webm", ".mkv", ".mov", ".m4v", ".ts")
 
 
 class VideoDownloadError(RuntimeError):
@@ -29,10 +32,23 @@ def _validate_range(
     buffer_seconds: float,
 ) -> tuple[float, float, float]:
     """Validate segment bounds and buffer duration."""
+    if (
+        isinstance(start_seconds, bool)
+        or isinstance(end_seconds, bool)
+        or isinstance(buffer_seconds, bool)
+    ):
+        raise ValueError("Segment timestamps and buffer_seconds must be numeric, not bool.")
+
     start = float(start_seconds)
     end = float(end_seconds)
     buf = float(buffer_seconds)
 
+    if not math.isfinite(start):
+        raise ValueError(f"start_seconds must be finite, got {start_seconds!r}")
+    if not math.isfinite(end):
+        raise ValueError(f"end_seconds must be finite, got {end_seconds!r}")
+    if not math.isfinite(buf):
+        raise ValueError(f"buffer_seconds must be finite, got {buffer_seconds!r}")
     if start < 0.0:
         raise ValueError(f"start_seconds must be >= 0.0, got {start_seconds!r}")
     if end <= start:
@@ -141,6 +157,23 @@ def _extract_video_id(url: str) -> str:
     return str(info["id"])
 
 
+def _segment_sidecar_matches(
+    sidecar_path: Path, start_seconds: float, end_seconds: float, buffer_seconds: float
+) -> bool:
+    """Return True if sidecar is absent (legacy cache) or matches requested bounds & buffer."""
+    if not sidecar_path.is_file():
+        return True
+    try:
+        meta = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        return (
+            abs(float(meta["start_seconds"]) - start_seconds) < 1e-3
+            and abs(float(meta["end_seconds"]) - end_seconds) < 1e-3
+            and abs(float(meta["buffer_seconds"]) - buffer_seconds) < 1e-3
+        )
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError, OSError):
+        return False
+
+
 def _download_segment_with_id(
     url: str,
     video_id: str,
@@ -154,9 +187,32 @@ def _download_segment_with_id(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     output_path = out_dir / f"{video_id}_{int(start_seconds)}_{int(end_seconds)}.mp4"
-    if output_path.is_file():
-        logger.info("Cached video segment found, skipping download: %s", output_path)
-        return output_path
+    sidecar_path = output_path.with_suffix(".meta.json")
+    sidecar_matches = _segment_sidecar_matches(
+        sidecar_path, start_seconds, end_seconds, buffer_seconds
+    )
+    if sidecar_matches:
+        if output_path.is_file():
+            logger.info("Cached video segment found, skipping download: %s", output_path)
+            return output_path
+        if sidecar_path.is_file():
+            for alt_ext in _ALT_VIDEO_EXTENSIONS:
+                alt_cached = output_path.with_suffix(alt_ext)
+                if alt_cached.is_file():
+                    logger.info(
+                        "Cached alternate-container video segment found, skipping download: %s",
+                        alt_cached,
+                    )
+                    return alt_cached
+    else:
+        # Sidecar metadata mismatched requested bounds/buffer: remove stale files before re-downloading
+        # so an old .mp4 cannot mask a newly downloaded alternate container (.webm/.mkv).
+        for stale in [output_path, *(output_path.with_suffix(ext) for ext in _ALT_VIDEO_EXTENSIONS)]:
+            if stale.is_file():
+                try:
+                    stale.unlink()
+                except OSError:
+                    pass
 
     actual_start = max(0.0, start_seconds - buffer_seconds)
     actual_end = end_seconds + buffer_seconds
@@ -164,6 +220,12 @@ def _download_segment_with_id(
     ydl_opts: dict[str, Any] = {
         "format": VIDEO_FORMAT_1080P,
         "merge_output_format": "mp4",
+        "postprocessors": [
+            {
+                "key": "FFmpegVideoRemuxer",
+                "preferedformat": "mp4",
+            }
+        ],
         "outtmpl": str(output_path.with_suffix(".%(ext)s")),
         "download_ranges": yt_dlp.utils.download_range_func(
             None, [(actual_start, actual_end)]
@@ -194,7 +256,35 @@ def _download_segment_with_id(
     ) as exc:
         raise _classify_video_error(url, exc) from exc
 
-    return output_path
+    resolved_path = output_path
+    if not resolved_path.is_file():
+        for alt_ext in _ALT_VIDEO_EXTENSIONS:
+            candidate = output_path.with_suffix(alt_ext)
+            if candidate.is_file():
+                logger.warning(
+                    "yt-dlp wrote alternate container %s instead of %s; returning actual file.",
+                    candidate.name,
+                    output_path.name,
+                )
+                resolved_path = candidate
+                break
+
+    if resolved_path.is_file():
+        try:
+            sidecar_path.write_text(
+                json.dumps(
+                    {
+                        "start_seconds": round(start_seconds, 3),
+                        "end_seconds": round(end_seconds, 3),
+                        "buffer_seconds": round(buffer_seconds, 3),
+                    }
+                ),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+
+    return resolved_path
 
 
 def download_segment(
@@ -238,8 +328,8 @@ def download_multiple_segments(
     downloading dead air between beats.
     """
     clean_url = _validate_url(url)
-    if float(buffer_seconds) < 0.0:
-        raise ValueError(f"buffer_seconds must be >= 0.0, got {buffer_seconds!r}")
+    if isinstance(buffer_seconds, bool) or not math.isfinite(float(buffer_seconds)) or float(buffer_seconds) < 0.0:
+        raise ValueError(f"buffer_seconds must be a finite number >= 0.0, got {buffer_seconds!r}")
 
     if not segments:
         return []

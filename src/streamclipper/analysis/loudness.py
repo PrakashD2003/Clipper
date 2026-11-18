@@ -94,7 +94,10 @@ class LoudnessDetector:
             return []
 
         threshold = mean_db + self.threshold_std * std_db
-        peaks, _ = find_peaks(rms_db, height=threshold)
+        sentinel = float(np.min(rms_db)) - 1.0
+        padded = np.concatenate(([sentinel], rms_db, [sentinel]))
+        raw_peaks, _ = find_peaks(padded, height=threshold)
+        peaks = raw_peaks - 1
         if len(peaks) == 0:
             return []
 
@@ -107,9 +110,9 @@ class LoudnessDetector:
             peak_db = float(rms_db[idx])
             above = peak_db - threshold
             if max_above > 1e-6:
-                score = round(min(10.0, max(0.0, (above / max_above) * 10.0)), 2)
+                score = round(min(10.0, max(5.0, 5.0 + (above / max_above) * 5.0)), 2)
             else:
-                score = 5.0
+                score = 7.5
 
             left_idx = idx
             while left_idx > 0 and rms_db[left_idx - 1] >= threshold:

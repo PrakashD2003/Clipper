@@ -1,12 +1,22 @@
 """Configuration loading with defaults, validation, merging, and dynamic hardware auto-tuning."""
 from dataclasses import dataclass
+import math
 from pathlib import Path
 from typing import Any
 import subprocess
 import yaml
 
-DEFAULT_CONFIG_PATH = Path(__file__).parent.parent.parent / "config.default.yaml"
+_REPO_DEFAULT_CONFIG_PATH = Path(__file__).parent.parent.parent / "config.default.yaml"
+_PACKAGE_DEFAULT_CONFIG_PATH = Path(__file__).parent / "config.default.yaml"
+DEFAULT_CONFIG_PATH = (
+    _REPO_DEFAULT_CONFIG_PATH
+    if _REPO_DEFAULT_CONFIG_PATH.is_file()
+    else _PACKAGE_DEFAULT_CONFIG_PATH
+)
 USER_CONFIG_PATH = Path("config.yaml")
+
+VALID_WEIGHT_KEYS = frozenset({"loudness", "chat_velocity", "llm_score"})
+VALID_TRANSFORMATION_MODES = frozenset({"auto", "narrative", "story", "raw"})
 
 
 @dataclass(frozen=True)
@@ -191,7 +201,16 @@ class Config:
         config_path = Path(user_config_path) if user_config_path is not None else USER_CONFIG_PATH
         if config_path.exists():
             with open(config_path, encoding="utf-8") as f:
-                user_data = yaml.safe_load(f) or {}
+                loaded_user = yaml.safe_load(f)
+            if loaded_user is None:
+                user_data: dict[str, Any] = {}
+            elif isinstance(loaded_user, dict):
+                user_data = loaded_user
+            else:
+                raise ValueError(
+                    f"User config file '{config_path}' must contain a YAML mapping, "
+                    f"got {type(loaded_user).__name__}"
+                )
             self._data = self._deep_merge(self._data, user_data)
 
         self._raw_auto_keys = {
@@ -238,17 +257,58 @@ class Config:
     def _validate(self) -> None:
         """Validate critical config values."""
         weights = self.get("analysis.weights", {})
-        total = sum(weights.values())
+        if not isinstance(weights, dict) or not weights:
+            raise ValueError("analysis.weights must be a non-empty mapping")
+
+        unknown_keys = set(weights.keys()) - VALID_WEIGHT_KEYS
+        if unknown_keys:
+            raise ValueError(
+                f"Unknown analysis.weights keys: {sorted(unknown_keys)}; "
+                f"expected subset of {sorted(VALID_WEIGHT_KEYS)}"
+            )
+        missing_keys = VALID_WEIGHT_KEYS - set(weights.keys())
+        if missing_keys:
+            raise ValueError(
+                f"Missing required analysis.weights keys: {sorted(missing_keys)}"
+            )
+
+        numeric_weights: list[float] = []
+        for key, raw_val in weights.items():
+            if isinstance(raw_val, bool) or not isinstance(raw_val, (int, float)):
+                raise ValueError(
+                    f"analysis.weights.{key} must be a non-negative number, got {raw_val!r}"
+                )
+            val = float(raw_val)
+            if not math.isfinite(val) or val < 0.0:
+                raise ValueError(
+                    f"analysis.weights.{key} must be a finite non-negative number, got {raw_val!r}"
+                )
+            numeric_weights.append(val)
+
+        total = sum(numeric_weights)
         if abs(total - 1.0) > 0.01:
             raise ValueError(f"Signal weights must sum to 1.0, got {total}")
 
         resolution = self.get("video.resolution", [1080, 1920])
-        if not isinstance(resolution, (list, tuple)) or len(resolution) != 2:
-            raise ValueError("video.resolution must be [width, height]")
+        if (
+            not isinstance(resolution, (list, tuple))
+            or len(resolution) != 2
+            or any(
+                isinstance(dim, bool) or not isinstance(dim, int) or dim <= 0
+                for dim in resolution
+            )
+        ):
+            raise ValueError("video.resolution must be [width, height] of positive integers")
 
         batch_size = self.get("transcription.batch_size", 4)
         if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
             raise ValueError(f"transcription.batch_size must be a positive int, got {batch_size!r}")
+
+        mode = self.get("transformation.mode", "auto")
+        if not isinstance(mode, str) or mode.strip().lower() not in VALID_TRANSFORMATION_MODES:
+            raise ValueError(
+                f"transformation.mode must be one of {sorted(VALID_TRANSFORMATION_MODES)}, got {mode!r}"
+            )
 
     @property
     def data(self) -> dict:

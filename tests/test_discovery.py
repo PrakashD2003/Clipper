@@ -310,3 +310,32 @@ class TestFilterStreams:
             "https://www.youtube.com/watch?v=creator_only",
             "https://www.youtube.com/watch?v=unknown_host",
         ]
+
+    def test_discover_max_streams_override_exceeds_config_default(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        cfg = _make_config(tmp_path, {"max_streams": 5, "min_viewers": 1000})
+        discovery = YouTubeDiscovery(cfg)
+
+        entries = [_make_entry(f"vid_{i:02d}", view_count=100_000 - i * 100) for i in range(15)]
+        _, captured_queries = _patch_yt_dlp_search(monkeypatch, default_entries=entries)
+
+        streams = discovery.discover(game="Valorant", max_streams=12)
+        assert captured_queries == ["ytsearch24:Valorant live stream"]
+        assert len(streams) == 12
+
+    def test_filter_streams_handles_non_finite_and_float_string_metadata(
+        self, tmp_path: Path
+    ) -> None:
+        cfg = _make_config(tmp_path, {"max_streams": 5, "min_viewers": 1000})
+        discovery = YouTubeDiscovery(cfg)
+
+        entries = [
+            _make_entry("inf_dur", duration=float("inf"), view_count=5000),  # type: ignore[arg-type]
+            _make_entry("nan_views", duration=7200, view_count=float("nan")),  # type: ignore[arg-type]
+            _make_entry("float_str", duration="7200.5", view_count="2500.0"),  # type: ignore[arg-type]
+        ]
+        streams = discovery._filter_streams(entries, game="GTA 6")
+        assert [s.video_id for s in streams] == ["float_str"]
+        assert streams[0].duration_seconds == 7200
+        assert streams[0].view_count == 2500

@@ -338,3 +338,24 @@ class TestLoudnessMergeAndEdgeCases:
         assert restored == spikes[0]
         assert restored.signal_type == SignalType.LOUDNESS
         assert restored.metadata["peak_time"] == spikes[0].metadata["peak_time"]
+
+    def test_detects_boundary_burst_at_frame_zero_and_scales_secondary_spike(
+        self, tmp_path: Path
+    ):
+        """Endpoint padding catches frame-0 bursts, and secondary spikes keep usable >=5.0 scores."""
+        wav_path = _write_synthetic_wav(
+            tmp_path / "boundary_and_scale.wav",
+            duration_seconds=90.0,
+            bursts=[
+                (0.0, 1.8, 0.95),   # frame 0 boundary burst
+                (50.0, 52.0, 0.45), # moderate secondary burst
+            ],
+        )
+        detector = LoudnessDetector(_make_config(tmp_path, threshold_std=2.0))
+        spikes = detector.detect(wav_path)
+
+        assert len(spikes) == 2
+        assert spikes[0].start == 0.0
+        assert spikes[0].metadata["peak_time"] == 0.0
+        assert spikes[0].score == 10.0
+        assert 5.0 <= spikes[1].score < 10.0

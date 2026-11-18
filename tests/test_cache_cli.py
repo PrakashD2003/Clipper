@@ -326,6 +326,26 @@ class TestStepCache:
         assert len(remaining) == 1
         assert remaining[0].stream_info.url == url_2
 
+    def test_find_by_audio_path_resolves_full_state_and_analysis_complete(
+        self, tmp_path: Path
+    ) -> None:
+        cache = StepCache(_make_config(tmp_path))
+        wav_path = tmp_path / "temp" / "gta6_test.wav"
+        wav_path.parent.mkdir(parents=True, exist_ok=True)
+        wav_path.write_bytes(b"RIFF")
+
+        state = _make_full_pipeline_state(status=PipelineStatus.SCORING)
+        state.audio_path = wav_path
+        state.analysis_complete = True
+        cache.save_state(state)
+
+        found = cache.find_by_audio_path(wav_path)
+        assert found is not None
+        assert found.stream_info.url == state.stream_info.url
+        assert found.transcript is not None
+        assert found.analysis_complete is True
+        assert cache.find_by_audio_path(tmp_path / "missing.wav") is None
+
 
 # ---------------------------------------------------------------------------
 # Click CLI Tests
@@ -359,6 +379,20 @@ class TestCLI:
         )
         monkeypatch.setattr(cli_mod, "console", Console(width=160, force_terminal=False))
 
+        captured_calls: list[dict] = []
+
+        class _StubPipeline:
+            def __init__(self, config: Config) -> None:
+                self.config = config
+
+            async def process_stream(self, **kwargs) -> list[ClipResult]:
+                captured_calls.append(kwargs)
+                return []
+
+        import streamclipper.pipeline as pipeline_mod
+
+        monkeypatch.setattr(pipeline_mod, "Pipeline", _StubPipeline)
+
         runner = CliRunner()
         result = runner.invoke(
             cli,
@@ -379,7 +413,12 @@ class TestCLI:
         )
         assert result.exit_code == 0
         assert "https://youtube.com/watch?v=demo123" in result.output
-        assert "Phase 3" in result.output
+        assert len(captured_calls) == 1
+        assert captured_calls[0]["url"] == "https://youtube.com/watch?v=demo123"
+        assert captured_calls[0]["max_clips"] == 5
+        assert captured_calls[0]["game"] == "GTA 6"
+        assert captured_calls[0]["streamer"] == "Kai"
+        assert captured_calls[0]["interactive"] is False
 
     def test_auto_command_uses_config_and_game_override(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -390,6 +429,20 @@ class TestCLI:
             encoding="utf-8",
         )
         monkeypatch.setattr(cli_mod, "console", Console(width=160, force_terminal=False))
+
+        discovered_games: list[str | None] = []
+
+        class _StubDiscovery:
+            def __init__(self, config: Config) -> None:
+                self.config = config
+
+            def discover(self, game: str | None = None) -> list[StreamInfo]:
+                discovered_games.append(game)
+                return []
+
+        import streamclipper.discovery.youtube as yt_mod
+
+        monkeypatch.setattr(yt_mod, "YouTubeDiscovery", _StubDiscovery)
 
         runner = CliRunner()
         res_default = runner.invoke(cli, ["--config", str(cfg_file), "auto"])
@@ -402,6 +455,7 @@ class TestCLI:
         )
         assert res_override.exit_code == 0
         assert "Elden Ring" in res_override.output
+        assert discovered_games == ["GTA 6", "Elden Ring"]
 
     def test_setup_renders_dependencies_gpu_and_hardware_profile_with_overrides(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -543,3 +597,23 @@ class TestCLI:
         assert "analyzing" in populated_res.output
         assert "https://youtube.com/watch?v=vid2" in populated_res.output
         assert "complete" in populated_res.output
+
+    def test_missing_config_path_fails_cleanly_and_verbose_sets_debug_logging(
+        self, tmp_path: Path
+    ) -> None:
+        import logging
+
+        runner = CliRunner()
+        bad_res = runner.invoke(
+            cli, ["--config", str(tmp_path / "does_not_exist.yaml"), "status"]
+        )
+        assert bad_res.exit_code != 0
+
+        cfg_file = tmp_path / "cfg.yaml"
+        cfg_file.write_text(
+            yaml.safe_dump({"general": {"cache_dir": str(tmp_path / ".cache")}}),
+            encoding="utf-8",
+        )
+        ok_res = runner.invoke(cli, ["--config", str(cfg_file), "--verbose", "status"])
+        assert ok_res.exit_code == 0
+        assert logging.getLogger("streamclipper").level == logging.DEBUG

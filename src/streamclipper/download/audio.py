@@ -1,8 +1,11 @@
 """Audio-only stream downloader producing 16kHz mono PCM WAV files via yt-dlp."""
 from __future__ import annotations
 
+import json
 import logging
+import math
 from pathlib import Path
+import re
 from typing import Any, Callable
 
 import yt_dlp
@@ -10,6 +13,29 @@ import yt_dlp
 from ..models import Platform, StreamInfo
 
 logger = logging.getLogger(__name__)
+
+_YOUTUBE_ID_RE = re.compile(
+    r"(?:youtube\.com/(?:watch\?(?:.*&)?v=|live/|shorts/|embed/)|youtu\.be/)([A-Za-z0-9_-]{11})(?:[?&#/]|$)"
+)
+
+
+def _safe_non_negative_int(value: Any) -> int:
+    """Safely coerce a metadata field to a non-negative int, returning 0 on invalid/non-finite inputs."""
+    if value is None or isinstance(value, bool):
+        return 0
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return 0
+    if not math.isfinite(numeric) or numeric < 0.0:
+        return 0
+    return int(numeric)
+
+
+def _extract_youtube_id_from_url(url: str) -> str | None:
+    """Extract an 11-character YouTube video ID locally without network calls, if recognizable."""
+    match = _YOUTUBE_ID_RE.search(url)
+    return match.group(1) if match else None
 
 
 class AudioDownloadError(RuntimeError):
@@ -119,11 +145,8 @@ def _info_dict_to_stream_info(info: dict[str, Any], url: str) -> StreamInfo:
     )
     game = str(info.get("game") or "")
 
-    duration_raw = info.get("duration")
-    duration_seconds = int(duration_raw) if duration_raw is not None else 0
-
-    views_raw = info.get("view_count")
-    view_count = int(views_raw) if views_raw is not None else 0
+    duration_seconds = _safe_non_negative_int(info.get("duration"))
+    view_count = _safe_non_negative_int(info.get("view_count"))
 
     video_id = str(info.get("id") or "")
     platform = _detect_platform(info, url)
@@ -176,13 +199,38 @@ def download_audio(
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Offline cache fast-path: if local YouTube ID matches both cached WAV and sidecar StreamInfo,
+    # avoid a redundant live yt-dlp metadata network call.
+    local_vid = _extract_youtube_id_from_url(clean_url)
+    if local_vid:
+        cached_wav = out_dir / f"{local_vid}.wav"
+        cached_meta = out_dir / f"{local_vid}.info.json"
+        if cached_wav.is_file() and cached_meta.is_file():
+            try:
+                loaded_info = StreamInfo.from_dict(
+                    json.loads(cached_meta.read_text(encoding="utf-8"))
+                )
+                loaded_info.url = clean_url
+                logger.info(
+                    "Cached 16kHz WAV audio + metadata found, skipping network call: %s",
+                    cached_wav,
+                )
+                return cached_wav, loaded_info
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError, OSError):
+                pass
+
     stream_info = extract_stream_info(clean_url)
     if not stream_info.video_id:
         raise AudioDownloadError(f"Could not determine video ID for URL: {clean_url}")
 
     audio_path = out_dir / f"{stream_info.video_id}.wav"
+    meta_sidecar = out_dir / f"{stream_info.video_id}.info.json"
     if audio_path.is_file():
         logger.info("Cached 16kHz WAV audio found, skipping download: %s", audio_path)
+        try:
+            meta_sidecar.write_text(stream_info.to_json(), encoding="utf-8")
+        except OSError:
+            pass
         return audio_path, stream_info
 
     ydl_opts: dict[str, Any] = {
@@ -214,5 +262,11 @@ def download_audio(
         yt_dlp.utils.PostProcessingError,
     ) as exc:
         raise _classify_download_error(clean_url, exc) from exc
+
+    if audio_path.is_file():
+        try:
+            meta_sidecar.write_text(stream_info.to_json(), encoding="utf-8")
+        except OSError:
+            pass
 
     return audio_path, stream_info

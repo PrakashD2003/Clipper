@@ -1,8 +1,8 @@
 # StreamClipper — Agent Execution Prompts & Audit Logging Runbook (v2.2 — Patched + Auto-Hardware + YPP Transformative Engine)
 
 > **Current Milestone Status:**  
-> **Phase 1 (`phase-1-foundation`: Packages `1.1`, `1.2`, `1.3` + Review `1.R`) is ✅ COMPLETE (`36/36` unit tests passing) and MERGED into `main`.**  
-> **Start execution at Prompt 2.1 (`phase-2-core-pipeline`).** Every prompt below enforces `AGENTS.md`, `.venv\Scripts\pytest.exe`, branch discipline, all v2.2 Windows & auto-hardware guardrails, and the YPP Transformative Narrative & Story Engine (adaptive `moment_type` commentary, conditional multi-beat story cuts, spike punch-in zoom, live chat ASS ticker, and pluggable Kokoro/Edge-TTS/ElevenLabs/custom-mic audio ducking).
+> **Phase 1 (`phase-1-foundation`) and Phase 2 (`phase-2-core-pipeline`) are ✅ COMPLETE and MERGED into `main`. Phase 3 (`phase-3-ai-scoring`, Packages `3.1–3.3` + pre-review audit hardening) is implemented and awaiting Phase 3 Review (`3.R`).**  
+> **Next step: run Prompt `3.R`, then branch `phase-4-video-assembly` and execute Prompts `4.1–4.6`.** Every prompt below enforces `AGENTS.md`, `.venv\Scripts\pytest.exe`, branch discipline, all v2.2 Windows & auto-hardware guardrails, and the YPP Transformative Narrative & Story Engine (`auto` | `narrative` | `story` | `raw`, adaptive `moment_type` commentary, conditional multi-beat story cuts, spike punch-in zoom, live chat ASS ticker, pluggable Kokoro/Edge-TTS/ElevenLabs/custom-mic narrator with `:eval=frame` audio ducking, `FileOrganizer`, and MCP SDK v2 `MCPServer`).
 
 ## 1. Quick Reference Matrix: Phases, Packages, Branches & Models
 
@@ -12,22 +12,22 @@
 | **Phase 1** | `phase-1-foundation` | **1.2** | Data Models & 5-Tier Hardware-Aware Config | ✅ Merged | Gemini 3.8 (high) | `reports/phase-1/package-1.2-report.md` |
 | **Phase 1** | `phase-1-foundation` | **1.3** | CLI Skeleton (Hardware Profile) & Step Cache | ✅ Merged | Gemini 3.8 (high) | `reports/phase-1/package-1.3-report.md` |
 | **Phase 1** | `phase-1-foundation` -> `main` | **1.R** | Phase 1 Review & Merge to `main` | ✅ Merged | Claude Opus 4.6 | `reports/phase-1/phase-1-review.md` |
-| **Phase 2** | `phase-2-core-pipeline` | **2.1** | Audio Downloader (`yt-dlp` 16kHz Mono) | ⏳ Next | Gemini 3.8 (high) | `reports/phase-2/package-2.1-report.md` |
-| **Phase 2** | `phase-2-core-pipeline` | **2.2** | Video Segment Downloader (Single + Multi-Beat) | Pending | Gemini 3.8 (high) | `reports/phase-2/package-2.2-report.md` |
-| **Phase 2** | `phase-2-core-pipeline` | **2.3** | WhisperX Transcriber (Auto-Hardware + VRAM Cleanup) | Pending | Gemini 3.8 (high) | `reports/phase-2/package-2.3-report.md` |
-| **Phase 2** | `phase-2-core-pipeline` | **2.4** | Loudness Spike Detector (Streamed RMS + `peak_time`) | Pending | Gemini 3.8 (high) | `reports/phase-2/package-2.4-report.md` |
-| **Phase 2** | `phase-2-core-pipeline` | **2.5** | Chat Scraper (`yt-dlp`) & Velocity (`sample_messages`) | Pending | Gemini 3.8 (high) | `reports/phase-2/package-2.5-report.md` |
-| **Phase 2** | `phase-2-core-pipeline` | **2.6** | Stream Discovery | Pending | Gemini 3.8 (high) | `reports/phase-2/package-2.6-report.md` |
-| **Phase 3** | `phase-3-ai-scoring` | **3.1** | Scorer Interface & YPP Adaptive Narrative Prompts | Pending | Claude Opus 4.6 | `reports/phase-3/package-3.1-report.md` |
-| **Phase 3** | `phase-3-ai-scoring` | **3.2** | Ollama Scorer (+ Adaptive Narrative Generator) | Pending | Gemini 3.8 (high) | `reports/phase-3/package-3.2-report.md` |
-| **Phase 3** | `phase-3-ai-scoring` | **3.3** | Pipeline Orchestrator (`FAILED` Recovery + `--mode`/`--voice-intro`) | Pending | Claude Opus 4.6 | `reports/phase-3/package-3.3-report.md` |
+| **Phase 2** | `phase-2-core-pipeline` | **2.1** | Audio Downloader (`yt-dlp` 16kHz Mono) | ✅ Merged | Gemini 3.8 (high) | `reports/phase-2/package-2.1-report.md` |
+| **Phase 2** | `phase-2-core-pipeline` | **2.2** | Video Segment Downloader (Single + Multi-Beat) | ✅ Merged | Gemini 3.8 (high) | `reports/phase-2/package-2.2-report.md` |
+| **Phase 2** | `phase-2-core-pipeline` | **2.3** | WhisperX Transcriber (Auto-Hardware + VRAM Cleanup) | ✅ Merged | Gemini 3.8 (high) | `reports/phase-2/package-2.3-report.md` |
+| **Phase 2** | `phase-2-core-pipeline` | **2.4** | Loudness Spike Detector (Streamed RMS + `peak_time`) | ✅ Merged | Gemini 3.8 (high) | `reports/phase-2/package-2.4-report.md` |
+| **Phase 2** | `phase-2-core-pipeline` | **2.5** | Chat Scraper (`yt-dlp`) & Velocity (`sample_messages`) | ✅ Merged | Gemini 3.8 (high) | `reports/phase-2/package-2.5-report.md` |
+| **Phase 2** | `phase-2-core-pipeline` | **2.6** | Stream Discovery | ✅ Merged | Gemini 3.8 (high) | `reports/phase-2/package-2.6-report.md` |
+| **Phase 3** | `phase-3-ai-scoring` | **3.1** | Scorer Interface & YPP Adaptive Narrative Prompts | ✅ Implemented | Claude Opus 4.6 | `reports/phase-3/package-3.1-report.md` |
+| **Phase 3** | `phase-3-ai-scoring` | **3.2** | Ollama Scorer (+ Adaptive Narrative Generator) | ✅ Implemented | Gemini 3.8 (high) | `reports/phase-3/package-3.2-report.md` |
+| **Phase 3** | `phase-3-ai-scoring` | **3.3** | Pipeline Orchestrator (`FAILED` Recovery + `--mode`/`--voice-intro`) | ✅ Implemented | Claude Opus 4.6 | `reports/phase-3/package-3.3-report.md` |
 | **Phase 4** | `phase-4-video-assembly` | **4.1** | Facecam Detector (OpenCV) | Pending | Gemini 3.8 (high) | `reports/phase-4/package-4.1-report.md` |
 | **Phase 4** | `phase-4-video-assembly` | **4.2** | 9:16 Composer (MoviePy v2 + Story Beats + 1.2x Zoom) | Pending | Gemini 3.8 (high) | `reports/phase-4/package-4.2-report.md` |
 | **Phase 4** | `phase-4-video-assembly` | **4.3** | Hormozi Captions + Chat Ticker (`.ass` + Windows `cwd` FFmpeg / NVENC) | Pending | Claude Opus 4.6 | `reports/phase-4/package-4.3-report.md` |
 | **Phase 4** | `phase-4-video-assembly` | **4.4** | Hook Title & Adaptive Context Badge Overlay | Pending | Gemini 3.8 (high) | `reports/phase-4/package-4.4-report.md` |
 | **Phase 4** | `phase-4-video-assembly` | **4.5** | YPP Narrator (Kokoro/Edge-TTS/ElevenLabs/Mic) & Dynamic Audio Ducking | Pending | Gemini 3.8 (high) | `reports/phase-4/package-4.5-report.md` |
-| **Phase 4** | `phase-4-video-assembly` | **4.6** | Exporter (`crf=18` Temp + Handle Cleanup) & File Organizer | Pending | Gemini 3.8 (high) | `reports/phase-4/package-4.6-report.md` |
-| **Phase 5** | `phase-5-mcp-server` | **5.1** | FastMCP Server Implementation (incl. YPP Transformative Params) | Pending | Claude Opus 4.6 | `reports/phase-5/package-5.1-report.md` |
+| **Phase 4** | `phase-4-video-assembly` | **4.6** | Exporter (`crf=18` Temp + Handle Cleanup) & `FileOrganizer` | Pending | Gemini 3.8 (high) | `reports/phase-4/package-4.6-report.md` |
+| **Phase 5** | `phase-5-mcp-server` | **5.1** | MCP SDK v2 (`MCPServer`) Implementation (incl. YPP Transformative Params) | Pending | Claude Opus 4.6 | `reports/phase-5/package-5.1-report.md` |
 | **Phase 5** | `phase-5-mcp-server` | **5.2** | README & Setup Guide | Pending | Gemini 3.8 (high) | `reports/phase-5/package-5.2-report.md` |
 
 ## 2. Universal Boilerplate Prompts (Parameterized Templates)
@@ -52,7 +52,7 @@ You are implementing **Package {PACKAGE_ID}** of **Phase {PHASE_NUM}** from `doc
 - Implement ONLY the files and tests scoped to **Package {PACKAGE_ID}**. Do not jump ahead to future packages.
 
 ### 3. Implementation & Verification
-- Implement all files specified in **Package {PACKAGE_ID}** following all v2.2 architectural & YPP guardrails in `AGENTS.md` (`IntEnum` `PipelineStatus`, `FAILED` retry recovery, recursive `SerializableModel`, 5-tier `HardwareProfile` auto-tuning, `setuptools.build_meta`, MoviePy v2 API with aspect-preserving crop, conditional story beats, spike zoom, and handle cleanup, `yt-dlp` 16kHz mono WAV + non-negative `live_chat` + `sample_messages`, `librosa.stream(..., fill_value=0.0)` + `peak_time`, WhisperX 2-stage VRAM cleanup, Windows-safe FFmpeg `cwd` `ass` filter with `Hormozi` + `ChatTicker` and `h264_nvenc` → `libx264` fallback, pluggable TTS/ElevenLabs/custom-mic narrator with dynamic audio ducking, and `FastMCP`).
+- Implement all files specified in **Package {PACKAGE_ID}** following all v2.2 architectural & YPP guardrails in `AGENTS.md` (`IntEnum` `PipelineStatus`, `FAILED` retry recovery, recursive `SerializableModel`, 5-tier `HardwareProfile` auto-tuning, `setuptools.build_meta`, MoviePy v2 API with aspect-preserving crop, clamped `.subclipped()`, conditional story beats, spike zoom, and handle cleanup, `yt-dlp` 16kHz mono WAV + non-negative `live_chat` + `sample_messages`, `librosa.stream(..., fill_value=0.0)` + `peak_time`, WhisperX 2-stage VRAM cleanup, Windows-safe FFmpeg `cwd` `ass` filter with `Hormozi` + `ChatTicker` and `h264_nvenc` → `libx264` fallback, pluggable TTS/ElevenLabs/custom-mic narrator with `:eval=frame` dynamic audio ducking, `FileOrganizer`, and MCP SDK v2 `MCPServer`).
 - Write or update unit tests in `tests/` covering every acceptance criterion for **Package {PACKAGE_ID}** and run `D:\GTA6-Clipper\.venv\Scripts\pytest.exe -v` to confirm 100% pass rate.
 
 ### 4. Mandatory Audit Report & Commit
@@ -640,7 +640,7 @@ Read `AGENTS.md` and **Package 4.2** in `docs/streamclipper-implementation-guide
 1. `src/streamclipper/assembly/composer.py`:
    - **CRITICAL MOVIEPY V2 API GUARDRAIL**: Import directly from `moviepy` (`from moviepy import VideoFileClip, CompositeVideoClip, concatenate_videoclips`, NEVER `from moviepy.editor`) and use `.cropped()`, `.resized()`, `.subclipped()`, `.with_position()`, and `.with_audio()` (NEVER v1 `.crop()` or `.resize()`).
    - Implement `VideoComposer(config)` with `compose(video_path, facecam, peak_offset=None) -> CompositeVideoClip`, `_crop_to_aspect(...)` (aspect-preserving center crop so square/4:3 facecams are NEVER stretched horizontally!), `_compose_with_facecam(clip, facecam)` (Layout A: top 35% aspect-correct facecam, bottom 65% gameplay), and `_compose_gameplay_only(clip)` (Layout B: full 1080×1920 center-cropped gameplay).
-   - Implement `compose_story_beats(segment_paths, facecam, beat_trim_ranges=None, peak_offset=None)` trimming per-beat download buffer padding (`subclipped`) before stitching validated beats via `concatenate_videoclips(..., method="compose")` (falling back cleanly to `compose()` when only 1 path is provided).
+   - Implement `compose_story_beats(segment_paths, facecam, beat_trim_ranges=None, peak_offset=None)` clamping per-beat `(t_start, t_end)` to `[0.0, beat_clip.duration]` (and guarding `t_end > t_start` because MoviePy `2.2.1` raises `ValueError` if `end_time > clip.duration`) before calling `.subclipped()` and stitching validated beats via `concatenate_videoclips(..., method="compose")` (falling back cleanly to `compose()` when only 1 path is provided).
    - Implement `remap_timeline_for_beats(words, chat_burst, peak_time, beats) -> tuple[list[WordTimestamp], list[dict], float | None]` so captions, live chat ticker messages, and spike zoom `peak_offset` stay 100% synced across multi-beat cuts (dropping dead-air entries and shifting Beat 2+ timestamps onto the `0.0`-based stitched timeline).
    - Implement `apply_spike_zoom(clip, peak_offset)` applying a `1.20x` center punch-in zoom during `[peak_offset - 0.5, peak_offset + zoom_duration]` when `transformation.punch_in_zoom > 1.0`.
    - Attach `result._source_clip = clip` and `result._source_clips = [...]` so `Exporter` can cleanly close ALL source file handles on Windows before temp cleanup.
@@ -673,11 +673,11 @@ You are implementing **Package 4.3 — Hormozi-Style Captions & Live Chat Burst 
 ### 2. What to Build (Strictly Scoped to Package 4.3)
 Read `AGENTS.md` and **Package 4.3** in `docs/streamclipper-implementation-guide-v2.md` and create:
 1. `src/streamclipper/assembly/captions.py`:
-   - Implement `_sec_to_ass_time(seconds: float) -> str`, `_hex_to_ass_bgr(hex_color: str) -> str` (converting config `captions.highlight_color` e.g. `#FFD700` → `&H00D7FF&`), `_escape_ass_text(text: str) -> str` (escaping `\`, `{`, `}`), and `AssCaptionBurner(config)` with:
+   - Implement `_sec_to_ass_time(seconds: float) -> str` (using integer centisecond rounding so `59.999` produces `0:01:00.00`, NEVER `0:00:60.00`), `_hex_to_ass_bgr(hex_color: str) -> str` (converting config `captions.highlight_color` e.g. `#FFD700` → `&H00D7FF&`), `_color_to_ass_style(...)` (honoring `captions.color` and `captions.stroke_color`), `_escape_ass_text(text: str) -> str` (sanitizing `\r`/`\n` to spaces, escaping `{`/`}`, and neutralizing `\N`/`\n`/`\h` without doubling literal backslashes in `libass`), and `AssCaptionBurner(config)` honoring `captions.style` (`hormozi` | `single_word` | `sentence`) with:
      - `generate_ass(words: list[WordTimestamp], clip_start_offset: float, ass_path: Path, chat_burst: list[dict] | None = None) -> Path`
      - `_build_ffmpeg_cmd(input_video, ass_filename, output_video, codec, crf) -> list[str]`
      - `burn_captions(input_video: Path, ass_path: Path, output_video: Path, crf: int = 23, codec: str | None = None) -> Path`
-   - Emit both `Style: Hormozi` (active word highlighted via `self.highlight_bgr`) AND `Style: ChatTicker` (rendering up to 5 real viewer messages from `chat_burst` when `transformation.show_chat_ticker` is `True`).
+   - Emit both `Style: Hormozi` (active word highlighted via `self.highlight_bgr`) AND `Style: ChatTicker` (with semi-transparent `OutlineColour=&H99000000` for `BorderStyle=3`, rendering up to 5 real viewer messages from `chat_burst` when `transformation.show_chat_ticker` is `True`).
    - **CRITICAL WINDOWS & NVENC GUARDRAILS**:
      - Run `subprocess.run(..., cwd=str(ass_path.resolve().parent))` with `-vf f"ass={ass_path.name}"` and resolved absolute input/output paths so Windows drive letters/quotes never break FFmpeg's filtergraph.
      - Use resolved `video.codec` from `Config`: when `h264_nvenc`, pass `-c:v h264_nvenc -preset p4 -cq <crf>`; when `libx264`, pass `-c:v libx264 -crf <crf>`; always copy audio (`-c:a copy`).
@@ -714,7 +714,7 @@ Read **Package 4.4** in `docs/streamclipper-implementation-guide-v2.md` and crea
    - Implement `HookTitleOverlay(config)` with `add_hook(video_clip: CompositeVideoClip, hook_title: str, context_badge: str = "") -> CompositeVideoClip`.
    - Render the hook banner and optional adaptive `context_badge` pill (e.g. `"💀 Instant Karma"`, `"🎨 Insane Detail"`, `"🔥 Clutch Escape"`) into RGBA numpy arrays using Pillow and wrap them in MoviePy v2 `ImageClip` layers without ImageMagick.
    - Preserve `video_clip.audio` and propagate `_source_clip` / `_source_clips` onto the returned `CompositeVideoClip`.
-   - Return `video_clip` unchanged if `self.enabled` is `False` and both `hook_title` and `context_badge` are empty.
+   - Skip the hook title banner when `self.enabled` is `False` (still rendering `context_badge` if non-empty; return `video_clip` unchanged when `self.enabled` is `False` and `context_badge` is empty).
 2. Expand `tests/test_assembly.py`:
    - Test `HookTitleOverlay.add_hook()` with `hook_title` + `context_badge` enabled vs. disabled, verifying layer count, duration, and `_source_clip` / `_source_clips` propagation.
 
@@ -745,15 +745,15 @@ You are implementing **Package 4.5 — YPP Transformative Narrator & Dynamic FFm
 Read `AGENTS.md` and **Package 4.5** in `docs/streamclipper-implementation-guide-v2.md` and create:
 1. `src/streamclipper/assembly/narrator.py`:
    - Implement `TransformativeNarrator(config)` with pluggable speech synthesis (`synthesize_speech(text, output_wav) -> Path | None`) supporting:
-     - `kokoro` (local free primary in `auto` mode if installed)
-     - `edge-tts` (cloud free fallback in `auto` mode)
+     - `kokoro` (local free primary in `auto` mode if installed, using `transformation.tts_voice` e.g. `"af_heart"`)
+     - `edge-tts` (cloud free fallback in `auto` mode, using `transformation.edge_tts_voice` e.g. `"en-US-GuyNeural"` — NEVER pass a Kokoro voice ID like `"af_heart"` to `edge-tts`!)
      - `elevenlabs` (optional API + personal voice clone via `ELEVENLABS_API_KEY` env var and `transformation.elevenlabs_voice_id`, falling back gracefully to `auto` if unconfigured)
    - Support custom human-recorded `--voice-intro` / `--voice-outro` WAV paths with higher priority than TTS.
    - Implement `_build_ducking_filtergraph(intro_dur, outro_dur, clip_duration)` and `mix_narration_with_ducking(input_video, output_video, intro_wav, outro_wav, clip_duration) -> Path`:
      - Dynamically build a **2-input** filtergraph for intro-only or outro-only, and a **3-input** filtergraph when both exist (NEVER hardcode `amix=inputs=3`!).
      - Normalize all inputs to `48000 Hz` stereo (`aresample=48000,aformat=channel_layouts=stereo`) and use stereo `adelay={delay_ms}|{delay_ms}` before `amix=inputs=N:duration=first:normalize=0` so 24kHz mono Kokoro/Edge-TTS/ElevenLabs WAVs mix cleanly with 48kHz stereo stream audio.
      - Clamp narration windows safely on short clips so intro and outro never overlap.
-     - Duck `[0:a]` to `self.duck_volume` (`0.18`) during narration windows and preserve `1.0` (`100%`) original stream audio during the reaction climax, copying video (`-c:v copy`) so no extra video compression occurs.
+     - **CRITICAL FFmpeg `volume` GUARDRAIL**: Duck `[0:a]` to `self.duck_volume` (`0.18`) during narration windows and preserve `1.0` (`100%`) original stream audio during the reaction climax using `volume='if(between(t,...),0.18,1.0)':eval=frame` (MUST append `:eval=frame` so FFmpeg evaluates per frame rather than locking at `t=0`!), copying video (`-c:v copy`) so no extra video compression occurs.
 2. Expand `tests/test_assembly.py`:
    - Add unit tests verifying provider fallback (`kokoro` -> `edge-tts`), mocked `elevenlabs` API call with `ELEVENLABS_API_KEY` + `voice_id`, custom `voice_intro_path` priority, dynamic FFmpeg filtergraph generation for intro-only (2 inputs), outro-only (2 inputs), both (3 inputs), and short-clip overlap clamping.
 
@@ -783,14 +783,17 @@ You are implementing **Package 4.6 — Exporter & File Organizer** (Phase 4) fro
 ### 2. What to Build (Strictly Scoped to Package 4.6)
 Read `AGENTS.md` and **Package 4.6** in `docs/streamclipper-implementation-guide-v2.md` and create:
 1. `src/streamclipper/output/organizer.py`:
-   - Implement `OutputOrganizer(config)` with `get_clip_path(game, streamer, index, date_str=None) -> Path`, `save_metadata(clip_path, metadata) -> Path` (including `moment_type`, `narration_intro`, `narration_outro`, `context_badge`, `transformation_mode`), `save_transcript(clip_path, words) -> Path`, and `_sanitize_name(name) -> str` (stripping `<>:"/\|?*`).
+   - Implement `FileOrganizer(config)` (matching `pipeline.py` and `tests/test_pipeline.py`) with:
+     - `_sanitize_name(name: str, fallback: str = "unknown") -> str` (stripping `<>:"/\|?*` and leading/trailing dots/spaces)
+     - `get_clip_path(game: str, streamer: str, index: int, date_str: str | None = None) -> Path` (honoring `output.structure` and `output.filename_template`)
+     - `save_clip(video_path: Path, metadata: ClipMetadata, transcript_text: str = "") -> ClipResult` (saving companion `.json` when `output.save_metadata_json` is `True` and `_transcript.txt` when `output.save_transcript_txt` is `True`, returning `ClipResult` with `metadata_path=None` if JSON saving is disabled).
 2. `src/streamclipper/output/exporter.py`:
    - Implement `Exporter(config)` with `export(clip, words, clip_start_offset, output_path, progress_callback=None, chat_burst=None, narration_intro="", narration_outro="", voice_intro_path=None, voice_outro_path=None, mode=None) -> Path`.
    - Render composed MoviePy clip to intermediate temp MP4 at high quality (`codec="libx264"`, `preset="ultrafast"`, `ffmpeg_params=["-crf", "18"]`), release MoviePy handles immediately in `try/finally`, run `TransformativeNarrator.mix_narration_with_ducking()` when `self.narrator.enabled` and `(mode or self.narrator.mode) != "raw"`, then burn `.ass` (`Hormozi` + `ChatTicker`) via `AssCaptionBurner` whenever `words` OR (`show_chat_ticker and chat_burst`) is non-empty using resolved `video.codec` (`h264_nvenc` → `libx264` fallback).
    - **CRITICAL WINDOWS FILE-LOCK CLEANUP**: Always close `clip`, `getattr(clip, "_source_clip", None)`, and all clips in `getattr(clip, "_source_clips", [])` inside a `try/finally` block BEFORE unlinking intermediate temp MP4 / `.ass` / WAV files.
-   - Wire `_step_assemble` in `src/streamclipper/pipeline.py` end-to-end across `VideoSegmentDownloader` (single & multi-beat), `FacecamDetector`, `VideoComposer` (+ beat trimming, `remap_timeline_for_beats()`, & spike zoom), `HookTitleOverlay` (+ context badge), `TransformativeNarrator`, `Exporter`, and `OutputOrganizer`.
+   - Verify `_step_assemble` in `src/streamclipper/pipeline.py` integrates seamlessly end-to-end across `download_segment` / `download_multiple_segments`, `FacecamDetector`, `VideoComposer` (+ beat trimming, `remap_timeline_for_beats()`, & spike zoom), `HookTitleOverlay` (+ context badge), `TransformativeNarrator`, `Exporter`, and `FileOrganizer`.
 3. Expand `tests/test_assembly.py`:
-   - Add unit tests for `OutputOrganizer` (directory template, sanitization, companion JSON with narrative fields, transcript file) and `Exporter` (ultrafast `crf=18` temp encode, narrator ducking integration, `AssCaptionBurner` call with `chat_burst`, and full handle `.close()` before temp cleanup).
+   - Add unit tests for `FileOrganizer` (directory template, sanitization, `get_clip_path`, `save_clip` with companion JSON narrative fields and transcript file) and `Exporter` (ultrafast `crf=18` temp encode, narrator ducking integration, `AssCaptionBurner` call with `chat_burst`, and full handle `.close()` before temp cleanup).
 
 ### 3. Verification
 - Run `D:\GTA6-Clipper\.venv\Scripts\pytest.exe -v` across the entire test suite and confirm all Phase 1–4 tests pass.
@@ -826,7 +829,7 @@ You are the Lead Reviewer auditing **Phase 4 (`phase-4-video-assembly`)** agains
 
 ## 7. Phase 5 Prompts — MCP Server & Integration (`phase-5-mcp-server`)
 
-### Prompt 5.1 — Package 5.1: FastMCP Server Implementation
+### Prompt 5.1 — Package 5.1: MCP SDK v2 (`MCPServer`) Implementation
 **Assigned Model:** Claude Opus 4.6 | **Branch:** `phase-5-mcp-server` (Create from `main`)
 
 ```markdown
@@ -839,23 +842,23 @@ You are implementing **Package 5.1 — MCP Server Implementation** (Phase 5, �
 ### 2. What to Build (Strictly Scoped to Package 5.1)
 Read **Package 5.1** in `docs/streamclipper-implementation-guide-v2.md` and create:
 1. `src/streamclipper/mcp_server/server.py`:
-   - **CRITICAL MCP SDK GUARDRAIL**: Use `from mcp.server.fastmcp import FastMCP` and instantiate `mcp = FastMCP("streamclipper")` (NEVER `from mcp.server import Server`).
+   - **CRITICAL MCP SDK v2 GUARDRAIL**: Use `from mcp.server.mcpserver import MCPServer` (`mcp>=2.0.0`) and instantiate `mcp = MCPServer("streamclipper")` (NEVER `FastMCP` or low-level `Server`).
    - Implement all 11 `@mcp.tool()` functions returning structured JSON strings (catching exceptions and returning `{"error": str(e)}` rather than raw tracebacks):
      1. `discover_streams(game: str = "GTA 6", max_results: int = 10) -> str`
-     2. `download_stream_audio(url: str) -> str`
-     3. `transcribe_audio(audio_path: str) -> str`
-     4. `analyze_signals(audio_path: str, video_url: str) -> str`
-     5. `get_transcript_chunks(audio_path: str, chunk_minutes: int = 12, only_with_signals: bool = True) -> str` (using `Scorer.get_candidate_chunks` to filter out dead-air chunks with zero signal spikes when `only_with_signals=True`)
-     6. `submit_highlights(url: str, highlights: str) -> str` (parsing YPP fields `moment_type`, `narration_intro`, `narration_outro`, `context_badge`, `sub_clips`, computing weighted `final_score`, and saving selected highlights to `StepCache`)
-     7. `render_clip(video_url: str, start: float, end: float, hook_title: str, game: str = "", streamer: str = "", moment_type: str = "hype", narration_intro: str = "", narration_outro: str = "", context_badge: str = "", sub_clips_json: str = "[]", mode: str = "narrative", voice_intro_path: str = "", voice_outro_path: str = "") -> str`
-     8. `render_all_selected(video_url: str) -> str`
+     2. `download_stream_audio(url: str) -> str` (persisting initial `StepCache` state with `audio_path`)
+     3. `transcribe_audio(url: str = "", audio_path: str = "") -> str` (resolving cached state via `url` or `StepCache.find_by_audio_path(audio_path)`)
+     4. `analyze_signals(url: str, audio_path: str = "") -> str`
+     5. `get_transcript_chunks(url: str = "", chunk_minutes: int = 12, only_with_signals: bool = True, audio_path: str = "") -> str` (using `Scorer.get_candidate_chunks` to filter out dead-air chunks with zero signal spikes when `only_with_signals=True`)
+     6. `submit_highlights(url: str, highlights: str) -> str` (parsing YPP fields `moment_type`, `narration_intro`, `narration_outro`, `context_badge`, `sub_clips`, computing dynamically weighted `final_score`, and saving selected highlights to `StepCache`)
+     7. `render_clip(url: str, start: float, end: float, hook_title: str, game: str = "", streamer: str = "", moment_type: str = "hype", narration_intro: str = "", narration_outro: str = "", context_badge: str = "", sub_clips_json: str = "[]", mode: str = "auto", voice_intro_path: str = "", voice_outro_path: str = "") -> str`
+     8. `render_all_selected(url: str, mode: str = "auto") -> str`
      9. `get_pipeline_status() -> str`
-     10. `generate_post_metadata(hook_title: str, streamer: str, game: str, description: str) -> str`
+     10. `generate_post_metadata(hook_title: str, streamer: str, game: str, description: str, use_ollama: bool = False) -> str` (works offline without Ollama by default)
      11. `cleanup_temp(url: str = "") -> str`
 2. `src/streamclipper/mcp_server/__init__.py`:
    - Expose `main()` calling `mcp.run()`.
 3. `tests/test_mcp_server.py`:
-   - Unit tests verifying `FastMCP` tool registration (all 11 tools), `get_transcript_chunks(only_with_signals=True)` filtering, `submit_highlights` JSON parsing and cache persistence, `get_pipeline_status`, and structured JSON error handling.
+   - Unit tests verifying `MCPServer` tool registration (all 11 tools via `await mcp.list_tools()`, checking `tool.input_schema`), `await mcp.call_tool(...)` (`CallToolResult`), `get_transcript_chunks(only_with_signals=True)` filtering, `StepCache.find_by_audio_path()` linkage, `submit_highlights` JSON parsing and cache persistence, `get_pipeline_status`, offline `generate_post_metadata`, and structured JSON error handling.
 
 ### 3. Verification
 - Run `D:\GTA6-Clipper\.venv\Scripts\pytest.exe tests/test_mcp_server.py -v` and confirm all tests pass.
@@ -867,7 +870,7 @@ Write a detailed report to `reports/phase-5/package-5.1-report.md` (and show it 
 - Verbatim `pytest tests/test_mcp_server.py -v` output
 
 Stage all files (including `reports/phase-5/package-5.1-report.md`) and commit with:
-`git commit -m "feat: FastMCP server with signal-filtered transcript chunking"`
+`git commit -m "feat: MCP SDK v2 (MCPServer) with signal-filtered transcript chunking"`
 ```
 
 ### Prompt 5.2 — Package 5.2: README & Setup Guide
@@ -883,7 +886,7 @@ You are implementing **Package 5.2 — README & Setup Guide** (Phase 5) from `do
 ### 2. What to Build (Strictly Scoped to Package 5.2)
 Read **Package 5.2** in `docs/streamclipper-implementation-guide-v2.md` and create:
 1. `README.md`:
-   - Comprehensive project overview, architecture diagram, feature list (incl. YPP Transformative Narrative & Story Engine: adaptive `moment_type` commentary, conditional multi-beat cuts, spike punch-in zoom, live chat ASS ticker, and dynamic audio ducking), system requirements (Python 3.12 `.venv` / 3.10+, FFmpeg with `libass` and optional `h264_nvenc`, NVIDIA GPU or CPU), 5-tier Dynamic Hardware Auto-Configuration table (`cuda_high_vram`, `cuda_mid_tensor`, `cuda_mid_no_tensor`, `cpu_fallback`, `cpu_only`), quick start guide (`--mode narrative`, `--mode story`, `--voice-intro`, `--voice-outro`), voiceover setup (free `Kokoro-82M` / `edge-tts`, optional **ElevenLabs API / personal voice clone** via `ELEVENLABS_API_KEY` + `elevenlabs_voice_id`, and custom mic WAVs), Claude Desktop / Antigravity MCP configuration (`streamclipper-mcp`), Ollama standalone setup, full `config.yaml` reference table, and Windows/Linux troubleshooting guide.
+   - Comprehensive project overview, architecture diagram, feature list (incl. YPP Transformative Narrative & Story Engine: `auto` | `narrative` | `story` | `raw` modes, adaptive `moment_type` commentary, conditional multi-beat cuts, spike punch-in zoom, live chat ASS ticker, and dynamic `:eval=frame` audio ducking), system requirements (Python 3.12 `.venv` / 3.10+, FFmpeg with `libass` and optional `h264_nvenc`, NVIDIA GPU or CPU), 5-tier Dynamic Hardware Auto-Configuration table (`cuda_high_vram`, `cuda_mid_tensor`, `cuda_mid_no_tensor`, `cpu_fallback`, `cpu_only`), quick start guide (`--mode auto`, `--mode narrative`, `--mode story`, `--mode raw`, `--force`, `--voice-intro`, `--voice-outro`), voiceover setup (free `Kokoro-82M` / `edge-tts` via optional extras `pip install -e ".[tts]"`, optional **ElevenLabs API / personal voice clone** via `ELEVENLABS_API_KEY` + `elevenlabs_voice_id`, and custom mic WAVs), Claude Desktop / Antigravity MCP configuration (`streamclipper-mcp` on MCP SDK v2 `MCPServer`), Ollama standalone setup, full `config.yaml` reference table, and Windows/Linux troubleshooting guide.
 
 ### 3. Verification
 - Run the entire test suite (`D:\GTA6-Clipper\.venv\Scripts\pytest.exe -v`) and CLI smoke checks (`streamclipper --help`, `streamclipper setup`, `streamclipper status`).

@@ -1,0 +1,20 @@
+Write a social media POST CAPTION for a gaming clip being posted to TikTok/YouTube Shorts/Instagram Reels.
+
+RULES:
+1. 2-3 sentences max
+2. Conversational tone (like a friend texting)
+3. Include a call-to-action (follow for more, comment, etc.)
+4. Don't repeat the hook title
+5. Add {hashtag_count} relevant hashtags at the end
+
+INPUT:
+- Streamer: {streamer}
+- Game: {game}
+- Hook title: "{hook_title}"
+- What happens: {description}
+
+OUTPUT (strict JSON):
+{{
+  "caption": "<2-3 sentence caption text>",
+  "hashtags": ["tag1", "tag2"]
+}}

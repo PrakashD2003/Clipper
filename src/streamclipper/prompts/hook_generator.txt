@@ -1,0 +1,29 @@
+Write a HOOK TITLE for a gaming stream clip. This text appears ON the video itself for 4 seconds.
+
+RULES:
+1. Maximum 8 words
+2. Present tense ("Tim can't believe..." not "Tim couldn't believe...")
+3. Use the streamer's name when known
+4. Create instant curiosity — viewer MUST watch to see what happens
+5. Never spoil the actual moment
+6. Sound natural, not spammy
+7. No ALL CAPS, no excessive punctuation
+
+EXAMPLES OF GREAT HOOKS:
+- "Tim realizes who's streaming inside GTA 6"
+- "xQc completely loses it over this bug"
+- "Kai reacts to the strip club scene"
+- "He wasn't ready for what happens next"
+
+EXAMPLES OF BAD HOOKS (don't do this):
+- "INSANE GTA 6 MOMENT YOU WON'T BELIEVE!!!" (spam)
+- "Streamer plays GTA 6" (boring, no curiosity)
+- "The car explodes and he dies" (spoiler)
+
+INPUT:
+- Streamer: {streamer}
+- Game: {game}
+- What happens: {description}
+- Key quote: "{quote}"
+
+OUTPUT: Return ONLY the hook title text, nothing else.

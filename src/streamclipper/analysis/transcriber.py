@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import gc
+import inspect
 import json
 import logging
 from pathlib import Path
@@ -94,7 +95,18 @@ class Transcriber:
                 compute_type=self.compute_type,
             )
             audio = whisperx.load_audio(str(audio_path))
-            result = model.transcribe(audio, batch_size=self.batch_size)
+            transcribe_kwargs: dict[str, Any] = {"batch_size": self.batch_size}
+            if self.language and self.language.lower() != "auto":
+                try:
+                    sig = inspect.signature(model.transcribe)
+                    if "language" in sig.parameters or any(
+                        p.kind == inspect.Parameter.VAR_KEYWORD
+                        for p in sig.parameters.values()
+                    ):
+                        transcribe_kwargs["language"] = self.language
+                except (TypeError, ValueError):
+                    transcribe_kwargs["language"] = self.language
+            result = model.transcribe(audio, **transcribe_kwargs)
             detected_lang = str(result.get("language") or self.language)
 
             # Stage 1: Free ASR model before loading wav2vec2 alignment model (critical on 6 GB GPUs)
@@ -207,9 +219,14 @@ class Transcriber:
                 device=self.device,
                 compute_type=self.compute_type,
             )
+            fw_language = (
+                None
+                if not self.language or self.language.lower() == "auto"
+                else self.language
+            )
             segments_iter, info = model.transcribe(
                 str(audio_path),
-                language=self.language,
+                language=fw_language,
                 word_timestamps=True,
             )
             detected_lang = str(getattr(info, "language", None) or self.language)

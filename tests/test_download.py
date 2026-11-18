@@ -573,3 +573,94 @@ class TestVideoSegmentDownloader:
 
         with pytest.raises(VideoDownloadError, match="Could not determine video ID"):
             download_segment(SAMPLE_URL, 10.0, 20.0, tmp_path)
+
+    def test_download_audio_handles_na_metadata_and_offline_sidecar_cache(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _patch_yt_dlp(
+            monkeypatch,
+            extract_return={
+                "id": "dQw4w9WgXcQ",
+                "title": "NA Metadata Stream",
+                "uploader": "Streamer",
+                "duration": "NA",
+                "view_count": float("nan"),
+            },
+        )
+        info = extract_stream_info(SAMPLE_URL)
+        assert info.duration_seconds == 0
+        assert info.view_count == 0
+
+        # Pre-seed WAV + info sidecar -> offline fast-path must make zero yt-dlp calls
+        (tmp_path / "dQw4w9WgXcQ.wav").write_bytes(b"RIFF....WAVE")
+        (tmp_path / "dQw4w9WgXcQ.info.json").write_text(info.to_json(), encoding="utf-8")
+        captured_opts, _ = _patch_yt_dlp(monkeypatch)
+
+        audio_path, cached_info = download_audio(SAMPLE_URL, tmp_path)
+        assert audio_path == tmp_path / "dQw4w9WgXcQ.wav"
+        assert cached_info.title == "NA Metadata Stream"
+        assert captured_opts == []
+
+    @pytest.mark.parametrize(
+        "start,end,buf",
+        [
+            (float("nan"), 20.0, 3.0),
+            (10.0, float("inf"), 3.0),
+            (10.0, 20.0, float("nan")),
+            (True, 20.0, 3.0),
+        ],
+    )
+    def test_download_segment_rejects_non_finite_and_bool_ranges(
+        self, tmp_path: Path, start: Any, end: Any, buf: Any
+    ) -> None:
+        with pytest.raises(ValueError):
+            download_segment(SAMPLE_URL, start, end, tmp_path, buffer_seconds=buf)
+
+    def test_download_segment_invalidates_cache_on_buffer_change_and_detects_alt_container(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        mp4 = tmp_path / "dQw4w9WgXcQ_10_40.mp4"
+        mp4.write_bytes(b"old-buf-3")
+        (tmp_path / "dQw4w9WgXcQ_10_40.meta.json").write_text(
+            '{"start_seconds": 10.0, "end_seconds": 40.0, "buffer_seconds": 3.0}',
+            encoding="utf-8",
+        )
+        captured_opts, _ = _patch_yt_dlp(monkeypatch)
+        # Same bounds with buffer_seconds=5.0 must re-download instead of returning stale buffer=3.0
+        download_segment(SAMPLE_URL, 10.0, 40.0, tmp_path, buffer_seconds=5.0)
+        assert len(captured_opts) == 2
+
+        # Alternate container fallback (.webm) when yt-dlp doesn't produce .mp4
+        alt_dir = tmp_path / "alt"
+        alt_dir.mkdir()
+
+        def _write_webm(_urls: list[str]) -> None:
+            (alt_dir / "dQw4w9WgXcQ_50_80.webm").write_bytes(b"webm-data")
+
+        _, alt_instances = _patch_yt_dlp(monkeypatch, download_side_effect=_write_webm)
+        resolved = download_segment(SAMPLE_URL, 50.0, 80.0, alt_dir)
+        assert resolved == alt_dir / "dQw4w9WgXcQ_50_80.webm"
+
+        # Subsequent call with identical bounds/buffer reuses cached .webm without re-downloading
+        cached_alt = download_segment(SAMPLE_URL, 50.0, 80.0, alt_dir)
+        assert cached_alt == alt_dir / "dQw4w9WgXcQ_50_80.webm"
+        assert sum(inst.download.call_count for inst in alt_instances) == 1
+
+        # Changing buffer_seconds unlinks stale .mp4 so a newly written .webm is NOT masked by stale .mp4
+        stale_dir = tmp_path / "stale"
+        stale_dir.mkdir()
+        stale_mp4 = stale_dir / "dQw4w9WgXcQ_10_50.mp4"
+        stale_mp4.write_bytes(b"old-buffer-3")
+        (stale_dir / "dQw4w9WgXcQ_10_50.meta.json").write_text(
+            '{"start_seconds": 10.0, "end_seconds": 50.0, "buffer_seconds": 3.0}',
+            encoding="utf-8",
+        )
+
+        def _write_new_webm(_urls: list[str]) -> None:
+            (stale_dir / "dQw4w9WgXcQ_10_50.webm").write_bytes(b"new-buffer-5")
+
+        _patch_yt_dlp(monkeypatch, download_side_effect=_write_new_webm)
+        refreshed = download_segment(SAMPLE_URL, 10.0, 50.0, stale_dir, buffer_seconds=5.0)
+        assert refreshed == stale_dir / "dQw4w9WgXcQ_10_50.webm"
+        assert refreshed.read_bytes() == b"new-buffer-5"
+        assert not stale_mp4.exists()
