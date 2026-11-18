@@ -4,7 +4,7 @@
 > **Primary Blueprint:** `docs/streamclipper-implementation-guide-v2.md` (v2.2 — Patched + Auto-Hardware + YPP Transformative Engine)  
 > **Prompt Runbook:** `docs/streamclipper-agent-prompts.md`  
 > **Documentation Folder Rule:** Store all project documentation, architecture guides, prompt runbooks, design notes, and reference files inside `docs/`. Keep only tool-required standard files (`AGENTS.md`, `README.md`, `pyproject.toml`, `config.default.yaml`, `.gitignore`) at the repository root.  
-> **Current Repository Milestone:** **Phase 1 (`phase-1-foundation`), Phase 2 (`phase-2-core-pipeline`), Phase 3 (`phase-3-ai-scoring`), and Phase 4 (`phase-4-video-assembly`, Packages `4.1–4.6` + Review `4.R`) are ✅ COMPLETE and MERGED into `main`.** Branch `phase-5-mcp-server` from `main` and proceed from **Package 5.1**.
+> **Current Repository Milestone:** **All 5 Phases (`phase-1-foundation` through `phase-5-mcp-server`, Packages `1.1–5.2` + Reviews `1.R–5.R`) are ✅ COMPLETE and MERGED into `main` (StreamClipper v2.2 release).**
 
 This file defines the mandatory workspace conventions, multi-device hardware auto-configuration rules, YouTube Partner Program (YPP) transformative content guardrails, technical requirements, git workflow, and reporting standards for all AI coding agents (**Gemini 3.8 (high)** and **Claude Opus 4.6**) working in this repository.
 
@@ -86,7 +86,7 @@ Every agent writing or reviewing code in this repository must enforce these 12 a
   2. `phase-2-core-pipeline` (Packages `2.1` – `2.6`) — **✅ COMPLETE & MERGED INTO `main`**
   3. `phase-3-ai-scoring` (Packages `3.1` – `3.3` + Review `3.R`) — **✅ COMPLETE & MERGED INTO `main`**
   4. `phase-4-video-assembly` (Packages `4.1` – `4.6`, including `4.5` YPP Narrator & Audio Ducking + Review `4.R`) — **✅ COMPLETE & MERGED INTO `main`**
-  5. `phase-5-mcp-server` (Packages `5.1` – `5.2`) — **⏳ NEXT**
+  5. `phase-5-mcp-server` (Packages `5.1` – `5.2` + Review `5.R`) — **✅ COMPLETE & MERGED INTO `main`**
 
 ### 5.2 Model Responsibilities
 - **Gemini 3.8 (high)**: Implements all 🟢 Easy, 🟡 Medium, and 🟠 Hard packages (`1.1`, `1.2`, `1.3`, `2.1`, `2.2`, `2.3`, `2.4`, `2.5`, `2.6`, `3.2`, `4.1`, `4.2`, `4.4`, `4.5`, `4.6`, `5.2`).

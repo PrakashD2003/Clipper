@@ -1,6 +1,11 @@
-"""MCP server package for StreamClipper (Package 1.1 placeholder)."""
+"""MCP Server entry point using MCP SDK v2 (MCPServer) stdio transport."""
+from .server import mcp
 
 
 def main() -> None:
-    """Entry point for the StreamClipper MCP server."""
-    raise NotImplementedError("StreamClipper MCP server will be implemented in Phase 5 (Package 5.1).")
+    """Run the StreamClipper MCP server."""
+    mcp.run()
+
+
+if __name__ == "__main__":
+    main()
