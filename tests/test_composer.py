@@ -469,28 +469,41 @@ class TestRemapTimelineForBeats:
         assert r_words2[0].start == pytest.approx(1.0)
         assert r_words2[0].confidence == pytest.approx(0.95)
 
-    def test_layout_a_spike_zoom_locks_split_line_and_preserves_facecam(
-        self, tmp_path: Path
-    ):
-        """Punch-in zoom in Layout A applies to gameplay without shifting the 35%/65% split line."""
+    def test_A5_spike_zoom_only_inside_game_box(self, tmp_path: Path):
+        """Spike zoom changes pixels inside game_box only; facecam and caption band stay locked."""
         cfg = _make_config(
             tmp_path, overrides={"transformation": {"punch_in_zoom": 1.20}}
         )
         composer = VideoComposer(cfg)
-        clip = _make_dummy_clip(duration=6.0, size=(1920, 1080))
+        # Left half red, right half blue so a centre punch-in visibly changes game pixels.
+        def _frame(t):
+            f = np.zeros((1080, 1920, 3), dtype=np.uint8)
+            f[:, :640] = (255, 0, 0)
+            f[:, 640:] = (0, 0, 255)
+            return f
+
+        from moviepy import VideoClip
+
+        clip = VideoClip(_frame, duration=6.0).with_fps(30)
         facecam = FacecamRegion(x=1400, y=50, w=400, h=400)
 
         comp = composer.compose(clip, facecam=facecam, peak_offset=2.5)
         assert comp.size == (1080, 1920)
         assert comp.duration == pytest.approx(6.0)
-        # Verify both gameplay and facecam clips exist in composition
-        assert len(comp.clips) == 2
-        # Facecam is top layer locked at (center, 0) with height = 35% of 1920 (672px)
-        face_clip = comp.clips[1]
-        assert face_clip.size[1] == int(1920 * 0.35)
-        # Gameplay layer is placed at (center, 672)
-        game_clip = comp.clips[0]
-        assert game_clip.size[1] == 1920 - int(1920 * 0.35)
+        assert comp._layout.kind == "stacked"
+        gb = comp._layout.game_box
+        assert (gb.y, gb.h) == (880, 608)
+
+        plain = composer.compose(clip, facecam=facecam)
+        zoomed_frame = comp.get_frame(2.5)
+        plain_frame = plain.get_frame(2.5)
+        # Outside game_box: identical
+        assert np.array_equal(zoomed_frame[:880], plain_frame[:880])
+        assert np.array_equal(zoomed_frame[1488:], plain_frame[1488:])
+        # Inside game_box the punch-in occurred (the red/blue edge moved)
+        assert not np.array_equal(
+            zoomed_frame[gb.y : gb.y2, :], plain_frame[gb.y : gb.y2, :]
+        )
 
 
 # ============================================================================

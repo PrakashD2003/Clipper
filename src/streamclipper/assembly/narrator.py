@@ -2,46 +2,29 @@
 
 from __future__ import annotations
 
-import asyncio
 import gc
-import json
 import logging
 import os
 import shutil
 import subprocess
 import tempfile
-import urllib.error
-import urllib.request
 from pathlib import Path
 from typing import Any
 
 import soundfile as sf
 
 from ..config import Config
+from .tts_engines import (
+    EdgeTTS,
+    ElevenLabsTTS,
+    ExternalProcessTTS,
+    KokoroTTS,
+    _is_espeak_available,
+)
 
 logger = logging.getLogger(__name__)
 
 WORDS_PER_SECOND = 2.7
-
-
-def _is_espeak_available() -> bool:
-    """Check if espeak-ng / espeak binary or library is available on the system."""
-    if os.environ.get("PHONEMIZER_ESPEAK_LIBRARY"):
-        return True
-    if shutil.which("espeak-ng") or shutil.which("espeak"):
-        return True
-    if os.name == "nt":
-        prog_files = os.environ.get("ProgramFiles", "C:\\Program Files")
-        prog_files_x86 = os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)")
-        std_candidates = [
-            Path(prog_files) / "eSpeak NG" / "libespeak-ng.dll",
-            Path(prog_files_x86) / "eSpeak NG" / "libespeak-ng.dll",
-        ]
-        for p in std_candidates:
-            if p.exists():
-                os.environ["PHONEMIZER_ESPEAK_LIBRARY"] = str(p)
-                return True
-    return False
 
 
 class TransformativeNarrator:
@@ -57,11 +40,32 @@ class TransformativeNarrator:
             config.get("transformation.tts_engine", "auto") or "auto"
         )
         self.voice: str = str(
-            config.get("transformation.tts_voice", "af_heart") or "af_heart"
+            config.get("transformation.tts_voice", "am_puck") or "am_puck"
         )
+        self.tts_speed: float = float(config.get("transformation.tts_speed", 1.1) or 1.1)
+        chain = config.get(
+            "transformation.tts_engines", ["chatterbox", "kokoro", "edge-tts"]
+        )
+        self.engine_chain: list[str] = (
+            [chain] if isinstance(chain, str) else list(chain or [])
+        )
+        self.tts_external_python: str = str(
+            config.get("transformation.tts_external_python", ".venv-tts/Scripts/python.exe")
+            or ""
+        )
+        self.tts_reference_wav: str = str(
+            config.get("transformation.tts_reference_wav", "") or ""
+        )
+        self.edge_tts_rate: str = str(config.get("transformation.edge_tts_rate", "+10%") or "")
+        self.target_lufs: float = float(config.get("transformation.target_lufs", -14) or -14)
+        raw_gain = config.get("transformation.narration_gain_db", 3)
+        self.narration_gain_db: float = float(3 if raw_gain is None else raw_gain)
+        raw_xf = config.get("transformation.crossfade_seconds", 0.25)
+        self.crossfade_seconds: float = float(0.25 if raw_xf is None else raw_xf)
+        self.callout_enabled: bool = bool(config.get("transformation.callout_enabled", True))
         self.edge_tts_voice: str = str(
-            config.get("transformation.edge_tts_voice", "en-US-GuyNeural")
-            or "en-US-GuyNeural"
+            config.get("transformation.edge_tts_voice", "en-US-AndrewMultilingualNeural")
+            or "en-US-AndrewMultilingualNeural"
         )
         self.elevenlabs_voice_id: str = str(
             config.get("transformation.elevenlabs_voice_id", "") or ""
@@ -72,11 +76,16 @@ class TransformativeNarrator:
         )
         raw_duck = config.get("transformation.duck_stream_volume", 0.18)
         self.duck_volume: float = float(0.18 if raw_duck is None else raw_duck)
-        self._kpipelines: dict[str, Any] = {}
+        self._kokoro = KokoroTTS(self.voice, self.tts_speed)
+
+    @property
+    def _kpipelines(self) -> dict[str, Any]:
+        """Cached Kokoro pipelines (owned by the Kokoro engine)."""
+        return self._kokoro._pipelines
 
     def release(self) -> None:
         """Drop cached Kokoro pipelines and free GPU memory when available."""
-        self._kpipelines.clear()
+        self._kokoro.clear()
         gc.collect()
         try:
             import torch  # type: ignore
@@ -86,14 +95,44 @@ class TransformativeNarrator:
         except Exception as exc:
             logger.debug("torch.cuda.empty_cache unavailable: %s", exc)
 
+    def _engine_chain(self) -> list[str]:
+        """Resolve the ordered TTS fallback chain (legacy single ``tts_engine`` wins when set)."""
+        legacy = (self.engine or "auto").lower().strip()
+        known = ("chatterbox", "kokoro", "edge-tts", "elevenlabs")
+        if legacy == "none":
+            return []
+        if legacy == "elevenlabs":
+            return ["elevenlabs", "kokoro", "edge-tts"]
+        if legacy == "kokoro":
+            return ["kokoro", "edge-tts"]
+        if legacy in ("edge-tts", "edge_tts"):
+            return ["edge-tts"]
+        if legacy == "chatterbox":
+            return ["chatterbox", "kokoro", "edge-tts"]
+        if legacy != "auto":
+            logger.warning("Unknown TTS engine %r; using configured engine chain", legacy)
+        chain: list[str] = []
+        for name in self.engine_chain:
+            n = str(name).lower().strip().replace("_", "-")
+            if n in known and n not in chain:
+                chain.append(n)
+        return chain or ["kokoro", "edge-tts"]
+
+    def _run_engine(self, name: str, text: str, output_wav: Path) -> Path | None:
+        if name == "chatterbox":
+            return self._synthesize_chatterbox(text, output_wav)
+        if name == "kokoro":
+            return self._synthesize_kokoro(text, output_wav)
+        if name == "edge-tts":
+            return self._synthesize_edge_tts(text, output_wav)
+        if name == "elevenlabs":
+            return self._synthesize_elevenlabs(text, output_wav)
+        return None
+
     def synthesize_speech(
         self, text: str, output_wav: Path, max_seconds: float | None = None
     ) -> Path | None:
-        """Synthesize text to WAV via configured provider (kokoro | edge-tts | elevenlabs | auto).
-
-        Note: When engine is 'edge-tts' (or 'auto' falls back from kokoro to edge-tts),
-        self.edge_tts_voice ('en-US-GuyNeural') is used rather than a Kokoro voice ID like 'af_heart'.
-        """
+        """Synthesize text to WAV through the TTS engine chain (first engine returning audio wins)."""
         if not text or not text.strip() or not self.enabled:
             return None
 
@@ -101,45 +140,16 @@ class TransformativeNarrator:
         output_wav = Path(output_wav)
         output_wav.parent.mkdir(parents=True, exist_ok=True)
 
-        engine = (self.engine or "auto").lower().strip()
-        if engine == "none":
-            return None
-
-        if engine == "elevenlabs":
-            res = self._synthesize_elevenlabs(clean_text, output_wav)
+        for name in self._engine_chain():
+            res = self._run_engine(name, clean_text, output_wav)
             if res is not None and res.is_file() and res.stat().st_size > 0:
                 return res
-            logger.info("ElevenLabs unconfigured or failed; falling back to auto TTS")
-            engine = "auto"
-
-        if engine == "kokoro":
-            res = self._synthesize_kokoro(clean_text, output_wav)
-            if res is not None and res.is_file() and res.stat().st_size > 0:
-                return res
-            logger.warning("Kokoro produced no audio (espeak-ng missing?); falling back to edge-tts")
-            return self._synthesize_edge_tts(clean_text, output_wav)
-
-        if engine in ("edge-tts", "edge_tts"):
-            return self._synthesize_edge_tts(clean_text, output_wav)
-
-        if engine == "auto":
-            # 1. Primary: local free Kokoro
-            res = self._synthesize_kokoro(clean_text, output_wav)
-            if res is not None and res.is_file() and res.stat().st_size > 0:
-                return res
-            # 2. Fallback: free cloud edge-tts
-            res = self._synthesize_edge_tts(clean_text, output_wav)
-            if res is not None and res.is_file() and res.stat().st_size > 0:
-                return res
-            logger.debug("No TTS engine succeeded in auto mode")
-            return None
-
-        # Unknown engine -> fallback to auto
-        logger.warning("Unknown TTS engine %r; attempting auto fallback", engine)
-        res = self._synthesize_kokoro(clean_text, output_wav)
-        if res is not None and res.is_file() and res.stat().st_size > 0:
-            return res
-        return self._synthesize_edge_tts(clean_text, output_wav)
+            if name == "kokoro":
+                logger.warning("Kokoro produced no audio (espeak-ng missing?); falling back to edge-tts")
+            else:
+                logger.info("TTS engine %s produced no audio; trying next", name)
+        logger.debug("No TTS engine succeeded")
+        return None
 
     @staticmethod
     def _fit_text_to_budget(text: str, max_seconds: float | None) -> str:
@@ -167,179 +177,27 @@ class TransformativeNarrator:
     def _synthesize_kokoro(self, text: str, output_wav: Path) -> Path | None:
         """Synthesize locally with Kokoro-82M if installed and espeak-ng is available."""
         if os.name == "nt" and not _is_espeak_available():
-            logger.debug(
-                "espeak-ng not found on Windows (PHONEMIZER_ESPEAK_LIBRARY not set); "
-                "skipping Kokoro synthesis and falling back to edge-tts"
-            )
+            logger.debug("espeak-ng not found on Windows; skipping Kokoro synthesis")
             return None
-
-        try:
-            from kokoro import KPipeline  # type: ignore
-        except (ImportError, ModuleNotFoundError):
-            logger.debug("Kokoro not installed; skipping Kokoro synthesis")
-            return None
-
-        try:
-            lang_code = "b" if self.voice.startswith("b") else "a"
-            pipeline = self._kpipelines.get(lang_code)
-            if pipeline is None:
-                pipeline = KPipeline(lang_code=lang_code)
-                self._kpipelines[lang_code] = pipeline
-            generator = pipeline(text, voice=self.voice, speed=1, split_pattern=r"\n+")
-            audios: list[Any] = []
-            for _, _, audio in generator:
-                if audio is not None and len(audio) > 0:
-                    audios.append(audio)
-            if not audios:
-                return None
-
-            import numpy as np
-
-            combined = np.concatenate(audios) if len(audios) > 1 else audios[0]
-            sf.write(str(output_wav), combined, 24000)
-            if output_wav.is_file() and output_wav.stat().st_size > 0:
-                return output_wav
-            return None
-        except Exception as exc:
-            logger.warning("Kokoro synthesis failed: %s", exc)
-            return None
+        self._kokoro.espeak_check = lambda: _is_espeak_available()
+        self._kokoro.voice = self.voice
+        self._kokoro.speed = self.tts_speed
+        return self._kokoro.synthesize(text, output_wav)
 
     def _synthesize_edge_tts(self, text: str, output_wav: Path) -> Path | None:
-        """Synthesize with edge-tts using self.edge_tts_voice (converting mp3 output to WAV via ffmpeg)."""
-        try:
-            import edge_tts  # type: ignore
-        except (ImportError, ModuleNotFoundError):
-            logger.debug("edge-tts not installed; skipping Edge-TTS synthesis")
-            return None
-
-        temp_mp3 = output_wav.with_name(f"{output_wav.stem}_edgetts.mp3")
-        try:
-            voice = self.edge_tts_voice or "en-US-GuyNeural"
-
-            async def _generate() -> None:
-                communicate = edge_tts.Communicate(text, voice)
-                await communicate.save(str(temp_mp3))
-
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = None
-
-            if loop is not None and loop.is_running():
-                import concurrent.futures
-
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                    pool.submit(lambda: asyncio.run(_generate())).result()
-            else:
-                asyncio.run(_generate())
-
-            if not temp_mp3.is_file() or temp_mp3.stat().st_size == 0:
-                return None
-
-            # Convert mp3 to WAV via ffmpeg
-            cmd = [
-                "ffmpeg",
-                "-y",
-                "-i",
-                str(temp_mp3),
-                "-ar",
-                "48000",
-                "-ac",
-                "2",
-                str(output_wav),
-            ]
-            subprocess.run(
-                cmd,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            if output_wav.is_file() and output_wav.stat().st_size > 0:
-                return output_wav
-            return None
-        except Exception as exc:
-            logger.warning("Edge-TTS synthesis failed: %s", exc)
-            return None
-        finally:
-            if temp_mp3.exists():
-                try:
-                    temp_mp3.unlink()
-                except OSError:
-                    pass
+        """Synthesize with edge-tts using self.edge_tts_voice / edge_tts_rate."""
+        eng = EdgeTTS(self.edge_tts_voice or "en-US-AndrewMultilingualNeural", self.edge_tts_rate)
+        return eng.synthesize(text, output_wav)
 
     def _synthesize_elevenlabs(self, text: str, output_wav: Path) -> Path | None:
-        """Synthesize with ElevenLabs API (incl. personal voice clone) when ELEVENLABS_API_KEY & voice_id are set."""
-        api_key = os.environ.get("ELEVENLABS_API_KEY", "").strip()
-        voice_id = self.elevenlabs_voice_id.strip()
-        if not api_key or not voice_id:
-            logger.debug("ElevenLabs unconfigured; missing API key or voice_id")
-            return None
+        """Synthesize with ElevenLabs when ELEVENLABS_API_KEY & voice_id are set."""
+        eng = ElevenLabsTTS(self.elevenlabs_voice_id, self.elevenlabs_model_id)
+        return eng.synthesize(text, output_wav)
 
-        temp_mp3 = output_wav.with_name(f"{output_wav.stem}_elevenlabs.mp3")
-        url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
-        headers = {
-            "xi-api-key": api_key,
-            "Content-Type": "application/json",
-            "Accept": "audio/mpeg",
-        }
-        payload = {
-            "text": text,
-            "model_id": self.elevenlabs_model_id or "eleven_multilingual_v2",
-            "voice_settings": {
-                "stability": 0.5,
-                "similarity_boost": 0.75,
-            },
-        }
-
-        try:
-            req_data = json.dumps(payload).encode("utf-8")
-            req = urllib.request.Request(
-                url,
-                data=req_data,
-                headers=headers,
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=30.0) as resp:
-                status_code = getattr(resp, "status", None) or getattr(resp, "code", None) or 200
-                if isinstance(status_code, int) and status_code != 200:
-                    logger.warning("ElevenLabs API returned HTTP %s", status_code)
-                    return None
-                audio_bytes = resp.read()
-
-            if not audio_bytes:
-                return None
-
-            temp_mp3.write_bytes(audio_bytes)
-
-            cmd = [
-                "ffmpeg",
-                "-y",
-                "-i",
-                str(temp_mp3),
-                "-ar",
-                "48000",
-                "-ac",
-                "2",
-                str(output_wav),
-            ]
-            subprocess.run(
-                cmd,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            if output_wav.is_file() and output_wav.stat().st_size > 0:
-                return output_wav
-            return None
-        except Exception as exc:
-            logger.warning("ElevenLabs synthesis failed: %s", exc)
-            return None
-        finally:
-            if temp_mp3.exists():
-                try:
-                    temp_mp3.unlink()
-                except OSError:
-                    pass
+    def _synthesize_chatterbox(self, text: str, output_wav: Path) -> Path | None:
+        """Synthesize via the external-process Chatterbox worker (separate venv)."""
+        eng = ExternalProcessTTS(self.tts_external_python, self.tts_reference_wav)
+        return eng.synthesize(text, output_wav)
 
     def resolve_narration_track(
         self,
@@ -500,6 +358,19 @@ class TransformativeNarrator:
             "outro_start": outro_start,
         }
 
+    def _ramped_duck_expr(
+        self, windows: list[tuple[float, float]], duck_vol: float, ramp: float
+    ) -> str:
+        """Duck envelope with linear ``ramp``-second fades into/out of every window."""
+        r = max(float(ramp), 0.01)
+        depth = 1.0 - duck_vol
+        terms = [
+            f"clip(min((t-({a - r:.2f}))/{r:.2f},({b + r:.2f}-t)/{r:.2f}),0,1)"
+            for a, b in windows
+        ]
+        level = terms[0] if len(terms) == 1 else "max(" + ",".join(terms) + ")"
+        return f"1-{depth:.2f}*{level}"
+
     def _build_ducking_filtergraph(
         self,
         intro_dur: float | None,
@@ -509,42 +380,39 @@ class TransformativeNarrator:
         *,
         breakdown_dur: float | None = None,
         replay_start_time: float | None = None,
+        callout_dur: float | None = None,
+        callout_start: float | None = None,
+        duck_full: bool = False,
+        finalize: bool = False,
     ) -> tuple[str, int]:
         """Build dynamic FFmpeg filter_complex string and input count.
 
-        - Handles intro-only (2 inputs), outro-only (2 inputs), intro+outro (3 inputs),
-          or multi-cue breakdown ducking (intro + breakdown, breakdown only, etc.).
-        - Stage 1: Optional intro voiceover ([0, intro_dur], ducks stream audio to 18%).
-        - Stage 2: Climax stream audio plays at 100% full volume.
-        - Stage 3: Instant Replay section ([replay_start, replay_start + breakdown_dur])
-          ducks slowed stream audio to 18% under host breakdown commentary.
-        - When ``has_video_audio`` is False (silent clip), synthesizes a 48kHz stereo
-          silent base track of ``clip_duration`` via ``anullsrc`` so intro/outro voiceovers
-          still attach cleanly instead of failing on a missing ``[0:a]`` stream.
-        - Normalizes stream audio and all narrator WAV inputs to 48000 Hz stereo
-          (`aresample=48000,aformat=channel_layouts=stereo`) before `amix` so 24kHz mono
-          Kokoro/Edge-TTS/ElevenLabs tracks mix cleanly with 48kHz stereo stream audio,
-          using stereo `adelay={delay_ms}|{delay_ms}` for delayed narrator tracks.
-        - Clamps narration windows on short clips so intro and outro never overlap
-          (if intro_dur + outro_dur > clip_duration * 0.75, trims outro or scales windows safely).
-        - CRITICAL: Ducks [0:a] using `volume='if(between(t,...),0.18,1.0)':eval=frame`
-          (MUST include `:eval=frame` because FFmpeg's `volume` defaults to `eval=once`
-          at t=0, which would leave the entire clip stuck at 18% volume!).
-        - Uses `amix=inputs={n}:duration=first:normalize=0`.
+        Input order: 0 = stream, then intro, breakdown, outro, callout (only those present).
+        - Stream audio is ducked (``volume=...:eval=frame`` - mandatory, the default
+          ``eval=once`` would freeze the level at t=0) under intro/outro/breakdown/callout
+          windows only, or for the whole clip when ``duck_full``.
+        - Narrator WAVs are normalized to 48 kHz stereo before ``amix`` (stereo ``adelay``).
+        - Short clips: intro+outro are clamped to 75% of the clip and ``atrim``-ed.
+        - ``finalize=True`` (used by the real mix): smooth ``crossfade_seconds`` duck ramps,
+          per-track loudnorm + ``narration_gain_db``, and a final ``loudnorm`` to
+          ``target_lufs``. ``finalize=False`` keeps the plain step-ducked graph.
         """
         has_intro = intro_dur is not None and float(intro_dur) > 0.01
         has_outro = outro_dur is not None and float(outro_dur) > 0.01
         has_breakdown = breakdown_dur is not None and float(breakdown_dur) > 0.01
+        has_callout = callout_dur is not None and float(callout_dur) > 0.01
         clip_dur = max(float(clip_duration), 0.1)
+        norm = "aresample=48000,aformat=channel_layouts=stereo"
+        any_track = has_intro or has_outro or has_breakdown or has_callout
 
-        if not has_intro and not has_outro and not has_breakdown:
+        if not any_track:
             if not has_video_audio:
                 return (
                     f"anullsrc=channel_layout=stereo:sample_rate=48000,"
                     f"atrim=0:{clip_dur:.2f},asetpts=PTS-STARTPTS[aout]",
                     1,
                 )
-            return "[0:a]aresample=48000,aformat=channel_layouts=stereo[aout]", 1
+            return f"[0:a]{norm}[aout]", 1
 
         duck_vol_str = f"{self.duck_volume:.2f}"
         silent_base = (
@@ -552,7 +420,14 @@ class TransformativeNarrator:
             f"atrim=0:{clip_dur:.2f},asetpts=PTS-STARTPTS[a0];"
         )
 
-        # Multi-cue breakdown mode ducking branch
+        # tracks: (trim_filter, delay_ms | None, duck window | None)
+        tracks: list[tuple[str, int | None, tuple[float, float] | None]] = []
+
+        def _trim(eff: float, orig: float) -> str:
+            if eff < orig - 1e-6:
+                return f",atrim=0:{max(0.01, eff):.2f},asetpts=PTS-STARTPTS"
+            return ""
+
         if has_breakdown:
             win = self.compute_breakdown_windows(
                 intro_dur, outro_dur, breakdown_dur, clip_dur, replay_start_time
@@ -561,154 +436,97 @@ class TransformativeNarrator:
             rep_start = win["breakdown_start"]
             breakdown_end = win["breakdown_end"]
             eff_outro = win["eff_outro"]
-
-            intro_trim = ""
-            if eff_intro is not None and eff_intro < float(intro_dur) - 1e-6:  # type: ignore[arg-type]
-                intro_trim = f",atrim=0:{max(0.01, eff_intro):.2f},asetpts=PTS-STARTPTS"
-
-            breakdown_d = float(breakdown_dur)  # type: ignore[arg-type]
-            eff_breakdown = breakdown_end - rep_start
-            breakdown_delay_ms = int(round(rep_start * 1000))
-            breakdown_trim = ""
-            if eff_breakdown < breakdown_d - 1e-6:
-                breakdown_trim = f",atrim=0:{max(0.01, eff_breakdown):.2f},asetpts=PTS-STARTPTS"
-
-            outro_trim = ""
-            if eff_outro is not None:
-                outro_start = win["outro_start"]
-                outro_end = clip_dur
-                outro_delay_ms = int(round(outro_start * 1000))
-                if eff_outro < float(outro_dur) - 1e-6:  # type: ignore[arg-type]
-                    outro_trim = f",atrim=0:{max(0.01, eff_outro):.2f},asetpts=PTS-STARTPTS"
-
-            conditions: list[str] = []
             if eff_intro is not None:
-                conditions.append(f"between(t,0,{eff_intro:.2f})")
-            conditions.append(f"between(t,{rep_start:.2f},{breakdown_end:.2f})")
-            if eff_outro is not None:
-                conditions.append(f"between(t,{outro_start:.2f},{outro_end:.2f})")
-
-            vol_expr = f"if({'+'.join(conditions)},{duck_vol_str},1.0)"
-            base_branch = (
-                f"[0:a]volume='{vol_expr}':eval=frame,aresample=48000,aformat=channel_layouts=stereo[a0];"
-                if has_video_audio
-                else silent_base
+                tracks.append(
+                    (_trim(eff_intro, float(intro_dur)), None, (0.0, eff_intro))  # type: ignore[arg-type]
+                )
+            rep_delay = int(round(rep_start * 1000))
+            tracks.append(
+                (
+                    _trim(breakdown_end - rep_start, float(breakdown_dur)),  # type: ignore[arg-type]
+                    rep_delay,
+                    (rep_start, breakdown_end),
+                )
             )
-
-            tracks_parts: list[str] = []
-            current_input = 1
+            if eff_outro is not None:
+                o_start = win["outro_start"]
+                tracks.append(
+                    (
+                        _trim(eff_outro, float(outro_dur)),  # type: ignore[arg-type]
+                        int(round(o_start * 1000)),
+                        (o_start, clip_dur),
+                    )
+                )
+        else:
+            eff_intro, eff_outro = self.get_effective_narration_durations(
+                intro_dur, outro_dur, clip_dur
+            )
             if eff_intro is not None:
-                tracks_parts.append(
-                    f"[{current_input}:a]aresample=48000,aformat=channel_layouts=stereo{intro_trim}[a{current_input}];"
+                tracks.append(
+                    (_trim(eff_intro, float(intro_dur)), None, (0.0, eff_intro))  # type: ignore[arg-type]
                 )
-                current_input += 1
-
-            tracks_parts.append(
-                f"[{current_input}:a]aresample=48000,aformat=channel_layouts=stereo{breakdown_trim},adelay={breakdown_delay_ms}|{breakdown_delay_ms}[a{current_input}];"
-            )
-            current_input += 1
-
             if eff_outro is not None:
-                tracks_parts.append(
-                    f"[{current_input}:a]aresample=48000,aformat=channel_layouts=stereo{outro_trim},adelay={outro_delay_ms}|{outro_delay_ms}[a{current_input}];"
+                o_start = max(eff_intro or 0.0, clip_dur - eff_outro)
+                tracks.append(
+                    (
+                        _trim(eff_outro, float(outro_dur)),  # type: ignore[arg-type]
+                        int(round(o_start * 1000)),
+                        (o_start, clip_dur),
+                    )
                 )
-                current_input += 1
 
-            total_inputs = current_input
-            amix_in = "".join(f"[a{i}]" for i in range(total_inputs))
-            mix_part = f"{amix_in}amix=inputs={total_inputs}:duration=first:normalize=0[aout]"
-            filter_complex = base_branch + "".join(tracks_parts) + mix_part
-            return filter_complex, total_inputs
-
-        # Standard 2-cue (intro / outro) branch (preserves exact existing formatting)
-        eff_intro, eff_outro = self.get_effective_narration_durations(
-            intro_dur, outro_dur, clip_dur
-        )
-
-        if eff_intro is not None and eff_outro is not None:
-            intro_d = float(intro_dur)  # type: ignore[arg-type]
-            outro_d = float(outro_dur)  # type: ignore[arg-type]
-            outro_start = max(eff_intro, clip_dur - eff_outro)
-            outro_end = clip_dur
-            intro_end = eff_intro
-            delay_ms = int(round(outro_start * 1000))
-
-            intro_trim = (
-                f",atrim=0:{max(0.01, eff_intro):.2f},asetpts=PTS-STARTPTS"
-                if eff_intro < intro_d - 1e-6
-                else ""
-            )
-            outro_trim = (
-                f",atrim=0:{max(0.01, eff_outro):.2f},asetpts=PTS-STARTPTS"
-                if eff_outro < outro_d - 1e-6
-                else ""
+        if has_callout:
+            c_start = float(callout_start) if callout_start is not None else clip_dur * 0.35
+            c_dur = float(callout_dur)  # type: ignore[arg-type]
+            c_start = max(0.0, min(c_start, clip_dur - 0.2))
+            c_eff = min(c_dur, max(0.01, clip_dur - c_start))
+            tracks.append(
+                (
+                    _trim(c_eff, c_dur),
+                    int(round(c_start * 1000)),
+                    (c_start, c_start + c_eff),
+                )
             )
 
+        windows = [t[2] for t in tracks if t[2] is not None]
+        if duck_full:
+            vol_expr = duck_vol_str
+        elif finalize:
+            vol_expr = self._ramped_duck_expr(windows, self.duck_volume, self.crossfade_seconds)
+        else:
             vol_expr = (
-                f"if(between(t,0,{intro_end:.2f})+"
-                f"between(t,{outro_start:.2f},{outro_end:.2f}),"
-                f"{duck_vol_str},1.0)"
-            )
-            base_branch = (
-                f"[0:a]volume='{vol_expr}':eval=frame,aresample=48000,aformat=channel_layouts=stereo[a0];"
-                if has_video_audio
-                else silent_base
-            )
-            filter_complex = (
-                f"{base_branch}"
-                f"[1:a]aresample=48000,aformat=channel_layouts=stereo{intro_trim}[a1];"
-                f"[2:a]aresample=48000,aformat=channel_layouts=stereo{outro_trim},adelay={delay_ms}|{delay_ms}[a2];"
-                f"[a0][a1][a2]amix=inputs=3:duration=first:normalize=0[aout]"
-            )
-            return filter_complex, 3
-
-        if eff_intro is not None and eff_outro is None:
-            intro_d = float(intro_dur)  # type: ignore[arg-type]
-            intro_end = eff_intro
-            intro_trim = (
-                f",atrim=0:{max(0.01, eff_intro):.2f},asetpts=PTS-STARTPTS"
-                if eff_intro < intro_d - 1e-6
-                else ""
+                "if("
+                + "+".join(
+                    f"between(t,{0 if a == 0 else format(a, '.2f')},{b:.2f})" for a, b in windows
+                )
+                + f",{duck_vol_str},1.0)"
             )
 
-            vol_expr = f"if(between(t,0,{intro_end:.2f}),{duck_vol_str},1.0)"
-            base_branch = (
-                f"[0:a]volume='{vol_expr}':eval=frame,aresample=48000,aformat=channel_layouts=stereo[a0];"
-                if has_video_audio
-                else silent_base
-            )
-            filter_complex = (
-                f"{base_branch}"
-                f"[1:a]aresample=48000,aformat=channel_layouts=stereo{intro_trim}[a1];"
-                f"[a0][a1]amix=inputs=2:duration=first:normalize=0[aout]"
-            )
-            return filter_complex, 2
-
-        # eff_outro is not None and eff_intro is None
-        outro_d = float(outro_dur)  # type: ignore[arg-type]
-        outro_start = max(0.0, clip_dur - eff_outro)  # type: ignore[operator]
-        outro_end = clip_dur
-        delay_ms = int(round(outro_start * 1000))
-        outro_trim = (
-            f",atrim=0:{max(0.01, eff_outro):.2f},asetpts=PTS-STARTPTS"  # type: ignore[operator]
-            if eff_outro < outro_d - 1e-6  # type: ignore[operator]
-            else ""
-        )
-
-        vol_expr = (
-            f"if(between(t,{outro_start:.2f},{outro_end:.2f}),{duck_vol_str},1.0)"
-        )
         base_branch = (
-            f"[0:a]volume='{vol_expr}':eval=frame,aresample=48000,aformat=channel_layouts=stereo[a0];"
+            f"[0:a]volume='{vol_expr}':eval=frame,{norm}[a0];"
             if has_video_audio
             else silent_base
         )
-        filter_complex = (
-            f"{base_branch}"
-            f"[1:a]aresample=48000,aformat=channel_layouts=stereo{outro_trim},adelay={delay_ms}|{delay_ms}[a1];"
-            f"[a0][a1]amix=inputs=2:duration=first:normalize=0[aout]"
-        )
-        return filter_complex, 2
+
+        narr_tail = ""
+        if finalize:
+            narr_tail = (
+                f",loudnorm=I=-16:TP=-1.5:LRA=11,{norm},"
+                f"volume={self.narration_gain_db:.1f}dB"
+            )
+        parts: list[str] = []
+        for idx, (trim, delay_ms, _w) in enumerate(tracks, start=1):
+            delay = f",adelay={delay_ms}|{delay_ms}" if delay_ms is not None else ""
+            parts.append(f"[{idx}:a]{norm}{trim}{narr_tail}{delay}[a{idx}];")
+
+        total_inputs = 1 + len(tracks)
+        amix_in = "".join(f"[a{i}]" for i in range(total_inputs))
+        out_label = "[amixed]" if finalize else "[aout]"
+        mix_part = f"{amix_in}amix=inputs={total_inputs}:duration=first:normalize=0{out_label}"
+        graph = base_branch + "".join(parts) + mix_part
+        if finalize:
+            graph += f";[amixed]loudnorm=I={self.target_lufs:g}:TP=-1.5:LRA=11,{norm}[aout]"
+        return graph, total_inputs
 
     def _probe_audio_duration(self, audio_path: Path | None) -> float | None:
         """Probe narration track duration via soundfile with ffprobe fallback (supports .wav/.m4a/.mp3/.aac)."""
@@ -736,7 +554,7 @@ class TransformativeNarrator:
                 "default=noprint_wrappers=1:nokey=1",
                 str(p),
             ]
-            res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
             val = float(res.stdout.strip())
             if val > 0.05:
                 return val
@@ -759,7 +577,7 @@ class TransformativeNarrator:
                 "csv=p=0",
                 str(video_path),
             ]
-            res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
             return bool(res.stdout.strip())
         except Exception as exc:
             logger.debug("Audio stream probe failed (%s); assuming audio present", exc)
@@ -776,8 +594,15 @@ class TransformativeNarrator:
         breakdown_wav: Path | None = None,
         replay_start_time: float | None = None,
         replay_start: float | None = None,
+        callout_wav: Path | None = None,
+        callout_start: float | None = None,
+        duck_full: bool = False,
     ) -> Path:
-        """Mix intro/outro/breakdown voiceovers over ducked stream audio while copying video stream (-c:v copy)."""
+        """Mix intro/outro/breakdown/callout voiceovers over ducked stream audio (-c:v copy).
+
+        The callout is voiced over the moment (stream ducked under it only); ``duck_full``
+        keeps the stream ducked for the whole clip. The mix ends in loudnorm to ``target_lufs``.
+        """
         input_video = Path(input_video)
         output_video = Path(output_video)
         output_video.parent.mkdir(parents=True, exist_ok=True)
@@ -794,7 +619,14 @@ class TransformativeNarrator:
         outro_dur = self._probe_audio_duration(outro_wav)
         breakdown_dur = self._probe_audio_duration(breakdown_wav)
 
-        if intro_dur is None and outro_dur is None and breakdown_dur is None:
+        callout_dur = self._probe_audio_duration(callout_wav)
+
+        if (
+            intro_dur is None
+            and outro_dur is None
+            and breakdown_dur is None
+            and callout_dur is None
+        ):
             return self._bypass_copy(input_video, output_video)
 
         # Ensure clip duration is positive
@@ -810,6 +642,10 @@ class TransformativeNarrator:
             has_video_audio=has_video_audio,
             breakdown_dur=breakdown_dur,
             replay_start_time=effective_replay_start,
+            callout_dur=callout_dur,
+            callout_start=callout_start,
+            duck_full=duck_full,
+            finalize=True,
         )
 
         same_file = False
@@ -831,6 +667,8 @@ class TransformativeNarrator:
             cmd.extend(["-i", str(breakdown_wav)])
         if outro_dur is not None:
             cmd.extend(["-i", str(outro_wav)])
+        if callout_dur is not None:
+            cmd.extend(["-i", str(callout_wav)])
 
         cmd.extend(
             [
@@ -855,7 +693,7 @@ class TransformativeNarrator:
                 cmd,
                 check=True,
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8", errors="replace",
             )
             if same_file and target_out.is_file():
                 shutil.move(str(target_out), str(output_video))
@@ -882,6 +720,60 @@ class TransformativeNarrator:
                     pass
             return self._bypass_copy(input_video, output_video)
 
+    def prepare_callout_track(
+        self, callout: str, temp_dir: Path | None = None
+    ) -> Path | None:
+        """Synthesize the short build-up callout (``transformation.callout_enabled``)."""
+        if (
+            not callout
+            or not callout.strip()
+            or not self.enabled
+            or not self.callout_enabled
+            or str(self.mode or "").strip().lower() == "raw"
+        ):
+            return None
+        temp = Path(temp_dir) if temp_dir is not None else Path(tempfile.gettempdir())
+        temp.mkdir(parents=True, exist_ok=True)
+        try:
+            return self.synthesize_speech(callout, temp / "narrator_callout.wav", max_seconds=3.0)
+        finally:
+            self.release()
+
+    def normalize_audio(self, input_video: Path, output_video: Path) -> Path:
+        """Loudnorm the clip audio to ``target_lufs`` with ``-c:v copy`` (no narration mix ran)."""
+        input_video = Path(input_video)
+        output_video = Path(output_video)
+        output_video.parent.mkdir(parents=True, exist_ok=True)
+        if not self._has_audio_stream(input_video):
+            return self._bypass_copy(input_video, output_video)
+
+        try:
+            same_file = input_video.resolve() == output_video.resolve()
+        except OSError:
+            same_file = str(input_video) == str(output_video)
+        target_out = (
+            output_video.with_name(f"{output_video.stem}_norm_tmp{output_video.suffix}")
+            if same_file
+            else output_video
+        )
+        cmd = [
+            "ffmpeg", "-y", "-i", str(input_video),
+            "-map", "0:v", "-map", "0:a:0",
+            "-af", f"loudnorm=I={self.target_lufs:g}:TP=-1.5:LRA=11,aresample=48000",
+            "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+            str(target_out),
+        ]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, text=True, encoding="utf-8", errors="replace")
+            if same_file and target_out.is_file():
+                shutil.move(str(target_out), str(output_video))
+            return output_video
+        except Exception as exc:
+            logger.warning("Audio normalization failed (%s); keeping original audio", exc)
+            if target_out != output_video and target_out.exists():
+                target_out.unlink(missing_ok=True)
+            return self._bypass_copy(input_video, output_video)
+
     def _bypass_copy(self, input_video: Path, output_video: Path) -> Path:
         """Safely copy or preserve video without mixing."""
         try:
@@ -905,7 +797,7 @@ class TransformativeNarrator:
                 "default=noprint_wrappers=1:nokey=1",
                 str(video_path),
             ]
-            res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
             val = float(res.stdout.strip())
             if val > 0:
                 return val

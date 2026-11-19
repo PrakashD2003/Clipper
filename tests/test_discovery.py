@@ -359,3 +359,16 @@ def test_L5_G6_filters_live_status_age_and_title(tmp_path):
     ]
     ids = {s.video_id for s in disc._filter_streams(entries, "GTA 6")}
     assert ids == {"good000000a", "nostatus000"}
+
+
+def test_F5_blocked_streamers_are_dropped_case_insensitively(tmp_path):
+    cfg = _make_config(tmp_path, {"min_viewers": 0, "min_duration_hours": 0})
+    cfg._data.setdefault("discovery", {})["blocked_streamers"] = ["BadStreamer", "  other  "]
+    disc = YouTubeDiscovery(cfg)
+    base = {"duration": 7200, "view_count": 5000, "title": "GTA 6 stream"}
+    entries = [
+        {**base, "id": "blocked0001", "uploader": "badstreamer"},
+        {**base, "id": "blocked0002", "channel": "OTHER"},
+        {**base, "id": "allowed0001", "uploader": "GoodOne"},
+    ]
+    assert [s.video_id for s in disc._filter_streams(entries, "GTA 6")] == ["allowed0001"]

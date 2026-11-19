@@ -45,7 +45,7 @@ streamclipper-mcp = "streamclipper.mcp_server:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-streamclipper = ["config.default.yaml", "prompts/*.txt"]
+streamclipper = ["config.default.yaml", "prompts/*.txt", "assets/*.onnx", "assets/*.txt"]
 
 [tool.pytest.ini_options]
 asyncio_default_fixture_loop_scope = "function"

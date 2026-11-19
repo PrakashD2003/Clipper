@@ -168,7 +168,7 @@ class Highlight(SerializableModel):
     transcript_chunk: str = ""    # the spoken words in this range
     word_timestamps: list[WordTimestamp] = field(default_factory=list)
     # YPP Transformative Narrative fields (Phase 3+, default-valued for backward compat)
-    moment_type: str = "hype"          # funny | fail | graphics_detail | hype | clutch | chat_chaos | lore_secret | analysis
+    moment_type: str = "hype"          # funny | fail | graphics_detail | hype | clutch | chat_chaos | lore_secret | analysis | reaction
     narration_intro: str = ""          # 3-4s tone-matched spoken setup (10-15 words)
     narration_outro: str = ""          # 3-4s tone-matched spoken punchline / callout / takeaway (10-15 words)
     context_badge: str = ""            # Short adaptive pill (e.g., "🎨 Insane Detail", "💀 Instant Karma", "🔥 Clutch Escape")
@@ -180,6 +180,7 @@ class Highlight(SerializableModel):
     music_risk: str = "CLEAN"          # CLEAN | LOW | HIGH_MUSIC_DETECTED
     music_confidence: float = 0.0      # Harmonic-percussive music confidence 0.0-1.0
     bounds_adjustment: str = ""        # How the clip range was fitted to length limits ("" = unchanged)
+    callout: str = ""                  # 4-6 word voiced callout said during the build-up
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Highlight":
@@ -219,6 +220,7 @@ class Highlight(SerializableModel):
                 data.get("music_confidence") if data.get("music_confidence") is not None else 0.0
             ),
             bounds_adjustment=data.get("bounds_adjustment") or "",
+            callout=data.get("callout") or "",
         )
 
 
@@ -264,6 +266,7 @@ class ClipMetadata(SerializableModel):
     breakdown_callout: str = ""
     music_risk: str = "CLEAN"
     music_confidence: float = 0.0
+    callout: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ClipMetadata":
@@ -288,6 +291,7 @@ class ClipMetadata(SerializableModel):
             music_confidence=float(
                 data.get("music_confidence") if data.get("music_confidence") is not None else 0.0
             ),
+            callout=data.get("callout") or "",
         )
 
 

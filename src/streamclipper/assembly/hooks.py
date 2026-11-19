@@ -10,6 +10,8 @@ from moviepy import CompositeVideoClip, ImageClip
 from PIL import Image, ImageDraw, ImageFont
 
 from ..config import Config
+from .layout import LayoutGeometry
+from .textutil import strip_unrenderable
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +124,7 @@ def render_hook_banner(
     stroke_width: int = 3,
 ) -> np.ndarray:
     """Render hook title text inside a rounded dark banner into an RGBA numpy array."""
+    text = strip_unrenderable(text)
     font = _load_font(font_name, font_size)
     pad_x = 32
     pad_y = 18
@@ -179,6 +182,7 @@ def render_context_badge(
     max_width: int | None = None,
 ) -> np.ndarray:
     """Render a compact context badge pill into an RGBA numpy array."""
+    text = strip_unrenderable(text)
     font = _load_font(font_name, font_size)
     tmp = Image.new("RGBA", (1, 1))
     d_tmp = ImageDraw.Draw(tmp)
@@ -294,6 +298,7 @@ def create_replay_badge(
     font_name: str | None = None,
     duration: float | None = None,
     config: Config | None = None,
+    layout: LayoutGeometry | None = None,
 ) -> ImageClip:
     """Render a high-contrast sports broadcast replay badge pill as an ImageClip positioned at ('center', 140).
 
@@ -312,7 +317,8 @@ def create_replay_badge(
         font_name=font_name,
         max_width=int(width * 0.90) if width is not None else None,
     )
-    clip = ImageClip(arr).with_position(("center", 140))
+    badge_y = 140 if layout is None else layout.game_box.y + 16  # top of game_box
+    clip = ImageClip(arr).with_position(("center", badge_y))
     if duration is not None and duration > 0:
         clip = clip.with_duration(duration)
     return clip
@@ -338,6 +344,7 @@ class HookTitleOverlay:
         video_clip: CompositeVideoClip,
         hook_title: str,
         context_badge: str = "",
+        layout: LayoutGeometry | None = None,
     ) -> CompositeVideoClip:
         """Add hook title banner and optional adaptive context_badge pill to the video."""
         clean_hook = (hook_title or "").strip()
@@ -378,7 +385,11 @@ class HookTitleOverlay:
             hook_banner_h = hook_arr.shape[0]
 
             hook_clip = ImageClip(hook_arr).with_duration(overlay_duration)
-            if self.position == "center":
+            if layout is not None:
+                hb = layout.hook_band
+                hook_y = hb.y + max(0, (hb.h - hook_banner_h) // 2)
+                hook_clip = hook_clip.with_position(("center", hook_y))
+            elif self.position == "center":
                 hook_clip = hook_clip.with_position(("center", "center"))
             else:
                 hook_clip = hook_clip.with_position(("center", 120))
@@ -404,7 +415,18 @@ class HookTitleOverlay:
             )
             badge_clip = ImageClip(badge_arr).with_duration(overlay_duration)
 
-            if should_render_hook and self.position != "center":
+            if layout is not None:
+                hb = layout.hook_band
+                if should_render_hook:
+                    # Hook + badge stack centred as one block inside hook_band.
+                    block_h = hook_banner_h + 12 + badge_arr.shape[0]
+                    top = hb.y + max(0, (hb.h - block_h) // 2)
+                    hook_y = top
+                    badge_y = top + hook_banner_h + 12
+                    layers[1] = layers[1].with_position(("center", hook_y))
+                else:
+                    badge_y = hb.y + max(0, (hb.h - badge_arr.shape[0]) // 2)
+            elif should_render_hook and self.position != "center":
                 badge_y = 120 + hook_banner_h + 16
             elif should_render_hook and self.position == "center":
                 badge_y = (video_h // 2) + (hook_banner_h // 2) + 16

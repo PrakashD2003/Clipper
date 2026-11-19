@@ -29,7 +29,20 @@ VALID_MOMENT_TYPES: frozenset[str] = frozenset(
         "chat_chaos",
         "lore_secret",
         "analysis",
+        "reaction",
     }
+)
+
+# D4: generic phrases the narrative LLM must never produce (lower-case substring match).
+BANNED_PHRASES: tuple[str, ...] = (
+    "the chat went wild",
+    "chat went completely wild",
+    "you won't believe",
+    "watch what happens",
+    "subscribe for more",
+    "over a million people",
+    "insane moment",
+    "most viral",
 )
 
 _THINK_TAG_RE = re.compile(r"<think>.*?</think>", flags=re.DOTALL | re.IGNORECASE)
@@ -495,6 +508,7 @@ class OllamaScorer(Scorer):
             moment_type = _as_str(item.get("moment_type"), "hype").lower()
             if moment_type not in VALID_MOMENT_TYPES:
                 moment_type = "hype"
+            callout = _as_str(item.get("callout"))
 
             sub_clips: list[dict[str, Any]] = []
             raw_sub_clips = item.get("sub_clips")
@@ -543,6 +557,7 @@ class OllamaScorer(Scorer):
                     sub_clips=sub_clips,
                     breakdown_commentary=breakdown_commentary,
                     breakdown_callout=breakdown_callout,
+                    callout=callout,
                 )
             )
 
@@ -552,10 +567,36 @@ class OllamaScorer(Scorer):
     # Narrative & metadata generation
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _find_banned_phrase(texts: list[str], avoid_phrases: list[str] | None) -> str | None:
+        """Return the first banned/avoided phrase found in *texts* (case-insensitive)."""
+        haystack = " ".join(t.lower() for t in texts if t)
+        for phrase in list(BANNED_PHRASES) + [
+            p.strip().lower() for p in (avoid_phrases or []) if p and p.strip()
+        ]:
+            if phrase in haystack:
+                return phrase
+        return None
+
     def generate_narrative(
-        self, highlight: Highlight, streamer: str, game: str
+        self,
+        highlight: Highlight,
+        streamer: str,
+        game: str,
+        *,
+        hook_style: str | None = None,
+        avoid_phrases: list[str] | None = None,
     ) -> tuple[str, str, str]:
-        """Backfill (narration_intro, narration_outro, context_badge) via narrative_writer.txt."""
+        """Backfill (narration_intro, narration_outro, context_badge) via narrative_writer.txt.
+
+        Also fills ``highlight.callout`` when the model returns one. Output containing a banned
+        generic phrase (or any of *avoid_phrases*) is rejected and regenerated (max 2 retries).
+        """
+        chat_lines = []
+        for msg in highlight.chat_burst or []:
+            text = _as_str(msg.get("text") or msg.get("message")) if isinstance(msg, dict) else ""
+            if text:
+                chat_lines.append(f"- {text}")
         base_prompt = self.narrative_prompt.format(
             streamer=streamer or "the streamer",
             game=game or "the game",
@@ -567,18 +608,33 @@ class OllamaScorer(Scorer):
                 self.config.get("transformation.narration_style", "adaptive"), "adaptive"
             )
             or "adaptive",
+            persona=_as_str(
+                self.config.get(
+                    "transformation.persona",
+                    "hyped, witty gaming commentator who reacts like a friend watching live",
+                )
+            ),
+            transcript_excerpt=_as_str(highlight.transcript_chunk)[:1500] or "(none)",
+            chat_samples="\n".join(chat_lines[:5]) or "(none)",
+            avoid_phrases=", ".join(f'"{p}"' for p in (avoid_phrases or [])) or "(none)",
+            hook_style=_as_str(hook_style) or "any",
         )
         existing_intro = _as_str(highlight.narration_intro)
         existing_outro = _as_str(highlight.narration_outro)
         existing_badge = _as_str(highlight.context_badge)
 
-        for attempt in range(1, self.MAX_JSON_RETRIES + 1):
-            prompt = base_prompt
-            if attempt > 1:
+        banned_retries = 0
+        max_banned_retries = 2
+        banned_note = ""
+        result: tuple[str, str, str] | None = None
+        json_failures = 0
+        for attempt in range(1, self.MAX_JSON_RETRIES + max_banned_retries + 1):
+            prompt = base_prompt + banned_note
+            if json_failures and not banned_note:
                 prompt = (
                     f"{base_prompt}\n\n"
                     'IMPORTANT: Return ONLY a valid JSON object with keys '
-                    '"narration_intro", "narration_outro", and "context_badge".'
+                    '"narration_intro", "narration_outro", "callout", and "context_badge".'
                 )
 
             raw_text = self._call_generate(prompt, json_format=True)
@@ -589,23 +645,53 @@ class OllamaScorer(Scorer):
                 intro = _as_str(data.get("narration_intro")) or existing_intro
                 outro = _as_str(data.get("narration_outro")) or existing_outro
                 badge = _as_str(data.get("context_badge")) or existing_badge
+                callout = _as_str(data.get("callout"))
+
+                bad = self._find_banned_phrase(
+                    [_as_str(data.get("narration_intro")), _as_str(data.get("narration_outro")), callout],
+                    avoid_phrases,
+                )
+                if bad and banned_retries < max_banned_retries:
+                    banned_retries += 1
+                    logger.warning("Narrative contained banned phrase %r; regenerating.", bad)
+                    banned_note = (
+                        f'\n\nREJECTED: your previous answer used the banned phrase "{bad}". '
+                        "Rewrite every line without it, using concrete details from the excerpt."
+                    )
+                    result = (intro, outro, badge)
+                    continue
+                if bad:
+                    logger.warning("Narrative still contains banned phrase %r after retries.", bad)
+
+                if callout and not highlight.callout:
+                    highlight.callout = callout
                 if not highlight.breakdown_commentary and data.get("breakdown_commentary"):
                     highlight.breakdown_commentary = _as_str(data.get("breakdown_commentary"))
                 if not highlight.breakdown_callout and data.get("breakdown_callout"):
                     highlight.breakdown_callout = _as_str(data.get("breakdown_callout"))
                 return intro, outro, badge
             except (json.JSONDecodeError, ValueError) as exc:
+                json_failures += 1
                 logger.warning(
                     "Malformed JSON from generate_narrative (attempt %d/%d): %s",
-                    attempt,
+                    json_failures,
                     self.MAX_JSON_RETRIES,
                     exc,
                 )
+                banned_note = ""
+                if json_failures >= self.MAX_JSON_RETRIES:
+                    break
 
+        if result is not None:
+            return result
         return existing_intro, existing_outro, existing_badge
 
     def _generate_hook_title(
-        self, highlight: Highlight, streamer: str, game: str
+        self,
+        highlight: Highlight,
+        streamer: str,
+        game: str,
+        hook_style: str | None = None,
     ) -> str:
         """Generate a short hook title using hook_generator.txt."""
         prompt = self.hook_prompt.format(
@@ -613,6 +699,7 @@ class OllamaScorer(Scorer):
             game=game or "the game",
             description=_as_str(highlight.reason),
             quote=_as_str(highlight.best_quote),
+            hook_style=_as_str(hook_style) or "any",
         )
         raw_text = self._call_generate(prompt, json_format=False)
         cleaned = _clean_llm_text(raw_text)
@@ -724,9 +811,11 @@ class OllamaScorer(Scorer):
         game: str,
         source_url: str,
         mode: str | None = None,
+        hook_style: str | None = None,
+        avoid_phrases: list[str] | None = None,
     ) -> ClipMetadata:
-        """Generate hook title, narrative fields, caption, and hashtags for a highlight."""
-        hook_title = self._generate_hook_title(highlight, streamer, game)
+        """Generate hook title, narrative fields, callout, caption, and hashtags for a highlight."""
+        hook_title = self._generate_hook_title(highlight, streamer, game, hook_style)
 
         if mode is not None and str(mode).strip():
             requested_mode = str(mode).strip().lower()
@@ -773,7 +862,11 @@ class OllamaScorer(Scorer):
 
             if need_narrative:
                 gen_intro, gen_outro, gen_badge = self.generate_narrative(
-                    highlight, streamer, game
+                    highlight,
+                    streamer,
+                    game,
+                    hook_style=hook_style,
+                    avoid_phrases=avoid_phrases,
                 )
                 narration_intro = narration_intro or gen_intro
                 narration_outro = narration_outro or gen_outro
@@ -810,4 +903,44 @@ class OllamaScorer(Scorer):
             breakdown_callout=breakdown_callout,
             music_risk=highlight.music_risk,
             music_confidence=highlight.music_confidence,
+            callout=(
+                _as_str(highlight.callout)
+                if transformation_mode != "raw"
+                and bool(self.config.get("transformation.callout_enabled", True))
+                else ""
+            ),
         )
+
+    def generate_countdown_lines(
+        self, highlights: list[Highlight], streamer: str, game: str
+    ) -> list[str]:
+        """Return one short ranking line per highlight, ordered #3 -> #1 (countdown order)."""
+        n = len(highlights)
+        if n == 0:
+            return []
+        items = "\n".join(
+            f"{i + 1}. {_as_str(h.title) or 'Moment'} - {_as_str(h.reason)}"
+            for i, h in enumerate(highlights)
+        )
+        prompt = (
+            f"Write a top-{n} countdown for gaming Shorts by {streamer or 'the streamer'} "
+            f"playing {game or 'the game'}. Items, listed in countdown order (#{n} first, #1 last):\n"
+            f"{items}\n\n"
+            "For each item write ONE short spoken ranking line (max 10 words) that names a concrete "
+            'detail from the item. No generic hype. Return strict JSON: {"lines": ["...", ...]} '
+            f"with exactly {n} lines in the same order."
+        )
+        fallback = [f"Number {n - i}: {_as_str(h.title) or 'this moment'}" for i, h in enumerate(highlights)]
+        for _ in range(self.MAX_JSON_RETRIES):
+            raw_text = self._call_generate(prompt, json_format=True)
+            try:
+                data = json.loads(_clean_llm_text(raw_text))
+                lines = data.get("lines") if isinstance(data, dict) else data
+                if not isinstance(lines, list):
+                    raise ValueError("Expected a list of countdown lines.")
+                cleaned = [_as_str(x) for x in lines]
+                if len(cleaned) >= n and all(cleaned[:n]):
+                    return cleaned[:n]
+            except (json.JSONDecodeError, ValueError) as exc:
+                logger.warning("Malformed countdown JSON: %s", exc)
+        return fallback

@@ -126,6 +126,9 @@ class Scorer(ABC):
         self.min_clip_seconds = config.get("analysis.min_clip_seconds", 30)
         self.max_clip_seconds = config.get("analysis.max_clip_seconds", 90)
         self.hard_max_clip_seconds = config.get("analysis.hard_max_clip_seconds", 180)
+        self.skip_intro_seconds = max(
+            0.0, float(config.get("analysis.skip_intro_minutes", 5)) * 60.0
+        )
         self.adjust_clip_bounds = bool(config.get("analysis.adjust_clip_bounds", True))
         self.weights = config.get(
             "analysis.weights",
@@ -200,6 +203,8 @@ class Scorer(ABC):
                 and h.end > h.start
             ):
                 continue
+            if h.start < self.skip_intro_seconds:
+                continue  # D2: skip highlights inside the intro window
 
             validated_beats = self._validate_sub_clips(
                 h.sub_clips,
@@ -420,6 +425,8 @@ class Scorer(ABC):
             # Collect timestamped segment lines overlapping this window
             lines: list[str] = []
             for seg in transcript.segments:
+                if seg.start < self.skip_intro_seconds:
+                    continue  # D2: pre-stream intro / starting-soon talk
                 if seg.end > window_start and seg.start < window_end:
                     lines.append(f"[{seg.start:.1f}s - {seg.end:.1f}s] {seg.text}")
             if lines:

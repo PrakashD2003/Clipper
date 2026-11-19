@@ -10,6 +10,8 @@ from typing import Any
 
 from ..config import Config
 from ..models import WordTimestamp
+from .layout import LayoutGeometry
+from .textutil import strip_unrenderable
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +129,7 @@ def _color_to_ass_style(color: str, default: str = "&H00FFFFFF") -> str:
 
 def _escape_ass_text(text: str) -> str:
     """Sanitize newlines and escape ASS override delimiters safely for libass."""
-    sanitized = "" if text is None else str(text)
+    sanitized = strip_unrenderable(text)
     sanitized = sanitized.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
     sanitized = sanitized.replace("{", r"\{").replace("}", r"\}")
     # Neutralize ASS control codes (\N, \n, \h) without doubling literal backslashes in libass
@@ -205,12 +207,31 @@ class AssCaptionBurner:
         clip_duration: float | None = None,
         breakdown_callout: str = "",
         breakdown_window: tuple[float | None, float | None] | None = None,
+        layout: LayoutGeometry | None = None,
+        callout: str = "",
+        callout_window: tuple[float, float] | None = None,
     ) -> Path:
         """Write an .ass subtitle file honoring captions.style, optional ChatTicker events, and narration windows."""
         target_path = Path(ass_path)
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
         secondary_style_color = "&H00" + self.highlight_bgr[2:-1]
+        hormozi_margin_v = self.margin_v
+        ticker_align, ticker_margin_v = 9, 260
+        callout_style = "Hormozi"
+        callout_style_line = ""
+        if layout is not None:
+            # Captions/cards sit in the upper part of caption_band, ticker in the lower part;
+            # nothing is placed over game_box.
+            cb = layout.caption_band
+            hormozi_margin_v = max(0, self.height - int(cb.y + 0.62 * cb.h))
+            ticker_margin_v = int(cb.y + 0.70 * cb.h)
+            callout_style = "Callout"
+            callout_style_line = (
+                f"Style: Callout,{self.font},{max(1, int(self.font_size * 0.8))},"
+                f"{self.primary_color},{secondary_style_color},{self.stroke_color},&H80000000,"
+                f"-1,0,0,0,100,100,0,0,1,{self.stroke_width},0,8,60,60,{int(cb.y + 8)},1"
+            )
         # Note: For BorderStyle=3 (opaque box) on ChatTicker, OutlineColour controls the box fill!
         header = f"""[Script Info]
 ScriptType: v4.00+
@@ -220,9 +241,9 @@ WrapStyle: 0
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Hormozi,{self.font},{self.font_size},{self.primary_color},{secondary_style_color},{self.stroke_color},&H80000000,-1,0,0,0,100,100,0,0,1,{self.stroke_width},0,2,60,60,{self.margin_v},1
-Style: ChatTicker,{self.font},34,&H00FFFFFF,&H00FFFFFF,&H99000000,&H99000000,-1,0,0,0,100,100,0,0,3,2,0,9,40,40,260,1
-
+Style: Hormozi,{self.font},{self.font_size},{self.primary_color},{secondary_style_color},{self.stroke_color},&H80000000,-1,0,0,0,100,100,0,0,1,{self.stroke_width},0,2,60,60,{hormozi_margin_v},1
+Style: ChatTicker,{self.font},34,&H00FFFFFF,&H00FFFFFF,&H99000000,&H99000000,-1,0,0,0,100,100,0,0,3,2,0,{ticker_align},40,40,{ticker_margin_v},1
+{callout_style_line}
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
@@ -339,6 +360,16 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 events.append(
                     f"Dialogue: 0,{_sec_to_ass_time(float(b_start))},{_sec_to_ass_time(float(b_end))},"
                     f"Hormozi,,0,0,0,,{{\\c{self.highlight_bgr}}}{safe_callout}"
+                )
+
+        # Short punchy callout card voiced over the moment
+        if callout and str(callout).strip() and callout_window:
+            c_start, c_end = callout_window
+            if c_start is not None and c_end is not None and float(c_end) > float(c_start):
+                safe_c = _escape_ass_text(str(callout).strip().upper())
+                events.append(
+                    f"Dialogue: 0,{_sec_to_ass_time(float(c_start))},{_sec_to_ass_time(float(c_end))},"
+                    f"{callout_style},,0,0,0,,{{\\c{self.highlight_bgr}}}{safe_c}"
                 )
 
         # Emit tone-matched narration outro card during ducked outro window

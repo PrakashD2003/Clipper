@@ -409,6 +409,10 @@ class TestScorerBreakdownAndCopyright:
                 return [h_clean, h_music]
 
         config = _make_config(tmp_path)
+        # v3 defaults drop early chunks / high-music picks; disable so the penalty path is exercised.
+        config._data.setdefault("analysis", {}).update(
+            {"skip_intro_minutes": 0, "skip_high_music": False}
+        )
         scorer = DummyScorer(config)
 
         transcript = TranscriptionResult(
@@ -569,3 +573,258 @@ class TestBreakdownReviewRegressions:
         assert combined._source_clips[0] is a
         assert combined._source_clips[1] is b
         assert sum(1 for s in combined._source_clips if s is a) == 1
+
+
+# ---------------------------------------------------------------------------
+# Output Quality v3 - Batch E (pipeline integration)
+# ---------------------------------------------------------------------------
+
+
+def _v3_meta(**overrides: Any) -> ClipMetadata:
+    base: dict[str, Any] = dict(
+        hook_title="Epic Wipeout",
+        caption="Wait for it...",
+        hashtags=["GTA6"],
+        streamer="Fleet",
+        game="GTA 6",
+        source_url="https://youtube.com/watch?v=xyz",
+        clip_start=100.0,
+        clip_end=145.0,
+        highlight_score=8.5,
+        moment_type="funny",
+        transformation_mode="narrative",
+        narration_intro="Look at this absolute chaos right here.",
+        narration_outro="And that is why you never trust the brakes.",
+    )
+    base.update(overrides)
+    return ClipMetadata(**base)
+
+
+def _run_assemble(
+    tmp_path: Path,
+    *,
+    config: Config | None = None,
+    meta: ClipMetadata | None = None,
+    mode: str = "narrative",
+    facecam: Any = None,
+    highlight: Highlight | None = None,
+    **assemble_kwargs: Any,
+) -> dict[str, Any]:
+    """Run Pipeline._assemble_highlight with every heavy collaborator mocked; return call info."""
+    cfg = config or _make_config(tmp_path)
+    pipeline = Pipeline(cfg)
+    h = highlight or _make_highlight(moment_type="funny")
+    h.peak_time = 120.0
+    meta = meta or _v3_meta()
+    seg = tmp_path / "seg.mp4"
+    seg.write_bytes(b"dummy-video")
+    out = tmp_path / "out.mp4"
+    out.write_bytes(b"x")
+    clip = MagicMock()
+    clip.duration = 45.0
+    clip._trim_start = 3.0
+    clip._layout = "LAYOUT"
+    with (
+        patch(
+            "streamclipper.assembly.facecam.FacecamDetector.detect", return_value=facecam
+        ) as m_detect,
+        patch(
+            "streamclipper.assembly.composer.VideoComposer.compose", return_value=clip
+        ) as m_compose,
+        patch(
+            "streamclipper.assembly.composer.VideoComposer.compose_instant_replay",
+            return_value=(clip, 45.0),
+        ) as m_replay,
+        patch(
+            "streamclipper.assembly.hooks.HookTitleOverlay.add_hook", return_value=clip
+        ) as m_hook,
+        patch("streamclipper.output.exporter.Exporter.export", return_value=out) as m_export,
+        patch(
+            "streamclipper.output.organizer.FileOrganizer.save_clip",
+            return_value=ClipResult(
+                video_path=out,
+                metadata_path=tmp_path / "out.json",
+                metadata=meta,
+                duration_seconds=45.0,
+            ),
+        ),
+    ):
+        result = pipeline._assemble_highlight(
+            highlight=h,
+            metadata=meta,
+            segment_paths=[seg],
+            clip_index=1,
+            mode=mode,
+            voice_intro_path=None,
+            voice_outro_path=None,
+            **assemble_kwargs,
+        )
+    return {
+        "result": result,
+        "detect": m_detect,
+        "compose": m_compose,
+        "replay": m_replay,
+        "hook": m_hook,
+        "export": m_export,
+        "pipeline": pipeline,
+        "out": out,
+    }
+
+
+class TestOutputQualityV3Pipeline:
+    def test_E1_facecam_detect_gets_segments_and_streamer(self, tmp_path: Path) -> None:
+        info = _run_assemble(tmp_path)
+        args, kwargs = info["detect"].call_args
+        assert isinstance(args[0], list)
+        assert kwargs["streamer"] == "Fleet"
+
+    def test_E2_gate_skips_non_gameplay_without_facecam(self, tmp_path: Path) -> None:
+        info = _run_assemble(tmp_path, gate_non_gameplay=True, facecam=None)
+        assert info["result"] is None
+        assert not info["export"].called
+
+    def test_E2_gate_reaction_layout_with_facecam_and_ok_moment(self, tmp_path: Path) -> None:
+        info = _run_assemble(tmp_path, gate_non_gameplay=True, facecam=MagicMock())
+        assert info["compose"].call_args[1]["layout_kind"] == "reaction"
+        bad = _run_assemble(
+            tmp_path,
+            gate_non_gameplay=True,
+            facecam=MagicMock(),
+            meta=_v3_meta(moment_type="analysis"),
+        )
+        assert bad["result"] is None
+
+    def test_E3_reaction_moment_uses_reaction_layout_and_passes_layout(
+        self, tmp_path: Path
+    ) -> None:
+        info = _run_assemble(
+            tmp_path, facecam=MagicMock(), meta=_v3_meta(moment_type="reaction")
+        )
+        assert info["compose"].call_args[1]["layout_kind"] == "reaction"
+        assert info["hook"].call_args[1]["layout"] == "LAYOUT"
+        assert info["export"].call_args[1]["layout"] == "LAYOUT"
+
+    def test_E3_default_layout_kind_not_forced(self, tmp_path: Path) -> None:
+        info = _run_assemble(tmp_path, facecam=MagicMock())
+        assert "layout_kind" not in info["compose"].call_args[1]
+
+    def test_E4_callout_voiced_at_40_percent_of_moment(self, tmp_path: Path) -> None:
+        meta = _v3_meta()
+        meta.callout = "Watch the left tire"  # type: ignore[attr-defined]
+        info = _run_assemble(tmp_path, meta=meta)
+        kw = info["export"].call_args[1]
+        assert kw["callout"] == "Watch the left tire"
+        assert kw["callout_start"] == pytest.approx(0.4 * 45.0)
+
+    def test_E4_callout_disabled_by_config(self, tmp_path: Path) -> None:
+        cfg = _make_config(tmp_path)
+        cfg._data.setdefault("transformation", {})["callout_enabled"] = False
+        meta = _v3_meta()
+        meta.callout = "Watch the left tire"  # type: ignore[attr-defined]
+        info = _run_assemble(tmp_path, config=cfg, meta=meta)
+        assert "callout" not in info["export"].call_args[1]
+
+    def test_E5_budget_shrinks_replay_before_moment(self, tmp_path: Path) -> None:
+        pipeline = Pipeline(_make_config(tmp_path))
+        plan = pipeline._plan_budget(
+            moment_dur=50.0, mode="breakdown", replay_window=5.0, replay_speed=0.5
+        )
+        assert plan["moment"] == 50.0  # moment untouched while the replay can shrink
+        assert plan["replay_window"] == pytest.approx(4.5)
+        assert plan["total"] <= 59.0 + 1e-6
+
+    def test_E5_budget_trims_moment_when_replay_at_minimum(self, tmp_path: Path) -> None:
+        pipeline = Pipeline(_make_config(tmp_path))
+        plan = pipeline._plan_budget(
+            moment_dur=80.0, mode="breakdown", replay_window=5.0, replay_speed=0.5
+        )
+        assert plan["replay_window"] == pytest.approx(2.0)
+        assert plan["total"] <= 59.0 + 1e-6
+
+    def test_E5_low_commentary_trims_moment_and_writes_ratio(self, tmp_path: Path) -> None:
+        import json
+
+        pipeline = Pipeline(_make_config(tmp_path))
+        plan = pipeline._plan_budget(
+            moment_dur=40.0,
+            mode="narrative",
+            narration_seconds=6.0,
+            callout_seconds=1.0,
+        )
+        assert plan["moment"] < 40.0
+        raw = pipeline._plan_budget(moment_dur=40.0, mode="raw")
+        assert raw["moment"] == 40.0
+        out = tmp_path / "clip.json"
+        out.write_text("{}", encoding="utf-8")
+        pipeline._annotate_clip_json(
+            ClipResult(
+                video_path=tmp_path / "clip.mp4",
+                metadata_path=out,
+                metadata=_v3_meta(),
+                duration_seconds=1.0,
+            ),
+            {"commentary_ratio": plan["coverage"]},
+        )
+        assert json.loads(out.read_text(encoding="utf-8"))["commentary_ratio"] == plan["coverage"]
+
+    def test_E5_hard_trim_cuts_overlong_clip(self, tmp_path: Path) -> None:
+        pipeline = Pipeline(_make_config(tmp_path))
+        video = tmp_path / "long.mp4"
+        video.write_bytes(b"x")
+        with (
+            patch.object(Pipeline, "_probe_duration", return_value=70.0),
+            patch("subprocess.run") as run,
+            patch("os.replace") as repl,
+        ):
+            assert pipeline._hard_trim(video, 59.0) == 59.0
+        cmd = run.call_args[0][0]
+        assert "-t" in cmd and cmd[cmd.index("-t") + 1].startswith("59")
+        assert repl.called
+
+    def test_E6_high_music_ducks_full_clip(self, tmp_path: Path) -> None:
+        cfg = _make_config(tmp_path)
+        cfg._data.setdefault("analysis", {})["skip_high_music"] = False  # E6 needs skip disabled
+        info = _run_assemble(
+            tmp_path,
+            config=cfg,
+            highlight=_make_highlight(music_risk="HIGH_MUSIC_DETECTED"),
+        )
+        assert info["export"].call_args[1]["duck_full"] is True
+        clean = _run_assemble(tmp_path, config=cfg)
+        assert "duck_full" not in clean["export"].call_args[1]
+
+    def test_E8_queued_clip_uses_queued_path(self, tmp_path: Path) -> None:
+        with patch(
+            "streamclipper.output.organizer.FileOrganizer.get_queued_path",
+            return_value=tmp_path / "queued" / "clip.mp4",
+        ) as queued:
+            info = _run_assemble(tmp_path, queued=True)
+        assert queued.called
+        assert info["export"].call_args[1]["output_path"] == tmp_path / "queued" / "clip.mp4"
+
+    def test_E10_blocked_streamer_returns_empty(self, tmp_path: Path) -> None:
+        cfg = _make_config(tmp_path)
+        cfg._data.setdefault("discovery", {})["blocked_streamers"] = ["BadStreamer"]
+        pipeline = Pipeline(cfg)
+        clips = asyncio.run(
+            pipeline.process_stream(
+                "https://youtube.com/watch?v=blocked1", streamer="badstreamer", force=True
+            )
+        )
+        assert clips == []
+
+    def test_E11_post_file_written_next_to_clip(self, tmp_path: Path) -> None:
+        info = _run_assemble(tmp_path)
+        post = tmp_path / "out_post.txt"
+        assert post.is_file()
+        text = post.read_text(encoding="utf-8")
+        assert "Original stream by Fleet" in text
+        assert "Altered or synthetic content" in text
+        assert info["result"] is not None
+
+    def test_E11_post_file_can_be_disabled(self, tmp_path: Path) -> None:
+        cfg = _make_config(tmp_path)
+        cfg._data.setdefault("output", {})["write_post_file"] = False
+        _run_assemble(tmp_path, config=cfg)
+        assert not (tmp_path / "out_post.txt").exists()
+

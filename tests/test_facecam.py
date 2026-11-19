@@ -69,6 +69,14 @@ def create_synthetic_video(
         out.release()
 
 
+@pytest.fixture(autouse=True)
+def _legacy_haar_detector(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Synthetic cartoon faces are Haar-detectable but not YuNet-detectable; Batch B tests opt in."""
+    if request.cls is not None and request.cls.__name__ == "TestBatchB":
+        return
+    monkeypatch.setattr(FacecamDetector, "_load_yunet", staticmethod(lambda: None))
+
+
 # ---------------------------------------------------------------------------
 # Test Classes
 # ---------------------------------------------------------------------------
@@ -277,10 +285,10 @@ class TestThresholdAndConsistency:
     def test_detection_at_or_above_30_percent_succeeds(self, tmp_path: Path) -> None:
         """Verify that when 40% of frames have a facecam (>= 30%), detect succeeds."""
         video_path = tmp_path / "sufficient_consistency.mp4"
-        # 10 frames total: 4 frames with face (40%), 6 frames blank
+        # 10 frames total: 7 frames with face (70% >= 0.6 default), 3 frames blank
         positions: list[tuple[int, int] | None] = [
-            (180, 150), (180, 150), (180, 150), (180, 150),
-            None, None, None, None, None, None,
+            (180, 150), (180, 150), (180, 150), (180, 150), (180, 150), (180, 150), (180, 150),
+            None, None, None,
         ]
         create_synthetic_video(video_path, total_frames=10, face_positions=positions)
 
@@ -288,13 +296,13 @@ class TestThresholdAndConsistency:
         result = detector.detect(video_path, num_samples=10)
         assert result is not None
         assert isinstance(result, FacecamRegion)
-        assert result.confidence == 0.40
+        assert result.confidence == 0.70
 
     def test_scattered_corner_detections_return_none(self, tmp_path: Path) -> None:
         """Verify that detections scattered across different corners with none reaching 30% return None."""
         video_path = tmp_path / "scattered_corners.mp4"
         # 10 frames total: 1 in top-left, 1 in top-right, 1 in bottom-left, 1 in bottom-right, 6 blank
-        # Total corner detections = 4 (40%), but no single corner has >= 3 (30%)
+        # Total detections = 4 (40%), but no single stable position reaches the 60% ratio
         positions: list[tuple[int, int] | None] = [
             (180, 150),   # top-left
             (1100, 150),  # top-right
@@ -393,13 +401,14 @@ class TestEndToEndSyntheticVideo:
         region = detector.detect(video_path, num_samples=10)
         assert region is None
 
-    def test_detect_in_game_center_face_returns_none(self, tmp_path: Path) -> None:
-        """Verify in-game character faces in center are ignored and return None."""
-        video_path = tmp_path / "center_character.mp4"
-        # Face at dead center (640, 360)
-        create_synthetic_video(video_path, total_frames=10, face_positions=[(640, 360)])
+    def test_detect_moving_in_game_face_returns_none(self, tmp_path: Path) -> None:
+        """Verify a face that wanders around the frame (in-game character) fails the jitter test."""
+        video_path = tmp_path / "wandering_character.mp4"
+        positions: list[tuple[int, int] | None] = [(400, 300), (440, 330), (480, 360), (520, 330), (560, 300)]
+        create_synthetic_video(video_path, total_frames=10, face_positions=positions)
 
         detector = FacecamDetector()
+        detector.max_center_jitter = 0.01
         region = detector.detect(video_path, num_samples=10)
         assert region is None
 
@@ -496,3 +505,127 @@ class TestRobustnessAndEdgeCases:
         }
         reconstructed = FacecamRegion.from_dict(data)
         assert reconstructed == region
+
+
+# ---------------------------------------------------------------------------
+# Output Quality v3 - Batch B (B1-B4)
+# ---------------------------------------------------------------------------
+
+def _make_webcam_video(path: Path, frames: int = 10, rect: tuple[int, int, int, int] = (40, 30, 320, 240)) -> None:
+    """Gray 1280x720 video with a dark webcam rectangle with a bright 4px border."""
+    x, y, w, h = rect
+    out = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), 30.0, (1280, 720))
+    try:
+        for _ in range(frames):
+            frame = np.full((720, 1280, 3), 128, dtype=np.uint8)
+            cv2.rectangle(frame, (x, y), (x + w, y + h), (30, 30, 30), -1)
+            cv2.rectangle(frame, (x, y), (x + w, y + h), (255, 255, 255), 4)
+            out.write(frame)
+    finally:
+        out.release()
+
+
+def _fixed_face(monkeypatch: pytest.MonkeyPatch, box: tuple[int, int, int, int]) -> None:
+    monkeypatch.setattr(FacecamDetector, "_detect_faces", lambda self, frame: [box])
+
+
+class TestBatchB:
+    def test_B1_yunet_loaded_and_haar_fallback(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        model = (
+            Path(__file__).resolve().parent.parent
+            / "src" / "streamclipper" / "assets" / "face_detection_yunet_2023mar.onnx"
+        )
+        assert model.is_file()
+        assert FacecamDetector().yunet is not None
+        assert FacecamDetector(use_yunet=False).yunet is None
+        monkeypatch.setattr(FacecamDetector, "_load_yunet", staticmethod(lambda: None))
+        assert FacecamDetector().yunet is None
+
+    def test_B1_yunet_detection_path_runs(self) -> None:
+        blank = np.full((720, 1280, 3), 128, dtype=np.uint8)
+        assert FacecamDetector()._detect_faces(blank) == []
+
+    def test_B2_whole_frame_search_across_segments(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        a, b = tmp_path / "a.mp4", tmp_path / "b.mp4"
+        _make_webcam_video(a, rect=(450, 200, 300, 300))
+        _make_webcam_video(b, rect=(450, 200, 300, 300))
+        _fixed_face(monkeypatch, (500, 250, 140, 140))  # centre of frame, not a corner
+        region = FacecamDetector().detect([a, b], num_samples=10)
+        assert region is not None
+        assert region.confidence == 1.0
+
+    def test_B2_ratio_and_jitter_gates(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        video = tmp_path / "v.mp4"
+        _make_webcam_video(video, frames=10)
+        calls = {"n": 0}
+
+        def sparse(self: FacecamDetector, frame: np.ndarray) -> list[tuple[int, int, int, int]]:
+            calls["n"] += 1
+            return [(100, 60, 140, 140)] if calls["n"] % 2 == 0 else []  # 50% < 0.6
+
+        monkeypatch.setattr(FacecamDetector, "_detect_faces", sparse)
+        assert FacecamDetector().detect(video, num_samples=10) is None
+
+        calls["n"] = 0
+
+        def wandering(self: FacecamDetector, frame: np.ndarray) -> list[tuple[int, int, int, int]]:
+            calls["n"] += 1
+            return [(100 + 12 * calls["n"], 60, 140, 140)]
+
+        monkeypatch.setattr(FacecamDetector, "_detect_faces", wandering)
+        det = FacecamDetector()
+        det.max_center_jitter = 0.01
+        assert det.detect(video, num_samples=10) is None
+
+    def test_B3_expands_to_webcam_rectangle(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        video = tmp_path / "cam.mp4"
+        _make_webcam_video(video, rect=(40, 30, 320, 240))
+        _fixed_face(monkeypatch, (110, 50, 140, 140))
+        region = FacecamDetector().detect(video, num_samples=6)
+        assert region is not None
+        assert abs(region.x - 40) <= 8 and abs(region.y - 30) <= 8
+        assert abs(region.w - 321) <= 12 and abs(region.h - 241) <= 12
+        assert region.w <= 0.45 * 1280 and region.h <= 0.45 * 720
+
+    def test_B3_falls_back_to_padded_box(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        video = tmp_path / "plain.mp4"
+        create_synthetic_video(video, total_frames=10)  # flat gray: no edges
+        _fixed_face(monkeypatch, (500, 300, 150, 150))
+        region = FacecamDetector().detect(video, num_samples=6)
+        assert region is not None
+        assert abs(region.w - 270) <= 1 and abs(region.h - 225) <= 1  # 1.8 / 1.5 padding ratios
+
+    def test_B4_override_profile_and_revalidation(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        import json
+
+        video = tmp_path / "cam.mp4"
+        _make_webcam_video(video, rect=(40, 30, 320, 240))
+        profiles = tmp_path / "profiles.json"
+        cfg_path = tmp_path / "cfg.yaml"
+        cfg_path.write_text(
+            f"facecam:\n  profiles_path: '{profiles.as_posix()}'\n  overrides:\n    bob: [0.5, 0.5, 0.25, 0.25]\n",
+            encoding="utf-8",
+        )
+        cfg = Config(user_config_path=cfg_path)
+
+        # Override wins, no detection needed.
+        monkeypatch.setattr(FacecamDetector, "_detect_faces", lambda self, f: [])
+        r = FacecamDetector(cfg).detect(video, num_samples=4, streamer="bob")
+        assert r is not None and (r.x, r.y, r.w, r.h) == (640, 360, 320, 180)
+
+        # Fresh detection is saved, then reused when re-validated.
+        _fixed_face(monkeypatch, (110, 50, 140, 140))
+        fresh = FacecamDetector(cfg).detect(video, num_samples=6, streamer="alice")
+        assert fresh is not None and profiles.is_file()
+        saved = json.loads(profiles.read_text(encoding="utf-8"))
+        assert "alice" in saved and len(saved["alice"]) == 4 and all(0.0 <= v <= 1.0 for v in saved["alice"])
+
+        reused = FacecamDetector(cfg).detect(video, num_samples=6, streamer="alice")
+        assert reused is not None and (reused.x, reused.y, reused.w, reused.h) == (fresh.x, fresh.y, fresh.w, fresh.h)
+
+        # Stale profile (no face inside it) is dropped and re-detected elsewhere, then overwritten.
+        _fixed_face(monkeypatch, (900, 400, 140, 140))
+        moved = FacecamDetector(cfg).detect(video, num_samples=6, streamer="alice")
+        assert moved is not None and moved.x > 500
+        saved = json.loads(profiles.read_text(encoding="utf-8"))
+        assert saved["alice"][0] > 0.5

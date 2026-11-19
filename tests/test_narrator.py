@@ -42,6 +42,13 @@ from streamclipper.config import Config
 # Test Fixtures & Helpers
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def _no_external_chatterbox():
+    """Never launch the external Chatterbox worker from unit tests."""
+    with patch.object(TransformativeNarrator, "_synthesize_chatterbox", return_value=None):
+        yield
+
+
 @pytest.fixture
 def base_config() -> Config:
     """Fixture providing a default Config instance."""
@@ -119,8 +126,8 @@ class TestTransformativeNarratorConfig:
         assert narrator.enabled is True
         assert narrator.mode == "auto"
         assert narrator.engine == "auto"
-        assert narrator.voice == "af_heart"
-        assert narrator.edge_tts_voice == "en-US-GuyNeural"
+        assert narrator.voice == "am_puck"
+        assert narrator.edge_tts_voice == "en-US-AndrewMultilingualNeural"
         assert narrator.elevenlabs_voice_id == ""
         assert narrator.elevenlabs_model_id == "eleven_multilingual_v2"
         assert pytest.approx(narrator.duck_volume, 0.01) == 0.18
@@ -239,7 +246,7 @@ transformation:
             res = narrator.synthesize_speech("test text", out_wav)
             assert res == out_wav
             mock_edge.assert_called_once()
-            assert narrator.voice == "af_heart"
+            assert narrator.voice == "am_puck"
             assert narrator.edge_tts_voice != narrator.voice
 
     def test_espeak_available_sets_phonemizer_env_when_dll_found(
@@ -859,3 +866,143 @@ class TestMixNarrationWithDucking:
         )
         assert count == 3
         assert "atrim=0:0.00" not in fg
+
+
+# ---------------------------------------------------------------------------
+# Batch C: engine chain, callout, loudness (C3-C5)
+# ---------------------------------------------------------------------------
+
+def _chain_narrator(tmp_path: Path, yaml_body: str) -> TransformativeNarrator:
+    cfg = tmp_path / "chain.yaml"
+    cfg.write_text(yaml_body, encoding="utf-8")
+    return TransformativeNarrator(Config(cfg))
+
+
+def test_C3_chain_first_engine_returning_audio_wins(tmp_path: Path) -> None:
+    n = _chain_narrator(tmp_path, "transformation:\n  tts_engines: [chatterbox, kokoro, edge-tts]\n")
+    out = tmp_path / "c3.wav"
+    with (
+        patch.object(n, "_synthesize_chatterbox", return_value=create_synthetic_wav(out)) as cb,
+        patch.object(n, "_synthesize_kokoro") as ko,
+        patch.object(n, "_synthesize_edge_tts") as ed,
+    ):
+        assert n.synthesize_speech("hello world", out) == out
+    cb.assert_called_once()
+    ko.assert_not_called()
+    ed.assert_not_called()
+
+
+def test_C3_chain_falls_through_failed_engines(tmp_path: Path) -> None:
+    n = _chain_narrator(tmp_path, "transformation:\n  tts_engines: [chatterbox, kokoro, edge-tts]\n")
+    out = tmp_path / "c3b.wav"
+    with (
+        patch.object(n, "_synthesize_chatterbox", return_value=None),
+        patch.object(n, "_synthesize_kokoro", return_value=None),
+        patch.object(n, "_synthesize_edge_tts", return_value=create_synthetic_wav(out)) as ed,
+    ):
+        assert n.synthesize_speech("hello world", out) == out
+    ed.assert_called_once()
+
+
+def test_C3_legacy_engine_overrides_chain(tmp_path: Path) -> None:
+    n = _chain_narrator(
+        tmp_path, 'transformation:\n  tts_engine: "edge-tts"\n  tts_engines: [chatterbox, kokoro]\n'
+    )
+    out = tmp_path / "c3c.wav"
+    with (
+        patch.object(n, "_synthesize_chatterbox") as cb,
+        patch.object(n, "_synthesize_edge_tts", return_value=create_synthetic_wav(out)),
+    ):
+        assert n.synthesize_speech("hello", out) == out
+    cb.assert_not_called()
+
+
+def test_C3_kokoro_and_edge_use_configured_voice_speed_rate(tmp_path: Path) -> None:
+    n = _chain_narrator(
+        tmp_path,
+        "transformation:\n  tts_voice: am_fenrir\n  tts_speed: 1.25\n"
+        '  edge_tts_voice: en-US-AriaNeural\n  edge_tts_rate: "+20%"\n',
+    )
+    assert n.voice == "am_fenrir" and n.tts_speed == 1.25
+    assert n.edge_tts_rate == "+20%"
+    with patch("streamclipper.assembly.narrator.EdgeTTS") as edge_cls:
+        edge_cls.return_value.synthesize.return_value = None
+        n._synthesize_edge_tts("x", tmp_path / "e.wav")
+    edge_cls.assert_called_once_with("en-US-AriaNeural", "+20%")
+
+
+def test_C4_finalize_graph_has_callout_gain_ramps_and_loudnorm(tmp_path: Path) -> None:
+    n = _chain_narrator(
+        tmp_path,
+        "transformation:\n  target_lufs: -14\n  narration_gain_db: 3\n  crossfade_seconds: 0.25\n",
+    )
+    fg, count = n._build_ducking_filtergraph(
+        3.0, 3.0, 20.0, callout_dur=1.5, callout_start=8.0, finalize=True
+    )
+    assert count == 4
+    assert ":eval=frame" in fg
+    assert "clip(min(" in fg and "max(" in fg  # smooth ramps across three windows
+    assert fg.count("loudnorm=I=-16:TP=-1.5:LRA=11") == 3
+    assert fg.count("volume=3.0dB") == 3
+    assert "[3:a]" in fg and "adelay=8000|8000" in fg
+    assert "amix=inputs=4:duration=first:normalize=0[amixed]" in fg
+    assert fg.endswith("[amixed]loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000,aformat=channel_layouts=stereo[aout]")
+
+
+def test_C4_duck_full_keeps_stream_ducked_whole_clip(base_config: Config) -> None:
+    n = TransformativeNarrator(base_config)
+    fg, _ = n._build_ducking_filtergraph(
+        None, None, 10.0, callout_dur=1.0, callout_start=4.0, duck_full=True, finalize=True
+    )
+    assert "[0:a]volume='0.18':eval=frame" in fg
+
+
+def test_C4_callout_only_window_ducks_only_under_callout(base_config: Config) -> None:
+    n = TransformativeNarrator(base_config)
+    fg, count = n._build_ducking_filtergraph(
+        None, None, 10.0, callout_dur=1.0, callout_start=4.0
+    )
+    assert count == 2
+    assert "volume='if(between(t,4.00,5.00),0.18,1.0)':eval=frame" in fg
+
+
+def test_C4_real_mix_with_callout_and_loudnorm(base_config: Config, tmp_path: Path) -> None:
+    n = TransformativeNarrator(base_config)
+    vid = create_synthetic_mp4(tmp_path / "in.mp4", duration_sec=6.0)
+    intro = create_synthetic_wav(tmp_path / "i.wav", 1.0)
+    callout = create_synthetic_wav(tmp_path / "c.wav", 1.0, freq=660.0)
+    out = tmp_path / "mixed.mp4"
+    res = n.mix_narration_with_ducking(
+        vid, out, intro, None, 6.0, callout_wav=callout, callout_start=2.5
+    )
+    assert res == out and out.stat().st_size > 0
+    # callout alone (no intro/outro) still mixes
+    out2 = tmp_path / "mixed2.mp4"
+    n.mix_narration_with_ducking(vid, out2, None, None, 6.0, callout_wav=callout, duck_full=True)
+    assert out2.stat().st_size > 0
+
+
+def test_C4_prepare_callout_track(base_config: Config, tmp_path: Path) -> None:
+    n = TransformativeNarrator(base_config)
+    wav = tmp_path / "narrator_callout.wav"
+    with patch.object(n, "synthesize_speech", return_value=wav) as syn:
+        assert n.prepare_callout_track("Wait for it", tmp_path) == wav
+    assert syn.call_args.args[0] == "Wait for it"
+    assert n.prepare_callout_track("", tmp_path) is None
+    n.callout_enabled = False
+    assert n.prepare_callout_track("Wait for it", tmp_path) is None
+
+
+def test_C5_normalize_audio_copies_video_and_loudnorms(base_config: Config, tmp_path: Path) -> None:
+    n = TransformativeNarrator(base_config)
+    vid = create_synthetic_mp4(tmp_path / "n_in.mp4", duration_sec=3.0)
+    out = tmp_path / "n_out.mp4"
+    with patch("subprocess.run", wraps=subprocess.run) as spy:
+        assert n.normalize_audio(vid, out) == out
+    ff = [c.args[0] for c in spy.call_args_list if c.args[0][0] == "ffmpeg"][0]
+    assert ff[ff.index("-c:v") + 1] == "copy"
+    assert any("loudnorm=I=" in a for a in ff)
+    assert out.stat().st_size > 0
+    # in-place
+    n.normalize_audio(vid, vid)
+    assert vid.stat().st_size > 0

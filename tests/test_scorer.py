@@ -45,7 +45,10 @@ class _StubScorer(Scorer):
 @pytest.fixture()
 def config(tmp_path: Path) -> Config:
     """Return a Config loaded from default config.default.yaml."""
-    return Config(user_config_path=tmp_path / "nonexistent.yaml")
+    cfg = Config(user_config_path=tmp_path / "nonexistent.yaml")
+    cfg._data.setdefault("analysis", {})["skip_intro_minutes"] = 0  # D2 off for legacy tests
+    cfg._data["analysis"]["max_clip_seconds"] = 90  # pre-v3 clip cap for legacy tests
+    return cfg
 
 
 @pytest.fixture()
@@ -2110,3 +2113,94 @@ class TestFitClipRange:
         assert fit_clip_range(0.0, 120.0, min_s=30, max_s=90, hard_max_s=180, adjust=False).rejected
         ok = fit_clip_range(0.0, 45.0, min_s=30, max_s=90, hard_max_s=180, adjust=False)
         assert not ok.rejected and ok.adjustment == ""
+
+
+# ===========================================================================
+# Output Quality v3 — Batch D
+# ===========================================================================
+
+
+class TestBatchD:
+    def test_D1_models_callout_roundtrip_and_defaults(self) -> None:
+        h = Highlight.from_dict({"start": 1, "end": 2, "score": 5})
+        assert h.callout == ""
+        h.callout = "Wait for the wall"
+        assert Highlight.from_dict(h.to_dict()).callout == "Wait for the wall"
+        m = ClipMetadata.from_dict(
+            {"clip_start": 0, "clip_end": 1, "highlight_score": 1, "callout": "x y z w"}
+        )
+        assert m.callout == "x y z w"
+        assert ClipMetadata.from_dict(
+            {"clip_start": 0, "clip_end": 1, "highlight_score": 1}
+        ).callout == ""
+
+    def test_D2_skip_intro_drops_early_chunks_and_highlights(
+        self, config: Config, long_transcript: TranscriptionResult
+    ) -> None:
+        config._data["analysis"]["skip_intro_minutes"] = 5
+        scorer = _StubScorer(
+            config, canned=[_make_highlight(110.0, 160.0, 9.0)]
+        )
+        for chunk in scorer._chunk_transcript(long_transcript):
+            for line in chunk.text.splitlines():
+                assert float(line.split("[")[1].split("s")[0]) >= 300.0
+        assert scorer.score_and_select(long_transcript, [], []) == []
+
+    def test_D3_prompt_rejects_intro_and_allows_reaction(self) -> None:
+        txt = (Path(__file__).parent.parent / "src/streamclipper/prompts/highlight_scorer.txt").read_text(encoding="utf-8")
+        assert "reaction" in txt and "countdown" in txt.lower() and "cutscene" in txt.lower()
+        from streamclipper.scoring.ollama_scorer import VALID_MOMENT_TYPES
+        assert "reaction" in VALID_MOMENT_TYPES
+
+    def test_D4_banned_phrase_triggers_retry(self, config: Config) -> None:
+        bad = json.dumps({"narration_intro": "The chat went wild here.", "narration_outro": "Ok.", "context_badge": "B", "callout": "a b c d"})
+        good = json.dumps({"narration_intro": "He eyes the red truck.", "narration_outro": "Honestly, I'd have bailed.", "context_badge": "Good", "callout": "Watch the red truck"})
+        with patch("streamclipper.scoring.ollama_scorer.ollama.Client") as cls:
+            cls.return_value.generate.side_effect = [GenerateResponse(response=bad), GenerateResponse(response=good)]
+            scorer = OllamaScorer(config)
+            h = _make_highlight(0, 30, 8.0)
+            intro, outro, badge = scorer.generate_narrative(h, "Tim", "GTA 6")
+        assert cls.return_value.generate.call_count == 2
+        assert intro == "He eyes the red truck." and h.callout == "Watch the red truck"
+
+    def test_D4_avoid_phrases_and_placeholders(self, config: Config) -> None:
+        reply = json.dumps({"narration_intro": "Tim hates this truck.", "narration_outro": "Fair.", "context_badge": "B"})
+        with patch("streamclipper.scoring.ollama_scorer.ollama.Client") as cls:
+            cls.return_value.generate.side_effect = [GenerateResponse(response=reply)] * 3
+            scorer = OllamaScorer(config)
+            h = _make_highlight(0, 30, 8.0)
+            h.transcript_chunk = "that purple sedan again"
+            scorer.generate_narrative(h, "Tim", "GTA 6", avoid_phrases=["hates this truck"], hook_style="question")
+        assert cls.return_value.generate.call_count == 3  # 1 + max 2 retries
+        sent = cls.return_value.generate.call_args_list[0].kwargs["prompt"]
+        assert "purple sedan" in sent and "hates this truck" in sent and "question" in sent
+
+    def test_D5_generate_metadata_hook_style_and_callout(self, config: Config) -> None:
+        narrative = json.dumps({"narration_intro": "Tim eyes the exit.", "narration_outro": "Brave. Dumb.", "context_badge": "B", "callout": "Here comes the truck"})
+        caption = json.dumps({"caption": "c", "hashtags": ["a"]})
+        with patch("streamclipper.scoring.ollama_scorer.ollama.Client") as cls:
+            cls.return_value.generate.side_effect = [
+                GenerateResponse(response="Tim bails?"),
+                GenerateResponse(response=narrative),
+                GenerateResponse(response=caption),
+            ]
+            scorer = OllamaScorer(config)
+            meta = scorer.generate_metadata(
+                _make_highlight(0, 30, 8.0), "Tim", "GTA 6", "http://x",
+                hook_style="question", avoid_phrases=[],
+            )
+        assert "question" in cls.return_value.generate.call_args_list[0].kwargs["prompt"]
+        assert meta.callout == "Here comes the truck"
+
+    def test_D6_generate_countdown_lines(self, config: Config) -> None:
+        hs = [_make_highlight(0, 20, 8.0, title=f"T{i}") for i in range(3)]
+        with patch("streamclipper.scoring.ollama_scorer.ollama.Client") as cls:
+            cls.return_value.generate.return_value = GenerateResponse(
+                response=json.dumps({"lines": ["third", "second", "first"]})
+            )
+            scorer = OllamaScorer(config)
+            assert scorer.generate_countdown_lines(hs, "Tim", "GTA 6") == ["third", "second", "first"]
+        with patch("streamclipper.scoring.ollama_scorer.ollama.Client") as cls:
+            cls.return_value.generate.return_value = GenerateResponse(response="junk")
+            scorer = OllamaScorer(config)
+            assert len(scorer.generate_countdown_lines(hs, "Tim", "GTA 6")) == 3
