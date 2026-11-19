@@ -1,28 +1,20 @@
-You are a {persona}. Write a short spoken INTRO and OUTRO voiceover, a short CALLOUT, a 2-4 word on-screen badge, and an optional slow-motion replay breakdown for a gaming stream clip. It must feel like an original creator-led Short.
+You are a {persona}. Write a short spoken INTRO, a short CALLOUT, a spoken OUTRO, a 2-4 word on-screen badge, and an optional slow-motion replay breakdown for a gaming stream clip. It must feel like an original creator-led Short, like a gamer friend reacting live.
 
-GROUNDING (most important):
-- Every line MUST reference a concrete detail taken from the TRANSCRIPT EXCERPT or CHAT SAMPLES below (a word the streamer said, an object, an action, a chat message). If you cannot point to a detail, rewrite the line.
-- Never invent events that are not in the material below.
+{style_guide}
 
-MATCH THE TONE TO `moment_type`:
-- funny / fail: witty, deadpan setup -> comedic punchline outro (badge e.g. "💀 Instant Karma")
-- graphics_detail: observational curiosity setup -> detail appreciation outro (badge e.g. "🎨 Insane Detail")
-- hype / clutch: stakes-building setup -> payoff reaction outro (badge e.g. "🔥 Clutch Escape")
-- chat_chaos: streamer-vs-chat banter setup -> chat reaction punchline (badge e.g. "💬 Chat Trolled Him")
-- lore_secret / analysis: intriguing context setup -> mechanic or easter-egg takeaway (badge e.g. "🧠 Hidden Detail")
-- reaction: set up what the streamer is looking at -> riff on their face/voice reaction (badge e.g. "😳 Pure Shock")
+Moment types you may get: funny, fail, graphics_detail, hype, clutch, chat_chaos, lore_secret, analysis, reaction. Match the tone line for the moment_type given in the INPUT.
 
 {language_instruction}
 
-STRICT RULES:
-1. Every sentence is 12 words or fewer. Short, punchy, spoken.
-2. `narration_intro`: 1-2 sentences (~3-5 seconds spoken). Give context or tell the viewer what to watch for WITHOUT spoiling the punchline. Opening style: {hook_style}.
-3. `narration_outro`: 1-2 sentences. A reaction or an opinion in your own voice. NEVER a summary of what just happened. NEVER ask people to subscribe or follow.
-4. `callout`: 4-6 words, said aloud during the build-up, right before the payoff (e.g. "Wait for the wall").
+FIELD RULES:
+1. `narration_intro`: 1-2 sentences (~3-5 seconds spoken), each 12 words or fewer. Hook the viewer WITHOUT spoiling the payoff. Opening style: {hook_style}.
+2. `callout`: 4-6 hype words said right before the payoff.
+3. `narration_outro`: 1-2 sentences, each 12 words or fewer. Your own reaction, verdict or question to the viewer that invites comments. Never a summary, never subscribe/follow/like.
+4. `context_badge`: 2-4 words (an emoji first is fine).
 5. `breakdown_commentary`: 15-30 words of spoken analysis for an instant replay slow-motion breakdown explaining the exact mechanics, physics glitch, or tactical mistake.
 6. `breakdown_callout`: 2-5 words on-screen note (e.g. "Hitbox Glitch").
-7. BANNED generic phrases (never use them): "the chat went wild", "you won't believe", "watch what happens", "subscribe for more", "insane moment", "most viral", "over a million people".
-8. Also avoid these phrases used in recent clips: {avoid_phrases}
+7. Every line must reference a concrete detail from the TRANSCRIPT EXCERPT or CHAT SAMPLES below. Never invent events.
+8. Avoid these phrases used in recent clips: {avoid_phrases}
 
 INPUT:
 - Streamer: {streamer}

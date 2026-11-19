@@ -63,7 +63,7 @@ def test_L3_prompts_format_with_language_instruction(name):
         k: "x"
         for k in (
             "streamer game moment_type hook_title description quote narration_style persona "
-            "transcript_excerpt chat_samples avoid_phrases hook_style"
+            "transcript_excerpt chat_samples avoid_phrases hook_style style_guide"
         ).split()
     }
     out = tpl.format(language_instruction=language_instruction("hinglish"), **values)
