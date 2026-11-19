@@ -47,7 +47,7 @@ def _mp3_to_wav(src: Path, dst: Path) -> bool:
         ["ffmpeg", "-y", "-i", str(src), "-ar", "48000", "-ac", "2", str(dst)],
         check=True,
         capture_output=True,
-        text=True,
+        text=True, encoding="utf-8", errors="replace",
     )
     return _nonempty(dst)
 
@@ -275,7 +275,7 @@ class ExternalProcessTTS:
                 cmd,
                 check=True,
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8", errors="replace",
                 timeout=self.TIMEOUT_SECONDS,
                 env=env,
             )

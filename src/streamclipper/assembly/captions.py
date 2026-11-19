@@ -11,6 +11,7 @@ from typing import Any
 from ..config import Config
 from ..models import WordTimestamp
 from .layout import LayoutGeometry
+from .textutil import strip_unrenderable
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +129,7 @@ def _color_to_ass_style(color: str, default: str = "&H00FFFFFF") -> str:
 
 def _escape_ass_text(text: str) -> str:
     """Sanitize newlines and escape ASS override delimiters safely for libass."""
-    sanitized = "" if text is None else str(text)
+    sanitized = strip_unrenderable(text)
     sanitized = sanitized.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
     sanitized = sanitized.replace("{", r"\{").replace("}", r"\}")
     # Neutralize ASS control codes (\N, \n, \h) without doubling literal backslashes in libass

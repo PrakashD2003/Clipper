@@ -47,7 +47,7 @@ def _detect_nvenc_support() -> bool:
         proc = subprocess.run(
             ["ffmpeg", "-hide_banner", "-encoders"],
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             timeout=5,
             check=False,
         )

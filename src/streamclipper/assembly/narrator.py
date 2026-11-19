@@ -554,7 +554,7 @@ class TransformativeNarrator:
                 "default=noprint_wrappers=1:nokey=1",
                 str(p),
             ]
-            res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
             val = float(res.stdout.strip())
             if val > 0.05:
                 return val
@@ -577,7 +577,7 @@ class TransformativeNarrator:
                 "csv=p=0",
                 str(video_path),
             ]
-            res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
             return bool(res.stdout.strip())
         except Exception as exc:
             logger.debug("Audio stream probe failed (%s); assuming audio present", exc)
@@ -693,7 +693,7 @@ class TransformativeNarrator:
                 cmd,
                 check=True,
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8", errors="replace",
             )
             if same_file and target_out.is_file():
                 shutil.move(str(target_out), str(output_video))
@@ -764,7 +764,7 @@ class TransformativeNarrator:
             str(target_out),
         ]
         try:
-            subprocess.run(cmd, check=True, capture_output=True, text=True)
+            subprocess.run(cmd, check=True, capture_output=True, text=True, encoding="utf-8", errors="replace")
             if same_file and target_out.is_file():
                 shutil.move(str(target_out), str(output_video))
             return output_video
@@ -797,7 +797,7 @@ class TransformativeNarrator:
                 "default=noprint_wrappers=1:nokey=1",
                 str(video_path),
             ]
-            res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
             val = float(res.stdout.strip())
             if val > 0:
                 return val

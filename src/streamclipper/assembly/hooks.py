@@ -11,6 +11,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from ..config import Config
 from .layout import LayoutGeometry
+from .textutil import strip_unrenderable
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +124,7 @@ def render_hook_banner(
     stroke_width: int = 3,
 ) -> np.ndarray:
     """Render hook title text inside a rounded dark banner into an RGBA numpy array."""
+    text = strip_unrenderable(text)
     font = _load_font(font_name, font_size)
     pad_x = 32
     pad_y = 18
@@ -180,6 +182,7 @@ def render_context_badge(
     max_width: int | None = None,
 ) -> np.ndarray:
     """Render a compact context badge pill into an RGBA numpy array."""
+    text = strip_unrenderable(text)
     font = _load_font(font_name, font_size)
     tmp = Image.new("RGBA", (1, 1))
     d_tmp = ImageDraw.Draw(tmp)

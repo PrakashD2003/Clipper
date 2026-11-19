@@ -2179,3 +2179,13 @@ def test_E4_E6_callout_and_duck_full_reach_the_mix(tmp_path: Path) -> None:
     assert ass_kw["callout"] == "Watch the tire"
     assert ass_kw["callout_window"][0] == 8.0
 
+
+
+def test_v3_strip_unrenderable_removes_emoji_for_overlays() -> None:
+    from streamclipper.assembly.captions import _escape_ass_text
+    from streamclipper.assembly.textutil import strip_unrenderable
+
+    assert strip_unrenderable("WILDEST STUNT & CRASH! \U0001f631") == "WILDEST STUNT & CRASH!"
+    assert strip_unrenderable("GG ❤️ wp \U0001f468‍\U0001f4bb") == "GG wp"
+    assert strip_unrenderable("") == ""
+    assert _escape_ass_text("hype \U0001f525 {x}") == r"hype \{x\}"
