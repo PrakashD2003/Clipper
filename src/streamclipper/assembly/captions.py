@@ -278,6 +278,15 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 continue
             if (s_val - clip_start_offset) >= outro_start_cutoff:
                 continue
+            if (
+                breakdown_window
+                and breakdown_window[0] is not None
+                and breakdown_window[1] is not None
+                and float(breakdown_window[0])
+                <= (s_val - clip_start_offset)
+                < float(breakdown_window[1])
+            ):
+                continue
             cleaned_words.append(w_obj)
 
         effective_group_size = (
@@ -459,7 +468,15 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 check=True,
                 capture_output=True,
             )
-        except subprocess.CalledProcessError:
+        except subprocess.CalledProcessError as exc:
+            stderr_raw = exc.stderr
+            if isinstance(stderr_raw, bytes):
+                stderr_raw = stderr_raw.decode("utf-8", errors="replace")
+            logger.warning(
+                "FFmpeg caption burn-in failed (codec=%s): %s",
+                selected_codec,
+                (stderr_raw or "")[-500:],
+            )
             if selected_codec != "h264_nvenc":
                 raise
             logger.warning(

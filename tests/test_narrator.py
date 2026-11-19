@@ -432,7 +432,9 @@ class TestCustomVoiceoverPriority:
                 text="Generate this speech",
                 output_wav=out_tts_wav,
             )
-            mock_synth.assert_called_once_with("Generate this speech", out_tts_wav)
+            mock_synth.assert_called_once_with(
+                "Generate this speech", out_tts_wav, max_seconds=None
+            )
             assert resolved == out_tts_wav
 
     def test_prepare_narration_tracks_respects_both_priorities(
@@ -445,7 +447,7 @@ class TestCustomVoiceoverPriority:
         with patch.object(
             narrator,
             "synthesize_speech",
-            side_effect=lambda text, path: create_synthetic_wav(path, 1.0),
+            side_effect=lambda text, path, **kw: create_synthetic_wav(path, 1.0),
         ) as mock_synth:
             intro_track, outro_track = narrator.prepare_narration_tracks(
                 narration_intro="Intro text",
@@ -727,10 +729,10 @@ class TestMixNarrationWithDucking:
         assert video_path.is_file()
         assert video_path.stat().st_size > 0
 
-    def test_ffmpeg_failure_falls_back_cleanly_to_copy(
+    def test_ffmpeg_failure_raises_runtime_error(
         self, base_config: Config, tmp_path: Path
     ) -> None:
-        """When FFmpeg fails with CalledProcessError, fallback safely copies original video."""
+        """When FFmpeg fails with CalledProcessError, a RuntimeError carrying stderr is raised."""
         narrator = TransformativeNarrator(base_config)
 
         in_video = tmp_path / "source.mp4"
@@ -739,16 +741,14 @@ class TestMixNarrationWithDucking:
         intro_wav = create_synthetic_wav(tmp_path / "intro.wav", duration_sec=1.0)
 
         with patch("subprocess.run", side_effect=subprocess.CalledProcessError(1, ["ffmpeg"], stderr="Mock error")):
-            result = narrator.mix_narration_with_ducking(
-                input_video=in_video,
-                output_video=out_video,
-                intro_wav=intro_wav,
-                outro_wav=None,
-                clip_duration=5.0,
-            )
-            assert result == out_video
-            assert out_video.is_file()
-            assert out_video.read_text(encoding="utf-8") == "valid input video data"
+            with pytest.raises(RuntimeError, match="Mock error"):
+                narrator.mix_narration_with_ducking(
+                    input_video=in_video,
+                    output_video=out_video,
+                    intro_wav=intro_wav,
+                    outro_wav=None,
+                    clip_duration=5.0,
+                )
 
     def test_silent_video_still_receives_narrator_audio_track(
         self, base_config: Config, tmp_path: Path

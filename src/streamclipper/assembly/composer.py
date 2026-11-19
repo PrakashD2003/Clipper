@@ -207,8 +207,8 @@ class VideoComposer:
                 for c in all_sources:
                     try:
                         c.close()
-                    except Exception:
-                        pass
+                    except Exception as close_exc:
+                        logger.debug("Failed to close source clip: %s", close_exc)
             raise
         result._source_clip = all_sources[0]  # ensure Windows file handles can be closed cleanly
         result._source_clips = all_sources
@@ -343,7 +343,8 @@ class VideoComposer:
             for t in sample_times:
                 try:
                     frame = clip.get_frame(t)
-                except Exception:
+                except Exception as frame_exc:
+                    logger.debug("Face-detect frame read at %.2fs failed: %s", t, frame_exc)
                     continue
                 if frame is None or len(frame.shape) < 2:
                     continue
@@ -357,7 +358,8 @@ class VideoComposer:
             if detected_centers:
                 return float(np.median(detected_centers))
             return None
-        except Exception:
+        except Exception as detect_exc:
+            logger.warning("Face detection failed; using centered crop: %s", detect_exc)
             return None
 
     def _compose_gameplay_only(
@@ -426,6 +428,7 @@ class VideoComposer:
         all_source_clips: list[Any] = []
         opened_clips: list[Any] = []
         beat_clips: list[CompositeVideoClip] = []
+        beat_durations: list[float] = []
 
         try:
             cum_beat_offset = 0.0
@@ -443,6 +446,14 @@ class VideoComposer:
                     if t_end > t_start:
                         trimmed = raw_clip.subclipped(t_start, t_end)
                     else:
+                        logger.warning(
+                            "Beat %d trim range invalid after clamping (start=%.3f, end=%.3f, "
+                            "duration=%.3f); using untrimmed clip",
+                            i,
+                            t_start,
+                            t_end,
+                            float(raw_clip.duration),
+                        )
                         trimmed = raw_clip
                 else:
                     trimmed = raw_clip
@@ -472,6 +483,7 @@ class VideoComposer:
                     else self._compose_gameplay_only(trimmed, face_center_x=face_center_x)
                 )
                 beat_clips.append(composed_beat)
+                beat_durations.append(trimmed_dur)
                 cum_beat_offset += trimmed_dur
 
             result = concatenate_videoclips(beat_clips, method="compose")
@@ -481,12 +493,13 @@ class VideoComposer:
             for opened in opened_clips:
                 try:
                     opened.close()
-                except Exception:
-                    pass
+                except Exception as close_exc:
+                    logger.debug("Failed to close opened beat clip: %s", close_exc)
             raise
 
         result._source_clips = all_source_clips
         result._source_clip = all_source_clips[0]
+        result._beat_durations = beat_durations
         return result
 
     def apply_spike_zoom(
