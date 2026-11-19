@@ -65,6 +65,32 @@ class FileOrganizer:
         date_str: str | None = None,
     ) -> Path:
         """Resolve sanitized output path honoring output.structure and output.filename_template."""
+        return self._resolve_clip_path(self.output_dir, game, streamer, index, date_str)
+
+    def get_queued_path(
+        self,
+        game: str,
+        streamer: str,
+        index: int,
+        date_str: str | None = None,
+    ) -> Path:
+        """Same layout as get_clip_path but under `<output_dir>/<output.queued_dir>/` (daily-cap overflow)."""
+        queued = self._sanitize_name(
+            str(self.config.get("output.queued_dir", "queued") or "queued"),
+            fallback="queued",
+        )
+        return self._resolve_clip_path(
+            self.output_dir / queued, game, streamer, index, date_str
+        )
+
+    def _resolve_clip_path(
+        self,
+        base_dir: Path,
+        game: str,
+        streamer: str,
+        index: int,
+        date_str: str | None = None,
+    ) -> Path:
         safe_game = self._sanitize_name(game, fallback="UnknownGame")
         safe_streamer = self._sanitize_name(streamer, fallback="UnknownStreamer")
         today_str = date.today().isoformat()
@@ -95,9 +121,7 @@ class FileOrganizer:
             if cleaned_part:
                 safe_parts.append(cleaned_part)
 
-        clip_dir = (
-            self.output_dir.joinpath(*safe_parts) if safe_parts else self.output_dir
-        )
+        clip_dir = base_dir.joinpath(*safe_parts) if safe_parts else base_dir
         clip_dir.mkdir(parents=True, exist_ok=True)
 
         default_stem = f"clip_{index:02d}"

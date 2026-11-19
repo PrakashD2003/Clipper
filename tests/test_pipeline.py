@@ -900,7 +900,7 @@ class TestPipelineEndToEnd:
             def __init__(self, config: Config) -> None:
                 self.config = config
 
-            def detect(self, path: Path) -> None:
+            def detect(self, path, *, streamer=None) -> None:
                 return None
 
         facecam_mod.FacecamDetector = StubFacecamDetector  # type: ignore[attr-defined]
@@ -1017,7 +1017,9 @@ class TestPipelineEndToEnd:
         intro_wav = tmp_path / "human_intro.wav"
         outro_wav = tmp_path / "human_outro.wav"
 
-        pipeline = Pipeline(_make_config(tmp_path))
+        pipeline = Pipeline(
+            _make_config(tmp_path, {"output": {"min_commentary_ratio": 0.0}})
+        )
         clips = await pipeline.process_stream(
             "https://youtube.com/watch?v=phase4_contract",
             max_clips=2,

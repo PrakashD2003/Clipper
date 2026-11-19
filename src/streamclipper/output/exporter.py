@@ -170,6 +170,10 @@ class Exporter:
         voice_breakdown_path: Path | None = None,
         replay_start: float | None = None,
         breakdown_callout: str = "",
+        layout: Any = None,
+        callout: str = "",
+        callout_start: float | None = None,
+        duck_full: bool = False,
     ) -> Path:
         """Render composed clip, mix narrator ducking, burn ASS captions+chat ticker, and release handles."""
         final_output = Path(output_path)
@@ -225,12 +229,15 @@ class Exporter:
                 or voice_outro_path is not None
                 or (breakdown_commentary and str(breakdown_commentary).strip())
                 or voice_breakdown_path is not None
+                or (callout and str(callout).strip())
             )
             intro_dur: float | None = None
             outro_dur: float | None = None
             eff_intro: float | None = None
             eff_outro: float | None = None
             breakdown_window: tuple[float | None, float | None] | None = None
+            callout_window: tuple[float, float] | None = None
+            mix_ran = False
 
             if effective_mode != "raw" and has_narration_input:
                 orig_enabled = self.narrator.enabled
@@ -262,7 +269,18 @@ class Exporter:
                             temp_dir=work_dir,
                         )
 
-                    if intro_wav is not None or outro_wav is not None or breakdown_wav is not None:
+                    callout_wav = None
+                    if callout and str(callout).strip():
+                        prep_callout = getattr(self.narrator, "prepare_callout_track", None)
+                        if callable(prep_callout):
+                            callout_wav = prep_callout(callout, temp_dir=work_dir)
+
+                    if (
+                        intro_wav is not None
+                        or outro_wav is not None
+                        or breakdown_wav is not None
+                        or callout_wav is not None
+                    ):
                         intro_dur = self.narrator._probe_audio_duration(intro_wav)
                         outro_dur = self.narrator._probe_audio_duration(outro_wav)
                         breakdown_dur = self.narrator._probe_audio_duration(breakdown_wav)
@@ -294,6 +312,18 @@ class Exporter:
                             if breakdown_wav is not None
                             else {}
                         )
+                        if callout_wav is not None:
+                            c_start = (
+                                float(callout_start)
+                                if callout_start is not None
+                                else 0.4 * clip_duration
+                            )
+                            breakdown_kwargs["callout_wav"] = callout_wav
+                            breakdown_kwargs["callout_start"] = c_start
+                            c_dur = self.narrator._probe_audio_duration(callout_wav) or 2.0
+                            callout_window = (c_start, min(clip_duration, c_start + float(c_dur)))
+                        if duck_full:
+                            breakdown_kwargs["duck_full"] = True
                         mixed_path = None
                         try:
                             mixed_path = self.narrator.mix_narration_with_ducking(
@@ -313,6 +343,7 @@ class Exporter:
                             )
                         if mixed_path:
                             current_video = Path(mixed_path)
+                            mix_ran = True
                         else:
                             if not mixed_path:
                                 logger.warning(
@@ -321,10 +352,21 @@ class Exporter:
                             intro_dur = outro_dur = None
                             eff_intro = eff_outro = None
                             breakdown_window = None
+                            callout_window = None
                 finally:
                     if override_needed:
                         self.narrator.enabled = orig_enabled
                         self.narrator.mode = orig_mode
+
+            if not mix_ran:
+                normalize = getattr(self.narrator, "normalize_audio", None)
+                if callable(normalize) and has_audio:
+                    try:
+                        normalized = normalize(current_video, work_dir / "intermediate_norm.mp4")
+                        if isinstance(normalized, (str, Path)) and Path(normalized).exists():
+                            current_video = Path(normalized)
+                    except Exception as exc:
+                        logger.warning("Audio normalization failed (%s); continuing.", exc)
 
             self._notify_progress(progress_callback, 0.75)
 
@@ -354,9 +396,16 @@ class Exporter:
                 )
             )
 
-            if has_words or has_chat or has_card:
+            has_callout_card = (not is_raw_mode) and callout_window is not None
+            if has_words or has_chat or has_card or has_callout_card:
                 ass_path = work_dir / "captions.ass"
                 is_raw = effective_mode == "raw"
+                layout_kwargs: dict[str, Any] = {}
+                if layout is not None:
+                    layout_kwargs["layout"] = layout
+                if has_callout_card:
+                    layout_kwargs["callout"] = callout
+                    layout_kwargs["callout_window"] = callout_window
                 self.caption_burner.generate_ass(
                     words=words or [],
                     clip_start_offset=clip_start_offset,
@@ -369,6 +418,7 @@ class Exporter:
                     clip_duration=clip_duration,
                     breakdown_callout="" if is_raw else breakdown_callout,
                     breakdown_window=None if is_raw else breakdown_window,
+                    **layout_kwargs,
                 )
                 try:
                     result_path = self.caption_burner.burn_captions(
