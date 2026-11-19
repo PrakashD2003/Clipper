@@ -99,7 +99,11 @@ class ChatVelocityAnalyzer:
         merged_spikes = self._merge_nearby(raw_spikes)
         for spike in merged_spikes:
             samples, msg_count = self._extract_sample_messages(
-                valid_df, spike.start, spike.end, max_samples=self.MAX_SAMPLE_MESSAGES
+                valid_df,
+                spike.start,
+                spike.end,
+                max_samples=self.MAX_SAMPLE_MESSAGES,
+                inclusive_end=spike.end >= num_bins * self.window_seconds - 1e-6,
             )
             spike.metadata["sample_messages"] = samples
             spike.metadata["message_count"] = msg_count
@@ -175,9 +179,18 @@ class ChatVelocityAnalyzer:
         start: float,
         end: float,
         max_samples: int = 5,
+        inclusive_end: bool = False,
     ) -> tuple[list[dict[str, Any]], int]:
-        """Extract up to max_samples representative viewer messages within [start, end]."""
-        mask = (chat_df["offset_seconds"] >= start) & (chat_df["offset_seconds"] <= end)
+        """Extract up to max_samples representative viewer messages within [start, end).
+
+        The window end is exclusive except for the final bin (``inclusive_end=True``).
+        """
+        end_mask = (
+            chat_df["offset_seconds"] <= end
+            if inclusive_end
+            else chat_df["offset_seconds"] < end
+        )
+        mask = (chat_df["offset_seconds"] >= start) & end_mask
         window_df = chat_df.loc[mask].sort_values("offset_seconds", kind="mergesort")
         total_count = int(len(window_df))
         if total_count == 0:

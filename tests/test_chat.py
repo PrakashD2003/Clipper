@@ -267,10 +267,10 @@ class TestChatScraper:
         )
         scraper = ChatScraper()
 
-        df = scraper.scrape(SAMPLE_URL, tmp_path)
+        from streamclipper.download.chat import ChatScrapeError
 
-        assert list(df.columns) == CHAT_COLUMNS
-        assert df.empty
+        with pytest.raises(ChatScrapeError):
+            scraper.scrape(SAMPLE_URL, tmp_path)
 
     @pytest.mark.parametrize("bad_url", ["", "   "])
     def test_scrape_empty_url_raises_value_error(
@@ -489,3 +489,66 @@ class TestChatVelocityAnalyzer:
 
         with pytest.raises(ValueError, match="min_messages"):
             ChatVelocityAnalyzer(_make_config(tmp_path, min_messages=-1))
+
+
+# --- Review-fix regression tests (M4, L4, L6, G5b) ---
+
+
+def test_M4_scrape_raises_chat_scrape_error_on_ytdlp_failure(tmp_path, monkeypatch):
+    from streamclipper.download.chat import ChatScrapeError
+
+    ydl = MagicMock()
+    ydl.__enter__.return_value = ydl
+    ydl.extract_info.side_effect = yt_dlp.utils.DownloadError("boom")
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", MagicMock(return_value=ydl))
+    with pytest.raises(ChatScrapeError):
+        ChatScraper().scrape(SAMPLE_URL, tmp_path)
+
+
+def test_M4_scrape_without_live_chat_file_returns_empty(tmp_path, monkeypatch):
+    ydl = MagicMock()
+    ydl.__enter__.return_value = ydl
+    ydl.extract_info.return_value = {"id": "nochat"}
+    factory = MagicMock(return_value=ydl)
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", factory)
+    df = ChatScraper().scrape(SAMPLE_URL, tmp_path)
+    assert df.empty and list(df.columns) == CHAT_COLUMNS
+    opts = factory.call_args[0][0]
+    assert opts["retries"] == 3 and opts["fragment_retries"] == 3
+    assert opts["extractor_retries"] == 3
+
+
+def test_G5b_chat_options_include_retries(tmp_path, monkeypatch):
+    test_M4_scrape_without_live_chat_file_returns_empty(tmp_path, monkeypatch)
+
+
+def test_L4_bad_action_does_not_drop_rest_and_super_chat_kept(tmp_path):
+    line = {
+        "replayChatItemAction": {
+            "videoOffsetTimeMsec": "5000",
+            "actions": [
+                {"addChatItemAction": {"item": {"liveChatTextMessageRenderer": {
+                    "authorName": 5, "message": {"runs": [None, 3]}}}}},
+                {"addChatItemAction": {"item": {"liveChatTextMessageRenderer": {
+                    "authorName": {"simpleText": "a"}, "message": {"runs": [{"text": "hi"}]}}}}},
+                {"addChatItemAction": {"item": {"liveChatPaidMessageRenderer": {
+                    "authorName": {"simpleText": "b"},
+                    "purchaseAmountText": {"simpleText": "$5.00"}}}}},
+            ],
+        }
+    }
+    f = tmp_path / "x.live_chat.json"
+    f.write_text(json.dumps(line) + "\n", encoding="utf-8")
+    df = ChatScraper().parse_live_chat_file(f)
+    assert list(df["message"]) == ["hi", "[Super Chat $5.00]"]
+
+
+def test_L6_sample_window_end_exclusive_except_final_bin():
+    az = ChatVelocityAnalyzer.__new__(ChatVelocityAnalyzer)
+    df = pd.DataFrame(
+        {"offset_seconds": [9.0, 10.0], "author": ["a", "b"], "message": ["x", "y"]}
+    )
+    _, n = az._extract_sample_messages(df, 0.0, 10.0)
+    assert n == 1
+    _, n = az._extract_sample_messages(df, 0.0, 10.0, inclusive_end=True)
+    assert n == 2

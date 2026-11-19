@@ -4,12 +4,17 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 from pathlib import Path
 from typing import Any
 
 import yt_dlp
 
+from .audio import _extract_youtube_id_from_url
+
 logger = logging.getLogger(__name__)
+
+_DEFAULT_RETRIES = 3
 
 VIDEO_FORMAT_1080P = "bestvideo[height<=1080]+bestaudio/best[height<=1080]"
 _ALT_VIDEO_EXTENSIONS = (".webm", ".mkv", ".mov", ".m4v", ".ts")
@@ -68,6 +73,19 @@ def _classify_video_error(url: str, exc: Exception) -> VideoDownloadError:
 
     if any(
         token in lower
+        for token in ("confirm you're not a bot", "confirm you’re not a bot")
+    ):
+        return VideoDownloadError(
+            f"YouTube bot-check blocked the request; try cookies or retry later ({url}): {raw_message}"
+        )
+
+    if "http error 429" in lower or "too many requests" in lower:
+        return VideoDownloadError(
+            f"Rate limited by the server (HTTP 429); retry later ({url}): {raw_message}"
+        )
+
+    if any(
+        token in lower
         for token in ("private video", "this video is private", "members-only", "members only")
     ):
         return VideoDownloadError(
@@ -80,9 +98,9 @@ def _classify_video_error(url: str, exc: Exception) -> VideoDownloadError:
             "confirm your age",
             "age-restricted",
             "age restricted",
-            "sign in",
+            "sign in to confirm your age",
             "login required",
-            "cookies",
+            "use --cookies",
         )
     ):
         return VideoDownloadError(
@@ -97,7 +115,7 @@ def _classify_video_error(url: str, exc: Exception) -> VideoDownloadError:
             "blocked it in your country",
             "geo-restricted",
             "geo restricted",
-            "region",
+            "not available in your region",
         )
     ):
         return VideoDownloadError(
@@ -109,9 +127,9 @@ def _classify_video_error(url: str, exc: Exception) -> VideoDownloadError:
         for token in (
             "video unavailable",
             "has been removed",
-            "deleted",
+            "video has been deleted",
             "no longer available",
-            "terminated",
+            "account associated with this video has been terminated",
             "isn't available",
         )
     ):
@@ -144,6 +162,9 @@ def _extract_video_id(url: str) -> str:
         "no_warnings": True,
         "noplaylist": True,
         "skip_download": True,
+        "retries": _DEFAULT_RETRIES,
+        "fragment_retries": _DEFAULT_RETRIES,
+        "extractor_retries": _DEFAULT_RETRIES,
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -157,12 +178,22 @@ def _extract_video_id(url: str) -> str:
     return str(info["id"])
 
 
+def _resolve_video_id(url: str, video_id: str | None) -> str:
+    """Use a caller-provided id, else parse offline, else fall back to network extraction."""
+    if video_id:
+        return re.sub(r"[^A-Za-z0-9_-]", "_", str(video_id))
+    local_id = _extract_youtube_id_from_url(url)
+    if local_id:
+        return local_id
+    return _extract_video_id(url)
+
+
 def _segment_sidecar_matches(
     sidecar_path: Path, start_seconds: float, end_seconds: float, buffer_seconds: float
 ) -> bool:
-    """Return True if sidecar is absent (legacy cache) or matches requested bounds & buffer."""
+    """Return True only if the sidecar exists and matches requested bounds & buffer."""
     if not sidecar_path.is_file():
-        return True
+        return False
     try:
         meta = json.loads(sidecar_path.read_text(encoding="utf-8"))
         return (
@@ -186,7 +217,10 @@ def _download_segment_with_id(
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    output_path = out_dir / f"{video_id}_{int(start_seconds)}_{int(end_seconds)}.mp4"
+    output_path = out_dir / (
+        f"{video_id}_{round(start_seconds * 1000)}_{round(end_seconds * 1000)}"
+        f"_b{round(buffer_seconds * 1000)}.mp4"
+    )
     sidecar_path = output_path.with_suffix(".meta.json")
     sidecar_matches = _segment_sidecar_matches(
         sidecar_path, start_seconds, end_seconds, buffer_seconds
@@ -235,6 +269,9 @@ def _download_segment_with_id(
         "quiet": True,
         "no_warnings": True,
         "overwrites": True,
+        "retries": _DEFAULT_RETRIES,
+        "fragment_retries": _DEFAULT_RETRIES,
+        "extractor_retries": _DEFAULT_RETRIES,
     }
 
     logger.info(
@@ -293,6 +330,8 @@ def download_segment(
     end_seconds: float,
     output_dir: Path,
     buffer_seconds: float = 3.0,
+    *,
+    video_id: str | None = None,
 ) -> Path:
     """Download a specific time segment from a video as a 1080p MP4.
 
@@ -303,10 +342,10 @@ def download_segment(
     """
     clean_url = _validate_url(url)
     start, end, buf = _validate_range(start_seconds, end_seconds, buffer_seconds)
-    video_id = _extract_video_id(clean_url)
+    resolved_id = _resolve_video_id(clean_url, video_id)
     return _download_segment_with_id(
         url=clean_url,
-        video_id=video_id,
+        video_id=resolved_id,
         start_seconds=start,
         end_seconds=end,
         output_dir=output_dir,
@@ -319,6 +358,8 @@ def download_multiple_segments(
     segments: list[tuple[float, float]],
     output_dir: Path,
     buffer_seconds: float = 3.0,
+    *,
+    video_id: str | None = None,
 ) -> list[Path]:
     """Download multiple time segments from the same video efficiently.
 
@@ -337,13 +378,13 @@ def download_multiple_segments(
     validated_segments = [
         _validate_range(start, end, buffer_seconds) for start, end in segments
     ]
-    video_id = _extract_video_id(clean_url)
+    resolved_id = _resolve_video_id(clean_url, video_id)
 
     paths: list[Path] = []
     for start, end, buf in validated_segments:
         path = _download_segment_with_id(
             url=clean_url,
-            video_id=video_id,
+            video_id=resolved_id,
             start_seconds=start,
             end_seconds=end,
             output_dir=output_dir,
