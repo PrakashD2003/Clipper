@@ -47,6 +47,7 @@ def config(tmp_path: Path) -> Config:
     """Return a Config loaded from default config.default.yaml."""
     cfg = Config(user_config_path=tmp_path / "nonexistent.yaml")
     cfg._data.setdefault("analysis", {})["skip_intro_minutes"] = 0  # D2 off for legacy tests
+    cfg._data["analysis"]["max_clip_seconds"] = 90  # pre-v3 clip cap for legacy tests
     return cfg
 
 

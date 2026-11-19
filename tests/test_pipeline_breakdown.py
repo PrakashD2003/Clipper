@@ -409,6 +409,10 @@ class TestScorerBreakdownAndCopyright:
                 return [h_clean, h_music]
 
         config = _make_config(tmp_path)
+        # v3 defaults drop early chunks / high-music picks; disable so the penalty path is exercised.
+        config._data.setdefault("analysis", {}).update(
+            {"skip_intro_minutes": 0, "skip_high_music": False}
+        )
         scorer = DummyScorer(config)
 
         transcript = TranscriptionResult(
@@ -778,11 +782,15 @@ class TestOutputQualityV3Pipeline:
         assert repl.called
 
     def test_E6_high_music_ducks_full_clip(self, tmp_path: Path) -> None:
+        cfg = _make_config(tmp_path)
+        cfg._data.setdefault("analysis", {})["skip_high_music"] = False  # E6 needs skip disabled
         info = _run_assemble(
-            tmp_path, highlight=_make_highlight(music_risk="HIGH_MUSIC_DETECTED")
+            tmp_path,
+            config=cfg,
+            highlight=_make_highlight(music_risk="HIGH_MUSIC_DETECTED"),
         )
         assert info["export"].call_args[1]["duck_full"] is True
-        clean = _run_assemble(tmp_path)
+        clean = _run_assemble(tmp_path, config=cfg)
         assert "duck_full" not in clean["export"].call_args[1]
 
     def test_E8_queued_clip_uses_queued_path(self, tmp_path: Path) -> None:

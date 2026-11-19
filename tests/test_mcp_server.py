@@ -75,6 +75,8 @@ def _make_config(tmp_path: Path) -> Config:
                 f"  output_dir: '{(tmp_path / 'output').as_posix()}'",
                 f"  temp_dir: '{(tmp_path / 'temp').as_posix()}'",
                 f"  cache_dir: '{(tmp_path / '.cache').as_posix()}'",
+                "analysis:",
+                "  skip_intro_minutes: 0",
                 "metadata:",
                 "  hashtag_count: 10",
                 "  include_streamer_tag: true",

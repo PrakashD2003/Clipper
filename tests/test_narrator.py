@@ -126,8 +126,8 @@ class TestTransformativeNarratorConfig:
         assert narrator.enabled is True
         assert narrator.mode == "auto"
         assert narrator.engine == "auto"
-        assert narrator.voice == "af_heart"
-        assert narrator.edge_tts_voice == "en-US-GuyNeural"
+        assert narrator.voice == "am_puck"
+        assert narrator.edge_tts_voice == "en-US-AndrewMultilingualNeural"
         assert narrator.elevenlabs_voice_id == ""
         assert narrator.elevenlabs_model_id == "eleven_multilingual_v2"
         assert pytest.approx(narrator.duck_volume, 0.01) == 0.18
@@ -246,7 +246,7 @@ transformation:
             res = narrator.synthesize_speech("test text", out_wav)
             assert res == out_wav
             mock_edge.assert_called_once()
-            assert narrator.voice == "af_heart"
+            assert narrator.voice == "am_puck"
             assert narrator.edge_tts_voice != narrator.voice
 
     def test_espeak_available_sets_phonemizer_env_when_dll_found(

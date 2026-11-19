@@ -1997,7 +1997,10 @@ class TestReviewFixes:
         hls = _sample_highlights()
         hls[0].music_risk = "HIGH_MUSIC_DETECTED"
         _install_mock_stage_deps(monkeypatch, tmp_path, call_log=[], highlights=hls)
-        pipeline = Pipeline(_make_config(tmp_path))
+        # v3 defaults analysis.skip_high_music to true; this test covers the disabled path.
+        pipeline = Pipeline(
+            _make_config(tmp_path, {"analysis": {"skip_high_music": False}})
+        )
         clips = await pipeline.process_stream("https://youtube.com/watch?v=g10b", max_clips=2)
         assert len(clips) == 2
 

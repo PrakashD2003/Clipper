@@ -1495,7 +1495,10 @@ class TestExporter:
             subprocess.CalledProcessError(returncode=1, cmd=["ffmpeg"], stderr=b"nvenc fail"),
             subprocess.CompletedProcess(args=["ffmpeg"], returncode=0),
         ]
-        with patch("streamclipper.output.exporter.subprocess.run", side_effect=side_effects) as mock_run:
+        with (
+            patch.object(exporter.narrator, "normalize_audio", return_value=None),
+            patch("streamclipper.output.exporter.subprocess.run", side_effect=side_effects) as mock_run,
+        ):
             result = exporter.export(
                 clip=fake_clip,  # type: ignore[arg-type]
                 words=[],
@@ -1803,6 +1806,7 @@ def test_m11_mix_failure_keeps_unnarrated_video_and_clears_windows(tmp_path: Pat
         p1,
         p2,
         p3,
+        patch.object(exporter.narrator, "normalize_audio", return_value=None),
         patch.object(exporter.caption_burner, "generate_ass", side_effect=fake_gen_ass),
         patch.object(
             exporter.caption_burner, "burn_captions", return_value=tmp_path / "final.mp4"
@@ -1873,8 +1877,9 @@ def test_l9_ffmpeg_stderr_tail_logged_on_failure(
         subprocess.CompletedProcess(args=["ffmpeg"], returncode=0),
     ]
     with caplog.at_level(logging.WARNING, logger="streamclipper.output.exporter"):
-        with patch(
-            "streamclipper.output.exporter.subprocess.run", side_effect=side_effects
+        with (
+            patch.object(exporter.narrator, "normalize_audio", return_value=None),
+            patch("streamclipper.output.exporter.subprocess.run", side_effect=side_effects),
         ):
             exporter.export(
                 clip=_FakeCompositeClip([]),  # type: ignore[arg-type]
