@@ -153,7 +153,16 @@ def test_A01_cookie_logging_safe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 
     monkeypatch.setenv("YOUTUBE_COOKIES_FILE", str(cookie_file))
 
-    with caplog.at_level(logging.DEBUG):
+    # Earlier tests (CLI logging setup) may disable/reconfigure the streamclipper loggers;
+    # pin this module's logger so the assertion doesn't depend on test order.
+    mod_logger = logging.getLogger("streamclipper.download._ytdlp_opts")
+    monkeypatch.setattr(mod_logger, "disabled", False)
+    monkeypatch.setattr(mod_logger, "propagate", True)
+    for parent in ("streamclipper.download", "streamclipper"):
+        monkeypatch.setattr(logging.getLogger(parent), "disabled", False)
+        monkeypatch.setattr(logging.getLogger(parent), "propagate", True)
+
+    with caplog.at_level(logging.DEBUG, logger="streamclipper.download._ytdlp_opts"):
         found = find_cookie_file()
 
     assert found == str(cookie_file.resolve())
