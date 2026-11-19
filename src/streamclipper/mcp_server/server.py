@@ -401,15 +401,6 @@ def _collect_temp_files_for_stream(
     return unique
 
 
-def _duration_bound_error(duration: float, min_s: Any, max_s: Any) -> str:
-    """Return a rejection reason if duration is outside [min_s, max_s], else an empty string."""
-    if duration < float(min_s):
-        return f"duration {duration:.2f}s is below analysis.min_clip_seconds ({float(min_s):g}s)"
-    if duration > float(max_s):
-        return f"duration {duration:.2f}s is above analysis.max_clip_seconds ({float(max_s):g}s)"
-    return ""
-
-
 def _next_available_clip_index(
     config: Config, game: str, streamer: str, min_index: int = 1
 ) -> int:
@@ -1052,16 +1043,6 @@ async def submit_highlights(url: str, highlights: str) -> str:
                     rejected_count += 1
                     continue
 
-                duration_error = _duration_bound_error(
-                    end - start, scorer.min_clip_seconds, scorer.max_clip_seconds
-                )
-                if duration_error:
-                    rejected_count += 1
-                    rejected_reasons.append(
-                        {"start": start, "end": end, "reason": duration_error}
-                    )
-                    continue
-
                 score = _parse_score(item.get("score"))
                 title = (
                     _as_str(item.get("title"))
@@ -1100,6 +1081,28 @@ async def submit_highlights(url: str, highlights: str) -> str:
                     breakdown_commentary=breakdown_commentary,
                     breakdown_callout=breakdown_callout,
                 )
+                stitched = sum(float(b["end"]) - float(b["start"]) for b in validated_beats)
+                if not (
+                    validated_beats
+                    and scorer.min_clip_seconds <= stitched <= scorer.max_clip_seconds
+                ):
+                    # Single cut: widen short moments / trim long ones instead of rejecting.
+                    highlight.sub_clips = []
+                    fit_peak = _parse_seconds(item.get("peak_time"))
+                    highlight.peak_time = fit_peak if fit_peak is not None else 0.0
+                    fit = scorer.fit_highlight_bounds(
+                        highlight,
+                        state.loudness_spikes,
+                        stream_duration=float(state.stream_info.duration_seconds or 0) or None,
+                    )
+                    highlight.peak_time = 0.0
+                    if fit.rejected:
+                        rejected_count += 1
+                        rejected_reasons.append(
+                            {"start": start, "end": end, "reason": fit.adjustment}
+                        )
+                        continue
+                    start, end = highlight.start, highlight.end
                 if state.audio_path and Path(state.audio_path).is_file():
                     try:
                         from ..analysis.copyright_risk import CopyrightRiskDetector
@@ -1237,12 +1240,6 @@ async def render_clip(
         pipeline = Pipeline(config)
         scorer = _MCPScorer(config)
 
-        duration_error = _duration_bound_error(
-            float(end) - float(start), scorer.min_clip_seconds, scorer.max_clip_seconds
-        )
-        if duration_error:
-            return _json_error(f"Rejected clip range: {duration_error}.")
-
         base_mode = pipeline._resolve_base_mode(mode)
 
         parsed_sub_clips: list[dict[str, Any]] = []
@@ -1261,6 +1258,29 @@ async def render_clip(
             float(end),
             max_duration=scorer.max_clip_seconds,
         )
+
+        bounds_adjustment = ""
+        stitched = sum(float(b["end"]) - float(b["start"]) for b in validated_beats)
+        if not (
+            validated_beats and scorer.min_clip_seconds <= stitched <= scorer.max_clip_seconds
+        ):
+            # Single cut: widen short moments / trim long ones instead of rejecting.
+            validated_beats = []
+            cached_state = cache.load_state(clean_url)
+            probe = Highlight(start=float(start), end=float(end), score=0.0, title=hook_title, reason="")
+            fit = scorer.fit_highlight_bounds(
+                probe,
+                cached_state.loudness_spikes if cached_state is not None else [],
+                stream_duration=(
+                    float(cached_state.stream_info.duration_seconds or 0) or None
+                    if cached_state is not None
+                    else None
+                ),
+            )
+            if fit.rejected:
+                return _json_error(f"Rejected clip range: {fit.adjustment}.")
+            start, end = probe.start, probe.end
+            bounds_adjustment = probe.bounds_adjustment
 
         intro_path = (
             Path(voice_intro_path.strip())
@@ -1313,6 +1333,7 @@ async def render_clip(
                 sub_clips=validated_beats,
                 breakdown_commentary=_as_str(breakdown_commentary),
                 breakdown_callout=_as_str(breakdown_callout),
+                bounds_adjustment=bounds_adjustment,
             )
 
             if state is not None:
@@ -1363,6 +1384,7 @@ async def render_clip(
             {
                 "url": clean_url,
                 "mode": resolved_mode,
+                "bounds_adjustment": bounds_adjustment,
                 "clip": clip_result.to_dict(),
             }
         )

@@ -2790,29 +2790,46 @@ async def test_M8_omitted_mode_uses_config_transformation_mode(
 
 
 @pytest.mark.asyncio
-async def test_M9_submit_and_render_clip_reject_out_of_bounds_duration(
+async def test_M9_submit_and_render_clip_fit_bounds_and_reject_beyond_ceiling(
     mcp_env: tuple[Config, StepCache, Path],
 ) -> None:
+    """Short moments are widened, long ones trimmed, only ranges past the hard ceiling rejected."""
+    config, _, _ = mcp_env
+    min_s = float(config.get("analysis.min_clip_seconds"))
+    max_s = float(config.get("analysis.max_clip_seconds"))
+    hard_max = float(config.get("analysis.hard_max_clip_seconds"))
     url = "https://www.youtube.com/watch?v=bounds12345"
     payload = json.dumps(
         [
-            {"start": 10.0, "end": 15.0, "score": 9.0, "title": "Too short"},
-            {"start": 100.0, "end": 400.0, "score": 9.0, "title": "Too long"},
-            {"start": 500.0, "end": 540.0, "score": 9.0, "title": "Just right"},
+            {"start": 1000.0, "end": 1000.0 + min_s / 3, "score": 9.0, "title": "Too short"},
+            {"start": 2000.0, "end": 2000.0 + max_s + 10, "score": 9.0, "title": "Too long",
+             "peak_time": 2000.0 + max_s + 5},
+            {"start": 3000.0, "end": 3000.0 + hard_max + 60, "score": 9.0, "title": "Way too long"},
+            {"start": 4000.0, "end": 4000.0 + min_s + 5, "score": 9.0, "title": "Just right"},
         ]
     )
     res = _extract_json(await mcp.call_tool("submit_highlights", {"url": url, "highlights": payload}))
-    assert res["accepted_count"] == 1
-    assert res["rejected_count"] == 2
-    reasons = " ".join(r["reason"] for r in res["rejected"])
-    assert "min_clip_seconds" in reasons and "max_clip_seconds" in reasons
+    assert res["accepted_count"] == 3
+    assert res["rejected_count"] == 1
+    assert "hard_max_clip_seconds" in res["rejected"][0]["reason"]
 
-    short = _extract_json(
+    by_title = {h["title"]: h for h in res["highlights"]}
+    short = by_title["Too short"]
+    assert short["end"] - short["start"] == pytest.approx(min_s)
+    assert short["start"] < 1000.0 and "widened" in short["bounds_adjustment"]
+    long = by_title["Too long"]
+    assert long["end"] - long["start"] == pytest.approx(max_s)
+    assert long["start"] <= 2000.0 + max_s + 5 <= long["end"]  # trimmed window keeps the peak
+    assert "trimmed" in long["bounds_adjustment"]
+    assert by_title["Just right"]["bounds_adjustment"] == ""
+
+    too_long = _extract_json(
         await mcp.call_tool(
-            "render_clip", {"url": url, "start": 10.0, "end": 15.0, "hook_title": "x"}
+            "render_clip",
+            {"url": url, "start": 0.0, "end": hard_max + 60, "hook_title": "x"},
         )
     )
-    assert "min_clip_seconds" in short["error"]
+    assert "hard_max_clip_seconds" in too_long["error"]
 
 
 @pytest.mark.asyncio

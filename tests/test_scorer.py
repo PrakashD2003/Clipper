@@ -19,7 +19,7 @@ from streamclipper.models import (
     SignalType,
 )
 from streamclipper.scoring.ollama_scorer import OllamaConnectionError, OllamaScorer
-from streamclipper.scoring.scorer import Scorer, TranscriptChunk
+from streamclipper.scoring.scorer import Scorer, TranscriptChunk, fit_clip_range
 from streamclipper.config import Config, HardwareProfile
 
 
@@ -1475,10 +1475,10 @@ class TestOllamaScorerEdgeCasesAndHardening:
     def test_score_and_select_enforces_clip_bounds_scopes_transcript_and_max_clips_override(
         self, config: Config, long_transcript: TranscriptionResult
     ):
-        """Enforces min/max_clip_seconds, allows valid stitched beats, scopes transcript_chunk, and honors max_clips."""
+        """Widens short moments, rejects ranges past the hard ceiling, keeps stitched beats, scopes transcript, honors max_clips."""
         canned = [
-            _make_highlight(10.0, 20.0, 9.5, title="Too Short"),          # 10s < 30s -> rejected
-            _make_highlight(100.0, 400.0, 9.5, title="Too Long"),         # 300s > 90s -> rejected
+            _make_highlight(10.0, 20.0, 9.5, title="Too Short"),          # 10s < 30s -> widened to 30s
+            _make_highlight(100.0, 400.0, 9.5, title="Too Long"),         # 300s > 180s ceiling -> rejected
             _make_highlight(60.0, 105.0, 9.2, title="Valid Single"),      # 45s -> kept
             _make_highlight(
                 300.0, 420.0, 9.0, title="Valid MultiBeat",
@@ -1494,9 +1494,13 @@ class TestOllamaScorerEdgeCasesAndHardening:
             canned.append(_make_highlight(base, base + 40.0, 8.8, title=f"Extra {idx}"))
 
         scorer = _StubScorer(config, canned=canned)
+        scorer.min_clip_seconds = 30
         selected = scorer.score_and_select(long_transcript, [], [], max_clips=7)
         titles = [h.title for h in selected]
-        assert "Too Short" not in titles
+        assert "Too Short" in titles
+        short = next(h for h in selected if h.title == "Too Short")
+        assert short.end - short.start == pytest.approx(30.0)
+        assert "widened" in short.bounds_adjustment
         assert "Too Long" not in titles
         assert "Valid Single" in titles
         assert "Valid MultiBeat" in titles
@@ -1770,7 +1774,7 @@ class TestOllamaScorerEdgeCasesAndHardening:
                     {"start": 145.0, "end": 153.0, "label": "Payoff"},
                 ],
             ),
-            # 20s parent (too short) + 16s stitched sub_clips (< 30s) -> still dropped
+            # 20s parent (too short) + 16s stitched sub_clips (< 30s) -> single cut widened to 30s
             _make_highlight(
                 200.0,
                 220.0,
@@ -1798,11 +1802,14 @@ class TestOllamaScorerEdgeCasesAndHardening:
             full_text="clip talk",
         )
         scorer = _StubScorer(config, canned=highlights)
+        scorer.min_clip_seconds = 30
         selected = scorer.score_and_select(tr, [], [])
         by_title = {h.title: h for h in selected}
         assert "Short Beats Valid Parent" in by_title
         assert by_title["Short Beats Valid Parent"].sub_clips == []
-        assert "Too Short Overall" not in by_title
+        widened = by_title["Too Short Overall"]
+        assert widened.sub_clips == []
+        assert widened.end - widened.start == pytest.approx(30.0)
         assert "Valid Story Beats" in by_title
         assert len(by_title["Valid Story Beats"].sub_clips) == 2
 
@@ -2066,3 +2073,40 @@ class TestReviewedDefects:
         )
         _Rec(config).score_and_select(tr, [], [])
         assert seen == ["real"]
+
+
+
+class TestFitClipRange:
+    """Clip length limits widen/trim instead of rejecting; only the hard ceiling rejects."""
+
+    def test_short_range_widened_setup_weighted(self) -> None:
+        fit = fit_clip_range(100.0, 110.0, min_s=30, max_s=90, hard_max_s=180)
+        assert not fit.rejected
+        assert fit.end - fit.start == pytest.approx(30.0)
+        assert 100.0 - fit.start > fit.end - 110.0  # more setup than aftermath
+
+    def test_widen_clamped_at_stream_start_and_end(self) -> None:
+        at_start = fit_clip_range(0.0, 5.0, min_s=30, max_s=90, hard_max_s=180)
+        assert at_start.start == 0.0 and at_start.end == pytest.approx(30.0)
+        at_end = fit_clip_range(
+            995.0, 1000.0, min_s=30, max_s=90, hard_max_s=180, stream_duration=1000.0
+        )
+        assert at_end.end == 1000.0 and at_end.start == pytest.approx(970.0)
+
+    def test_long_range_trimmed_around_peak(self) -> None:
+        fit = fit_clip_range(0.0, 150.0, min_s=30, max_s=90, hard_max_s=180, peak_time=140.0)
+        assert fit.end - fit.start == pytest.approx(90.0)
+        assert fit.end == pytest.approx(150.0)  # window stays inside the original range
+        assert fit.start <= 140.0 <= fit.end
+        mid = fit_clip_range(0.0, 150.0, min_s=30, max_s=90, hard_max_s=180)
+        assert (mid.start, mid.end) == (pytest.approx(30.0), pytest.approx(120.0))
+
+    def test_beyond_hard_ceiling_rejected(self) -> None:
+        fit = fit_clip_range(0.0, 7200.0, min_s=30, max_s=90, hard_max_s=180)
+        assert fit.rejected and "hard_max_clip_seconds" in fit.adjustment
+
+    def test_adjust_disabled_restores_strict_reject(self) -> None:
+        assert fit_clip_range(0.0, 10.0, min_s=30, max_s=90, hard_max_s=180, adjust=False).rejected
+        assert fit_clip_range(0.0, 120.0, min_s=30, max_s=90, hard_max_s=180, adjust=False).rejected
+        ok = fit_clip_range(0.0, 45.0, min_s=30, max_s=90, hard_max_s=180, adjust=False)
+        assert not ok.rejected and ok.adjustment == ""

@@ -37,8 +37,10 @@ transcription:
 
 analysis:
   chunk_minutes: 12
-  min_clip_seconds: 30
+  min_clip_seconds: 15
   max_clip_seconds: 90
+  hard_max_clip_seconds: 180          # Ranges longer than this are rejected outright (Shorts limit)
+  adjust_clip_bounds: true            # Widen short / trim long moments instead of rejecting them
   max_clips_per_stream: 5
   min_highlight_score: 7.0
   skip_high_music: false               # Skip (instead of penalize) highlights flagged HIGH_MUSIC_DETECTED

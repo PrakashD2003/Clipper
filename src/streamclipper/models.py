@@ -179,6 +179,7 @@ class Highlight(SerializableModel):
     breakdown_callout: str = ""        # 2-5 word on-screen callout note
     music_risk: str = "CLEAN"          # CLEAN | LOW | HIGH_MUSIC_DETECTED
     music_confidence: float = 0.0      # Harmonic-percussive music confidence 0.0-1.0
+    bounds_adjustment: str = ""        # How the clip range was fitted to length limits ("" = unchanged)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Highlight":
@@ -217,6 +218,7 @@ class Highlight(SerializableModel):
             music_confidence=float(
                 data.get("music_confidence") if data.get("music_confidence") is not None else 0.0
             ),
+            bounds_adjustment=data.get("bounds_adjustment") or "",
         )
 
 

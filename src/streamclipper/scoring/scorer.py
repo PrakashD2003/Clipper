@@ -15,6 +15,93 @@ from ..config import Config
 logger = logging.getLogger(__name__)
 
 
+WIDEN_SETUP_RATIO = 0.65  # share of added context placed before the moment (setup > aftermath)
+
+
+@dataclass
+class ClipFit:
+    """Result of fitting a highlight range to clip length limits."""
+
+    start: float
+    end: float
+    adjustment: str = ""   # "" = unchanged; otherwise a human-readable note
+    rejected: bool = False
+
+
+def fit_clip_range(
+    start: float,
+    end: float,
+    *,
+    min_s: float,
+    max_s: float,
+    hard_max_s: float,
+    peak_time: float | None = None,
+    stream_duration: float | None = None,
+    adjust: bool = True,
+) -> ClipFit:
+    """Fit ``[start, end]`` to ``[min_s, max_s]`` by widening or trimming instead of rejecting.
+
+    - Shorter than ``min_s``: widen with surrounding context (``WIDEN_SETUP_RATIO`` before,
+      the rest after), clamped to ``[0, stream_duration]``; spill-over moves to the other side.
+    - Longer than ``max_s``: trim to a ``max_s`` window centred on ``peak_time`` (midpoint
+      when no peak is inside the range), kept within the original range.
+    - Longer than ``hard_max_s``: rejected outright (protects against multi-hour renders).
+    - ``adjust=False`` restores strict reject-outside-``[min_s, max_s]`` behaviour.
+    """
+    start, end = float(start), float(end)
+    min_s, max_s = float(min_s), float(max_s)
+    hard_max_s = max(float(hard_max_s), max_s)
+    duration = end - start
+
+    if duration > hard_max_s:
+        return ClipFit(
+            start, end,
+            f"rejected: {duration:.1f}s exceeds analysis.hard_max_clip_seconds ({hard_max_s:g}s)",
+            rejected=True,
+        )
+    if not adjust:
+        if duration < min_s or duration > max_s:
+            return ClipFit(
+                start, end,
+                f"rejected: {duration:.1f}s outside [{min_s:g}s, {max_s:g}s]",
+                rejected=True,
+            )
+        return ClipFit(start, end)
+
+    if duration > max_s:
+        center = (
+            float(peak_time)
+            if peak_time is not None and start <= float(peak_time) <= end
+            else (start + end) / 2.0
+        )
+        new_start = min(max(start, center - max_s / 2.0), end - max_s)
+        new_end = new_start + max_s
+        anchor = "peak" if center != (start + end) / 2.0 else "midpoint"
+        return ClipFit(
+            round(new_start, 3), round(new_end, 3),
+            f"trimmed {duration:.1f}s -> {max_s:g}s around {anchor} {center:.1f}s",
+        )
+
+    if duration < min_s:
+        need = min_s - duration
+        limit = float(stream_duration) if stream_duration and stream_duration > 0 else None
+        new_start = start - need * WIDEN_SETUP_RATIO
+        new_end = end + need * (1.0 - WIDEN_SETUP_RATIO)
+        if new_start < 0.0:
+            new_end += -new_start
+            new_start = 0.0
+        if limit is not None and new_end > limit:
+            new_start = max(0.0, new_start - (new_end - limit))
+            new_end = limit
+        widened = new_end - new_start
+        return ClipFit(
+            round(new_start, 3), round(new_end, 3),
+            f"widened {duration:.1f}s -> {widened:.1f}s with surrounding context",
+        )
+
+    return ClipFit(start, end)
+
+
 @dataclass
 class TranscriptChunk:
     """A contiguous window of transcript text with its time boundaries."""
@@ -38,6 +125,8 @@ class Scorer(ABC):
         self.max_clips = config.get("analysis.max_clips_per_stream", 5)
         self.min_clip_seconds = config.get("analysis.min_clip_seconds", 30)
         self.max_clip_seconds = config.get("analysis.max_clip_seconds", 90)
+        self.hard_max_clip_seconds = config.get("analysis.hard_max_clip_seconds", 180)
+        self.adjust_clip_bounds = bool(config.get("analysis.adjust_clip_bounds", True))
         self.weights = config.get(
             "analysis.weights",
             {"loudness": 0.25, "chat_velocity": 0.25, "llm_score": 0.50},
@@ -134,7 +223,11 @@ class Scorer(ABC):
             else:
                 effective_duration = h.end - h.start
 
-            if effective_duration < self.min_clip_seconds or effective_duration > self.max_clip_seconds:
+            if validated_beats:
+                # Story beats are already validated; their stitched length must fit the limits.
+                if not (self.min_clip_seconds <= effective_duration <= self.max_clip_seconds):
+                    continue
+            elif self.fit_highlight_bounds(h, loudness_spikes).rejected:
                 continue
 
             h.final_score = self._compute_weighted_score(h, loudness_spikes, chat_spikes)
@@ -184,6 +277,35 @@ class Scorer(ABC):
             h.chat_burst = self._extract_chat_burst(h, chat_spikes)
 
         return selected
+
+    def fit_highlight_bounds(
+        self,
+        h: Highlight,
+        loudness_spikes: list[TimeRange] | None = None,
+        stream_duration: float | None = None,
+    ) -> ClipFit:
+        """Fit ``h.start/h.end`` to the clip length limits in place; record the adjustment."""
+        peak = None
+        if (h.end - h.start) > float(self.max_clip_seconds):
+            if h.peak_time and h.start <= h.peak_time <= h.end:
+                peak = float(h.peak_time)
+            elif loudness_spikes:
+                peak = self._extract_peak_time(h, loudness_spikes)
+        fit = fit_clip_range(
+            h.start,
+            h.end,
+            min_s=self.min_clip_seconds,
+            max_s=self.max_clip_seconds,
+            hard_max_s=self.hard_max_clip_seconds,
+            peak_time=peak,
+            stream_duration=stream_duration,
+            adjust=self.adjust_clip_bounds,
+        )
+        if not fit.rejected and fit.adjustment:
+            logger.info("Highlight %r %s", h.title, fit.adjustment)
+            h.start, h.end = fit.start, fit.end
+            h.bounds_adjustment = fit.adjustment
+        return fit
 
     # ------------------------------------------------------------------
     # Per-chunk scoring checkpoint

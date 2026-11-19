@@ -238,3 +238,17 @@ Commits (one per batch, each from its own worktree, merged with `--no-ff`): H1 `
 | 587905f integration | 705 passed |
 
 Counts: 66 IDs (2 H + 16 M + 24 L + 10 A + 12 G + 2 X). Fixed 65 · partial 1 (G8) · skipped 0 · failed 0. Rejected in review: 0. Not merged into `main` and not pushed.
+
+### Follow-up: clip length limits adjust instead of reject (M9 revision)
+
+The M9 fix rejected any MCP highlight outside `[min_clip_seconds, max_clip_seconds]`, which threw away good moments. Revised by user request:
+
+| Case | Behaviour now |
+| :--- | :--- |
+| Shorter than `analysis.min_clip_seconds` (default lowered 30 → 15) | Widened with surrounding context, 65% before / 35% after, clamped to the stream start/end |
+| Longer than `analysis.max_clip_seconds` (90), valid story beats | Story mode: stitched beats are used; the raw span is not trimmed |
+| Longer than `max_clip_seconds`, no beats | Trimmed to a `max_clip_seconds` window centred on `peak_time` (midpoint when no peak lies inside) |
+| Longer than `analysis.hard_max_clip_seconds` (new, 180) | Rejected (keeps the multi-hour render protection) |
+| `analysis.adjust_clip_bounds: false` (new) | Old strict reject-outside-limits behaviour |
+
+The same `fit_clip_range()` helper (`scoring/scorer.py`) is used by the LLM scorer, `submit_highlights` and `render_clip`. Every change is recorded in the new `Highlight.bounds_adjustment` field and returned in the MCP responses. Tests: test_scorer::TestFitClipRange (5 tests), test_mcp_server::test_M9_submit_and_render_clip_fit_bounds_and_reject_beyond_ceiling; two older scorer tests were updated to the new semantics. Full suite: 710 passed.
