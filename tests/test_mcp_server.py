@@ -1784,6 +1784,7 @@ async def test_render_clip_real_assembly_end_to_end_narrative_and_story(
         encoding="utf-8",
     )
     config = Config(user_config_path=cfg_file, hardware_profile=_cpu_profile())
+    config._data["analysis"]["skip_intro_minutes"] = 0
     cache = StepCache(config)
     monkeypatch.setattr(mcp_server, "_get_config", lambda: config)
 
@@ -2753,6 +2754,7 @@ async def test_concurrent_render_all_selected_and_render_clip_real_assembly_same
         encoding="utf-8",
     )
     config = Config(user_config_path=cfg_file, hardware_profile=_cpu_profile())
+    config._data["analysis"]["skip_intro_minutes"] = 0
     cache = StepCache(config)
     monkeypatch.setattr(mcp_server, "_get_config", lambda: config)
 
@@ -3398,3 +3400,22 @@ async def test_Q1_explicit_breakdown_downgraded_for_reaction_moment(
     assert mode == "narrative" and seen == ["narrative"]
     assert notes and notes[0]["mode_adjusted"] == "breakdown -> narrative"
     assert "hype" in notes[0]["reason"]
+
+
+@pytest.mark.asyncio
+async def test_Q3_render_clip_rejects_pre_skip_intro_start(
+    mcp_env: tuple[Config, StepCache, Path],
+) -> None:
+    config, _, _ = mcp_env
+    config._data["analysis"]["skip_intro_minutes"] = 5
+    args = {
+        "url": "https://www.youtube.com/watch?v=qg123456789",
+        "start": 288.0,
+        "end": 320.0,
+        "hook_title": "T",
+        "narration_intro": "a",
+        "narration_outro": "b",
+    }
+    res = await _REAL_CALL_TOOL("render_clip", args)
+    err = json.loads(res.content[0].text)["error"]
+    assert "skip_intro_minutes" in err and "288" in err

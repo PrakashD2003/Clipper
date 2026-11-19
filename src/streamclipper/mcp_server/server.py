@@ -1448,6 +1448,14 @@ async def render_clip(
                     "un-narrated cut."
                 )
 
+        skip_intro_seconds = float(config.get("analysis.skip_intro_minutes", 5) or 0) * 60.0
+        if skip_intro_seconds > 0 and float(start) < skip_intro_seconds:
+            return _json_error(
+                f"start={float(start):.0f}s is before analysis.skip_intro_minutes "
+                f"({skip_intro_seconds / 60:g} min = {skip_intro_seconds:.0f}s): that part of the "
+                "stream is pre-game/intro. Pick a moment later."
+            )
+
         layout_kind = _as_str(layout).lower()
         if layout_kind not in ("", "stacked", "blur_fill", "reaction"):
             return _json_error(
