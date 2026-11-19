@@ -18,6 +18,14 @@ from ..models import WordTimestamp
 logger = logging.getLogger(__name__)
 
 
+def _log_ffmpeg_stderr(exc: subprocess.CalledProcessError, label: str) -> None:
+    """Log the last 500 chars of a failed FFmpeg run's stderr at warning level."""
+    stderr = exc.stderr
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", errors="replace")
+    logger.warning("%s failed (exit %s): %s", label, exc.returncode, str(stderr or "")[-500:])
+
+
 def _close_clip_handles(clip: Any) -> None:
     """Close a MoviePy clip and all attached _source_clip / _source_clips handles safely.
 
@@ -130,14 +138,19 @@ class Exporter:
         cmd = self._build_finalize_cmd(input_video, out_path, selected_codec)
         try:
             subprocess.run(cmd, check=True, capture_output=True)
-        except subprocess.CalledProcessError:
+        except subprocess.CalledProcessError as exc:
+            _log_ffmpeg_stderr(exc, f"FFmpeg {selected_codec} finalization")
             if selected_codec != "h264_nvenc":
                 raise
             logger.warning(
                 "FFmpeg h264_nvenc finalization failed; falling back to libx264."
             )
             fallback_cmd = self._build_finalize_cmd(input_video, out_path, "libx264")
-            subprocess.run(fallback_cmd, check=True, capture_output=True)
+            try:
+                subprocess.run(fallback_cmd, check=True, capture_output=True)
+            except subprocess.CalledProcessError as exc2:
+                _log_ffmpeg_stderr(exc2, "FFmpeg libx264 finalization")
+                raise
         return out_path
 
     def export(
@@ -236,6 +249,7 @@ class Exporter:
                         voice_intro_path=voice_intro_path,
                         voice_outro_path=voice_outro_path,
                         temp_dir=work_dir,
+                        clip_duration=clip_duration or None,
                     )
                     breakdown_wav = None
                     if effective_mode == "breakdown" and (
@@ -280,14 +294,33 @@ class Exporter:
                             if breakdown_wav is not None
                             else {}
                         )
-                        current_video = self.narrator.mix_narration_with_ducking(
-                            input_video=raw_mp4,
-                            output_video=mixed_mp4,
-                            intro_wav=intro_wav,
-                            outro_wav=outro_wav,
-                            clip_duration=clip_duration,
-                            **breakdown_kwargs,
-                        )
+                        mixed_path = None
+                        try:
+                            mixed_path = self.narrator.mix_narration_with_ducking(
+                                input_video=raw_mp4,
+                                output_video=mixed_mp4,
+                                intro_wav=intro_wav,
+                                outro_wav=outro_wav,
+                                clip_duration=clip_duration,
+                                **breakdown_kwargs,
+                            )
+                        except Exception as exc:
+                            if isinstance(exc, subprocess.CalledProcessError):
+                                _log_ffmpeg_stderr(exc, "Narration mix")
+                            logger.warning(
+                                "Narration mix failed (%s); keeping un-narrated video.",
+                                exc,
+                            )
+                        if mixed_path:
+                            current_video = Path(mixed_path)
+                        else:
+                            if not mixed_path:
+                                logger.warning(
+                                    "Narration mix produced no output; keeping un-narrated video."
+                                )
+                            intro_dur = outro_dur = None
+                            eff_intro = eff_outro = None
+                            breakdown_window = None
                 finally:
                     if override_needed:
                         self.narrator.enabled = orig_enabled
@@ -302,7 +335,26 @@ class Exporter:
                 self.caption_burner.show_chat_ticker and effective_chat_burst
             )
 
-            if has_words or has_chat:
+            is_raw_mode = effective_mode == "raw"
+            has_card = (not is_raw_mode) and bool(
+                (
+                    eff_intro is not None
+                    and narration_intro
+                    and str(narration_intro).strip()
+                )
+                or (
+                    eff_outro is not None
+                    and narration_outro
+                    and str(narration_outro).strip()
+                )
+                or (
+                    breakdown_window is not None
+                    and breakdown_callout
+                    and str(breakdown_callout).strip()
+                )
+            )
+
+            if has_words or has_chat or has_card:
                 ass_path = work_dir / "captions.ass"
                 is_raw = effective_mode == "raw"
                 self.caption_burner.generate_ass(
@@ -318,13 +370,17 @@ class Exporter:
                     breakdown_callout="" if is_raw else breakdown_callout,
                     breakdown_window=None if is_raw else breakdown_window,
                 )
-                result_path = self.caption_burner.burn_captions(
-                    input_video=current_video,
-                    ass_path=ass_path,
-                    output_video=final_output,
-                    crf=self.crf,
-                    codec=self.codec,
-                )
+                try:
+                    result_path = self.caption_burner.burn_captions(
+                        input_video=current_video,
+                        ass_path=ass_path,
+                        output_video=final_output,
+                        crf=self.crf,
+                        codec=self.codec,
+                    )
+                except subprocess.CalledProcessError as exc:
+                    _log_ffmpeg_stderr(exc, "FFmpeg caption burn-in")
+                    raise
             else:
                 result_path = self._finalize_without_captions(
                     current_video, final_output

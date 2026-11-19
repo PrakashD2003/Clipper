@@ -22,6 +22,7 @@ from streamclipper.download.video import (
 from streamclipper.models import Platform, StreamInfo
 
 SAMPLE_URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+NON_YT_URL = "https://example.com/watch/dQw4w9WgXcQ"
 SAMPLE_INFO: dict[str, Any] = {
     "id": "dQw4w9WgXcQ",
     "title": "GTA 6 Launch Day 4-Hour Stream VOD",
@@ -379,9 +380,9 @@ class TestVideoSegmentDownloader:
 
         monkeypatch.setattr(yt_dlp.utils, "download_range_func", _spy_range_func)
 
-        result = download_segment(SAMPLE_URL, 100.0, 145.0, output_dir)
+        result = download_segment(NON_YT_URL, 100.0, 145.0, output_dir)
 
-        expected_path = output_dir / "dQw4w9WgXcQ_100_145.mp4"
+        expected_path = output_dir / "dQw4w9WgXcQ_100000_145000_b3000.mp4"
         assert output_dir.is_dir()
         assert result == expected_path
 
@@ -389,7 +390,7 @@ class TestVideoSegmentDownloader:
         assert len(captured_opts) == 2
         assert captured_opts[0]["skip_download"] is True
         assert captured_opts[0]["noplaylist"] is True
-        instances[0].extract_info.assert_called_once_with(SAMPLE_URL, download=False)
+        instances[0].extract_info.assert_called_once_with(NON_YT_URL, download=False)
 
         dl_opts = captured_opts[1]
         assert dl_opts["format"] == VIDEO_FORMAT_1080P
@@ -397,12 +398,12 @@ class TestVideoSegmentDownloader:
         assert dl_opts["merge_output_format"] == "mp4"
         assert dl_opts["force_keyframes_at_cuts"] is True
         assert dl_opts["noplaylist"] is True
-        assert dl_opts["outtmpl"] == str(output_dir / "dQw4w9WgXcQ_100_145.%(ext)s")
+        assert dl_opts["outtmpl"] == str(output_dir / "dQw4w9WgXcQ_100000_145000_b3000.%(ext)s")
 
         assert range_calls == [(None, [(97.0, 148.0)])]
         resolved_ranges = list(dl_opts["download_ranges"]({}, None))
         assert resolved_ranges == [{"start_time": 97.0, "end_time": 148.0}]
-        instances[1].download.assert_called_once_with([SAMPLE_URL])
+        instances[1].download.assert_called_once_with([NON_YT_URL])
 
     def test_download_segment_clamps_actual_start_at_zero(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -410,7 +411,7 @@ class TestVideoSegmentDownloader:
         captured_opts, _ = _patch_yt_dlp(monkeypatch)
 
         result = download_segment(
-            SAMPLE_URL,
+            NON_YT_URL,
             start_seconds=1.5,
             end_seconds=12.0,
             output_dir=tmp_path,
@@ -418,7 +419,7 @@ class TestVideoSegmentDownloader:
         )
 
         # Filename uses requested (unbuffered) int bounds
-        assert result == tmp_path / "dQw4w9WgXcQ_1_12.mp4"
+        assert result == tmp_path / "dQw4w9WgXcQ_1500_12000_b3000.mp4"
         dl_opts = captured_opts[1]
         resolved_ranges = list(dl_opts["download_ranges"]({}, None))
         assert resolved_ranges == [{"start_time": 0.0, "end_time": 15.0}]
@@ -442,26 +443,30 @@ class TestVideoSegmentDownloader:
         captured_opts, _ = _patch_yt_dlp(monkeypatch)
 
         result = download_segment(
-            SAMPLE_URL,
+            NON_YT_URL,
             start_seconds=20.0,
             end_seconds=50.0,
             output_dir=tmp_path,
             buffer_seconds=buffer_seconds,
         )
 
-        assert result == tmp_path / "dQw4w9WgXcQ_20_50.mp4"
+        assert result == tmp_path / f"dQw4w9WgXcQ_20000_50000_b{int(buffer_seconds * 1000)}.mp4"
         resolved_ranges = list(captured_opts[1]["download_ranges"]({}, None))
         assert resolved_ranges == [{"start_time": expected_start, "end_time": expected_end}]
 
     def test_download_segment_skips_when_cached_mp4_exists(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        cached_mp4 = tmp_path / "dQw4w9WgXcQ_100_145.mp4"
+        cached_mp4 = tmp_path / "dQw4w9WgXcQ_100000_145000_b3000.mp4"
         cached_mp4.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+        cached_mp4.with_suffix(".meta.json").write_text(
+            '{"start_seconds": 100.0, "end_seconds": 145.0, "buffer_seconds": 3.0}',
+            encoding="utf-8",
+        )
 
         captured_opts, instances = _patch_yt_dlp(monkeypatch)
 
-        result = download_segment(SAMPLE_URL, 100.0, 145.0, tmp_path)
+        result = download_segment(NON_YT_URL, 100.0, 145.0, tmp_path)
 
         assert result == cached_mp4
         # Only metadata probe ran; no download YoutubeDL created
@@ -472,47 +477,51 @@ class TestVideoSegmentDownloader:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         # Pre-cache beat #2 so only beat #1 and beat #3 should trigger downloads
-        cached_beat_2 = tmp_path / "dQw4w9WgXcQ_60_75.mp4"
+        cached_beat_2 = tmp_path / "dQw4w9WgXcQ_60000_75000_b4000.mp4"
         cached_beat_2.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+        cached_beat_2.with_suffix(".meta.json").write_text(
+            '{"start_seconds": 60.0, "end_seconds": 75.0, "buffer_seconds": 4.0}',
+            encoding="utf-8",
+        )
 
         captured_opts, instances = _patch_yt_dlp(monkeypatch)
 
         segments = [(2.0, 10.0), (60.0, 75.0), (120.5, 138.9)]
         paths = download_multiple_segments(
-            SAMPLE_URL,
+            NON_YT_URL,
             segments=segments,
             output_dir=tmp_path,
             buffer_seconds=4.0,
         )
 
         assert paths == [
-            tmp_path / "dQw4w9WgXcQ_2_10.mp4",
+            tmp_path / "dQw4w9WgXcQ_2000_10000_b4000.mp4",
             cached_beat_2,
-            tmp_path / "dQw4w9WgXcQ_120_138.mp4",
+            tmp_path / "dQw4w9WgXcQ_120500_138900_b4000.mp4",
         ]
 
         # 1 metadata probe + 2 actual segment downloads (beat #2 skipped)
         assert len(captured_opts) == 3
-        instances[0].extract_info.assert_called_once_with(SAMPLE_URL, download=False)
+        instances[0].extract_info.assert_called_once_with(NON_YT_URL, download=False)
 
         beat_1_ranges = list(captured_opts[1]["download_ranges"]({}, None))
         assert beat_1_ranges == [{"start_time": 0.0, "end_time": 14.0}]
         assert captured_opts[1]["force_keyframes_at_cuts"] is True
         assert captured_opts[1]["merge_output_format"] == "mp4"
-        instances[1].download.assert_called_once_with([SAMPLE_URL])
+        instances[1].download.assert_called_once_with([NON_YT_URL])
 
         beat_3_ranges = list(captured_opts[2]["download_ranges"]({}, None))
         assert beat_3_ranges == [{"start_time": 116.5, "end_time": 142.9}]
         assert captured_opts[2]["force_keyframes_at_cuts"] is True
         assert captured_opts[2]["merge_output_format"] == "mp4"
-        instances[2].download.assert_called_once_with([SAMPLE_URL])
+        instances[2].download.assert_called_once_with([NON_YT_URL])
 
     def test_download_multiple_segments_empty_list_skips_yt_dlp(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         captured_opts, _ = _patch_yt_dlp(monkeypatch)
 
-        result = download_multiple_segments(SAMPLE_URL, [], tmp_path)
+        result = download_multiple_segments(NON_YT_URL, [], tmp_path)
 
         assert result == []
         assert captured_opts == []
@@ -522,10 +531,10 @@ class TestVideoSegmentDownloader:
         [
             ("", 10.0, 20.0, 3.0),
             ("   ", 10.0, 20.0, 3.0),
-            (SAMPLE_URL, -1.0, 20.0, 3.0),
-            (SAMPLE_URL, 20.0, 20.0, 3.0),
-            (SAMPLE_URL, 25.0, 20.0, 3.0),
-            (SAMPLE_URL, 10.0, 20.0, -0.5),
+            (NON_YT_URL, -1.0, 20.0, 3.0),
+            (NON_YT_URL, 20.0, 20.0, 3.0),
+            (NON_YT_URL, 25.0, 20.0, 3.0),
+            (NON_YT_URL, 10.0, 20.0, -0.5),
         ],
     )
     def test_download_segment_validation_rejects_invalid_arguments(
@@ -546,7 +555,7 @@ class TestVideoSegmentDownloader:
 
         with pytest.raises(ValueError):
             download_multiple_segments(
-                SAMPLE_URL,
+                NON_YT_URL,
                 segments=[(10.0, 20.0), (50.0, 40.0)],
                 output_dir=tmp_path,
             )
@@ -564,7 +573,7 @@ class TestVideoSegmentDownloader:
         )
 
         with pytest.raises(VideoDownloadError, match="private"):
-            download_segment(SAMPLE_URL, 10.0, 20.0, tmp_path)
+            download_segment(NON_YT_URL, 10.0, 20.0, tmp_path)
 
     def test_download_segment_raises_when_video_id_missing(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -572,7 +581,7 @@ class TestVideoSegmentDownloader:
         _patch_yt_dlp(monkeypatch, extract_return={"title": "Missing ID"})
 
         with pytest.raises(VideoDownloadError, match="Could not determine video ID"):
-            download_segment(SAMPLE_URL, 10.0, 20.0, tmp_path)
+            download_segment(NON_YT_URL, 10.0, 20.0, tmp_path)
 
     def test_download_audio_handles_na_metadata_and_offline_sidecar_cache(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -614,7 +623,7 @@ class TestVideoSegmentDownloader:
         self, tmp_path: Path, start: Any, end: Any, buf: Any
     ) -> None:
         with pytest.raises(ValueError):
-            download_segment(SAMPLE_URL, start, end, tmp_path, buffer_seconds=buf)
+            download_segment(NON_YT_URL, start, end, tmp_path, buffer_seconds=buf)
 
     def test_download_segment_invalidates_cache_on_buffer_change_and_detects_alt_container(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -627,7 +636,7 @@ class TestVideoSegmentDownloader:
         )
         captured_opts, _ = _patch_yt_dlp(monkeypatch)
         # Same bounds with buffer_seconds=5.0 must re-download instead of returning stale buffer=3.0
-        download_segment(SAMPLE_URL, 10.0, 40.0, tmp_path, buffer_seconds=5.0)
+        download_segment(NON_YT_URL, 10.0, 40.0, tmp_path, buffer_seconds=5.0)
         assert len(captured_opts) == 2
 
         # Alternate container fallback (.webm) when yt-dlp doesn't produce .mp4
@@ -635,32 +644,127 @@ class TestVideoSegmentDownloader:
         alt_dir.mkdir()
 
         def _write_webm(_urls: list[str]) -> None:
-            (alt_dir / "dQw4w9WgXcQ_50_80.webm").write_bytes(b"webm-data")
+            (alt_dir / "dQw4w9WgXcQ_50000_80000_b3000.webm").write_bytes(b"webm-data")
 
         _, alt_instances = _patch_yt_dlp(monkeypatch, download_side_effect=_write_webm)
-        resolved = download_segment(SAMPLE_URL, 50.0, 80.0, alt_dir)
-        assert resolved == alt_dir / "dQw4w9WgXcQ_50_80.webm"
+        resolved = download_segment(NON_YT_URL, 50.0, 80.0, alt_dir)
+        assert resolved == alt_dir / "dQw4w9WgXcQ_50000_80000_b3000.webm"
 
         # Subsequent call with identical bounds/buffer reuses cached .webm without re-downloading
-        cached_alt = download_segment(SAMPLE_URL, 50.0, 80.0, alt_dir)
-        assert cached_alt == alt_dir / "dQw4w9WgXcQ_50_80.webm"
+        cached_alt = download_segment(NON_YT_URL, 50.0, 80.0, alt_dir)
+        assert cached_alt == alt_dir / "dQw4w9WgXcQ_50000_80000_b3000.webm"
         assert sum(inst.download.call_count for inst in alt_instances) == 1
 
         # Changing buffer_seconds unlinks stale .mp4 so a newly written .webm is NOT masked by stale .mp4
         stale_dir = tmp_path / "stale"
         stale_dir.mkdir()
-        stale_mp4 = stale_dir / "dQw4w9WgXcQ_10_50.mp4"
+        stale_mp4 = stale_dir / "dQw4w9WgXcQ_10000_50000_b5000.mp4"
         stale_mp4.write_bytes(b"old-buffer-3")
-        (stale_dir / "dQw4w9WgXcQ_10_50.meta.json").write_text(
+        (stale_dir / "dQw4w9WgXcQ_10000_50000_b5000.meta.json").write_text(
             '{"start_seconds": 10.0, "end_seconds": 50.0, "buffer_seconds": 3.0}',
             encoding="utf-8",
         )
 
         def _write_new_webm(_urls: list[str]) -> None:
-            (stale_dir / "dQw4w9WgXcQ_10_50.webm").write_bytes(b"new-buffer-5")
+            (stale_dir / "dQw4w9WgXcQ_10000_50000_b5000.webm").write_bytes(b"new-buffer-5")
 
         _patch_yt_dlp(monkeypatch, download_side_effect=_write_new_webm)
-        refreshed = download_segment(SAMPLE_URL, 10.0, 50.0, stale_dir, buffer_seconds=5.0)
-        assert refreshed == stale_dir / "dQw4w9WgXcQ_10_50.webm"
+        refreshed = download_segment(NON_YT_URL, 10.0, 50.0, stale_dir, buffer_seconds=5.0)
+        assert refreshed == stale_dir / "dQw4w9WgXcQ_10000_50000_b5000.webm"
         assert refreshed.read_bytes() == b"new-buffer-5"
         assert not stale_mp4.exists()
+
+
+# --- Review-fix regression tests (M16, L1, L2, L3, G5b) ---
+
+
+def _seg_sidecar(path, start, end, buf):
+    import json
+
+    path.write_bytes(b"x")
+    path.with_suffix(".meta.json").write_text(
+        json.dumps({"start_seconds": start, "end_seconds": end, "buffer_seconds": buf}),
+        encoding="utf-8",
+    )
+
+
+def test_M16_cached_segment_returned_without_network(tmp_path, monkeypatch):
+    mp4 = tmp_path / "dQw4w9WgXcQ_10000_20000_b3000.mp4"
+    _seg_sidecar(mp4, 10.0, 20.0, 3.0)
+    ydl = MagicMock(side_effect=yt_dlp.utils.DownloadError("network down"))
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", ydl)
+    assert download_segment(SAMPLE_URL, 10.0, 20.0, tmp_path) == mp4
+    mp4b = tmp_path / "custom-id_10000_20000_b3000.mp4"
+    _seg_sidecar(mp4b, 10.0, 20.0, 3.0)
+    assert (
+        download_segment("https://example.com/v", 10, 20, tmp_path, video_id="custom-id")
+        == mp4b
+    )
+    assert download_multiple_segments(SAMPLE_URL, [(10, 20)], tmp_path) == [mp4]
+    ydl.assert_not_called()
+
+
+def test_L1_fractional_starts_map_to_distinct_files_and_missing_sidecar_redownloads(
+    tmp_path, monkeypatch
+):
+    calls = []
+
+    class FakeYDL:
+        def __init__(self, opts):
+            self.opts = opts
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def download(self, urls):
+            calls.append(self.opts["outtmpl"])
+            Path(self.opts["outtmpl"].replace("%(ext)s", "mp4")).write_bytes(b"v")
+
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", FakeYDL)
+    a = download_segment(SAMPLE_URL, 100.2, 130.0, tmp_path)
+    b = download_segment(SAMPLE_URL, 100.7, 130.0, tmp_path)
+    assert a != b and a.with_suffix(".meta.json").is_file()
+    assert len(calls) == 2
+    a.with_suffix(".meta.json").unlink()
+    download_segment(SAMPLE_URL, 100.2, 130.0, tmp_path)
+    assert len(calls) == 3
+
+
+def test_L2_classifier_bot_check_and_429_first_and_specific_phrases():
+    from streamclipper.download.audio import _classify_download_error
+    from streamclipper.download.video import _classify_video_error
+
+    for fn in (_classify_download_error, _classify_video_error):
+        bot = str(fn("u", Exception("Sign in to confirm you're not a bot. cookies region")))
+        assert "bot-check" in bot
+        assert "429" in str(fn("u", Exception("HTTP Error 429: Too Many Requests")))
+        assert "age-restricted" in str(fn("u", Exception("Sign in to confirm your age")))
+        assert "region-locked" in str(fn("u", Exception("not available in your country")))
+        generic = str(fn("u", Exception("deleted cookies region sign in terminated")))
+        assert generic.startswith("Failed to download")
+
+
+def test_L3_live_and_upcoming_streams_rejected(monkeypatch):
+    for extra in ({"live_status": "is_live"}, {"live_status": "is_upcoming"}, {"is_live": True}):
+        ydl = MagicMock()
+        ydl.__enter__.return_value = ydl
+        ydl.extract_info.return_value = {**SAMPLE_INFO, **extra}
+        monkeypatch.setattr(yt_dlp, "YoutubeDL", MagicMock(return_value=ydl))
+        with pytest.raises(AudioDownloadError):
+            extract_stream_info(SAMPLE_URL)
+
+
+def test_G5b_audio_options_include_retries(tmp_path, monkeypatch):
+    ydl = MagicMock()
+    ydl.__enter__.return_value = ydl
+    ydl.extract_info.return_value = dict(SAMPLE_INFO)
+    factory = MagicMock(return_value=ydl)
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", factory)
+    download_audio("https://example.com/v", tmp_path)
+    assert factory.call_count == 2
+    for call in factory.call_args_list:
+        opts = call[0][0]
+        assert opts["retries"] == opts["fragment_retries"] == opts["extractor_retries"] == 3

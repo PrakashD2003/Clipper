@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import logging
 import os
@@ -19,6 +20,8 @@ import soundfile as sf
 from ..config import Config
 
 logger = logging.getLogger(__name__)
+
+WORDS_PER_SECOND = 2.7
 
 
 def _is_espeak_available() -> bool:
@@ -69,8 +72,23 @@ class TransformativeNarrator:
         )
         raw_duck = config.get("transformation.duck_stream_volume", 0.18)
         self.duck_volume: float = float(0.18 if raw_duck is None else raw_duck)
+        self._kpipelines: dict[str, Any] = {}
 
-    def synthesize_speech(self, text: str, output_wav: Path) -> Path | None:
+    def release(self) -> None:
+        """Drop cached Kokoro pipelines and free GPU memory when available."""
+        self._kpipelines.clear()
+        gc.collect()
+        try:
+            import torch  # type: ignore
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception as exc:
+            logger.debug("torch.cuda.empty_cache unavailable: %s", exc)
+
+    def synthesize_speech(
+        self, text: str, output_wav: Path, max_seconds: float | None = None
+    ) -> Path | None:
         """Synthesize text to WAV via configured provider (kokoro | edge-tts | elevenlabs | auto).
 
         Note: When engine is 'edge-tts' (or 'auto' falls back from kokoro to edge-tts),
@@ -79,7 +97,7 @@ class TransformativeNarrator:
         if not text or not text.strip() or not self.enabled:
             return None
 
-        clean_text = text.strip()
+        clean_text = self._fit_text_to_budget(text.strip(), max_seconds)
         output_wav = Path(output_wav)
         output_wav.parent.mkdir(parents=True, exist_ok=True)
 
@@ -95,7 +113,11 @@ class TransformativeNarrator:
             engine = "auto"
 
         if engine == "kokoro":
-            return self._synthesize_kokoro(clean_text, output_wav)
+            res = self._synthesize_kokoro(clean_text, output_wav)
+            if res is not None and res.is_file() and res.stat().st_size > 0:
+                return res
+            logger.warning("Kokoro produced no audio (espeak-ng missing?); falling back to edge-tts")
+            return self._synthesize_edge_tts(clean_text, output_wav)
 
         if engine in ("edge-tts", "edge_tts"):
             return self._synthesize_edge_tts(clean_text, output_wav)
@@ -119,6 +141,29 @@ class TransformativeNarrator:
             return res
         return self._synthesize_edge_tts(clean_text, output_wav)
 
+    @staticmethod
+    def _fit_text_to_budget(text: str, max_seconds: float | None) -> str:
+        """Truncate text so its estimated spoken duration (2.7 words/sec) fits max_seconds."""
+        if max_seconds is None or max_seconds <= 0:
+            return text
+        max_words = max(1, int(max_seconds * WORDS_PER_SECOND))
+        words = text.split()
+        if len(words) <= max_words:
+            return text
+        head = " ".join(words[:max_words])
+        cut = max(head.rfind(". "), head.rfind("! "), head.rfind("? "))
+        if head.endswith((".", "!", "?")):
+            cut = len(head) - 1
+        truncated = head[: cut + 1] if cut > 0 else head
+        logger.info(
+            "Narration estimated at %.1fs exceeds %.1fs budget; truncated %d -> %d words",
+            len(words) / WORDS_PER_SECOND,
+            max_seconds,
+            len(words),
+            len(truncated.split()),
+        )
+        return truncated.strip()
+
     def _synthesize_kokoro(self, text: str, output_wav: Path) -> Path | None:
         """Synthesize locally with Kokoro-82M if installed and espeak-ng is available."""
         if os.name == "nt" and not _is_espeak_available():
@@ -136,7 +181,10 @@ class TransformativeNarrator:
 
         try:
             lang_code = "b" if self.voice.startswith("b") else "a"
-            pipeline = KPipeline(lang_code=lang_code)
+            pipeline = self._kpipelines.get(lang_code)
+            if pipeline is None:
+                pipeline = KPipeline(lang_code=lang_code)
+                self._kpipelines[lang_code] = pipeline
             generator = pipeline(text, voice=self.voice, speed=1, split_pattern=r"\n+")
             audios: list[Any] = []
             for _, _, audio in generator:
@@ -298,6 +346,7 @@ class TransformativeNarrator:
         custom_path: Path | None,
         text: str,
         output_wav: Path,
+        max_seconds: float | None = None,
     ) -> Path | None:
         """Resolve narration track with priority: custom mic file > synthesized TTS."""
         if custom_path is not None:
@@ -305,7 +354,7 @@ class TransformativeNarrator:
             if p.is_file() and p.stat().st_size > 0:
                 return p
         if text and text.strip():
-            return self.synthesize_speech(text, output_wav)
+            return self.synthesize_speech(text, output_wav, max_seconds=max_seconds)
         return None
 
     def prepare_narration_tracks(
@@ -315,6 +364,7 @@ class TransformativeNarrator:
         voice_intro_path: Path | None = None,
         voice_outro_path: Path | None = None,
         temp_dir: Path | None = None,
+        clip_duration: float | None = None,
     ) -> tuple[Path | None, Path | None]:
         """Prepare intro and outro narration WAV paths respecting custom mic priority."""
         if not self.enabled or str(self.mode or "").strip().lower() == "raw":
@@ -322,17 +372,23 @@ class TransformativeNarrator:
 
         temp = temp_dir or Path(tempfile.gettempdir())
         temp.mkdir(parents=True, exist_ok=True)
+        budget = clip_duration * 0.30 if clip_duration and clip_duration > 0 else None
 
-        intro_wav = self.resolve_narration_track(
-            voice_intro_path,
-            narration_intro,
-            temp / "narrator_intro.wav",
-        )
-        outro_wav = self.resolve_narration_track(
-            voice_outro_path,
-            narration_outro,
-            temp / "narrator_outro.wav",
-        )
+        try:
+            intro_wav = self.resolve_narration_track(
+                voice_intro_path,
+                narration_intro,
+                temp / "narrator_intro.wav",
+                max_seconds=budget,
+            )
+            outro_wav = self.resolve_narration_track(
+                voice_outro_path,
+                narration_outro,
+                temp / "narrator_outro.wav",
+                max_seconds=budget,
+            )
+        finally:
+            self.release()
         return intro_wav, outro_wav
 
     def prepare_breakdown_track(
@@ -705,7 +761,8 @@ class TransformativeNarrator:
             ]
             res = subprocess.run(cmd, capture_output=True, text=True, check=True)
             return bool(res.stdout.strip())
-        except Exception:
+        except Exception as exc:
+            logger.debug("Audio stream probe failed (%s); assuming audio present", exc)
             return True
 
     def mix_narration_with_ducking(
@@ -804,17 +861,15 @@ class TransformativeNarrator:
                 shutil.move(str(target_out), str(output_video))
             return output_video
         except subprocess.CalledProcessError as exc:
-            logger.warning(
-                "FFmpeg ducking mix failed (code %d): %s\nFalling back to original video.",
-                exc.returncode,
-                exc.stderr[:500] if exc.stderr else "",
-            )
             if target_out.exists() and target_out != output_video:
                 try:
                     target_out.unlink()
                 except OSError:
                     pass
-            return self._bypass_copy(input_video, output_video)
+            stderr_tail = (exc.stderr or "")[-500:]
+            raise RuntimeError(
+                f"FFmpeg ducking mix failed (code {exc.returncode}): {stderr_tail}"
+            ) from exc
         except Exception as exc:
             logger.warning(
                 "Unexpected error during narration mixing: %s. Falling back to original video.",
@@ -854,6 +909,6 @@ class TransformativeNarrator:
             val = float(res.stdout.strip())
             if val > 0:
                 return val
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Clip duration probe failed (%s); defaulting to 30s", exc)
         return 30.0

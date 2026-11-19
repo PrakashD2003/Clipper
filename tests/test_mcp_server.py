@@ -190,7 +190,7 @@ async def test_mcp_server_registration_and_schemas() -> None:
         "voice_outro_path",
     ):
         assert param in render_props, f"render_clip missing parameter {param}"
-    assert render_props["mode"]["default"] == "auto"
+    assert render_props["mode"]["default"] is None
 
     meta_props = by_name["generate_post_metadata"].input_schema["properties"]
     assert meta_props["use_ollama"]["default"] is False
@@ -530,6 +530,43 @@ async def test_submit_highlights_invalid_json_returns_error(
     data = _extract_json(res)
     assert "error" in data
     assert "Invalid highlights JSON" in data["error"]
+
+
+@pytest.mark.asyncio
+async def test_submit_highlights_detector_receives_word_timestamps(
+    mcp_env: tuple[Config, StepCache, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """H1: copyright detector must see the highlight's words, not an empty list."""
+    _, cache, tmp_path = mcp_env
+    url = "https://www.youtube.com/watch?v=cr123456789"
+    audio = tmp_path / "cr.wav"
+    audio.write_bytes(b"RIFF")
+    state = PipelineState(
+        stream_info=StreamInfo(
+            url=url, title="t", platform=Platform.YOUTUBE, streamer="s", game="g",
+            duration_seconds=3600, video_id="cr123456789",
+        ),
+        status=PipelineStatus.SCORING,
+        transcript=_make_sample_transcript(),
+        audio_path=audio,
+        analysis_complete=True,
+    )
+    cache.save_state(state)
+    seen: list[int] = []
+
+    def fake_detect(self: Any, audio_path: Any, hl: Any) -> tuple[str, float]:
+        seen.append(len(hl.word_timestamps))
+        return ("CLEAN", 0.0)
+
+    from streamclipper.analysis import copyright_risk
+
+    monkeypatch.setattr(copyright_risk.CopyrightRiskDetector, "detect_highlight", fake_detect)
+    payload = json.dumps([{"start": 95.0, "end": 125.0, "score": 9.0, "title": "Water"}])
+    data = _extract_json(
+        await mcp.call_tool("submit_highlights", {"url": url, "highlights": payload})
+    )
+    assert data["accepted_count"] == 1
+    assert seen == [6]
 
 
 # ---------------------------------------------------------------------------
@@ -1341,7 +1378,7 @@ async def test_gpu_lock_serializes_concurrent_transcribe_and_render(
             {
                 "url": "https://www.youtube.com/watch?v=gpu12345678",
                 "start": 10.0,
-                "end": 25.0,
+                "end": 45.0,
                 "hook_title": "GPU TEST",
                 "mode": "raw",
             },
@@ -1600,6 +1637,8 @@ async def test_render_clip_real_assembly_end_to_end_narrative_and_story(
                 f"  output_dir: '{(tmp_path / 'output').as_posix()}'",
                 f"  temp_dir: '{(tmp_path / 'temp').as_posix()}'",
                 f"  cache_dir: '{(tmp_path / '.cache').as_posix()}'",
+                "analysis:",
+                "  min_clip_seconds: 1",
                 "video:",
                 "  resolution: [360, 640]",
                 "  fps: 15",
@@ -2534,7 +2573,7 @@ async def test_render_all_selected_mid_batch_failure_preserves_preexisting_clips
     # 3. Re-running render_all_selected cleanly succeeds without clobbering prior clips or files
     fail_on_batch_b["active"] = False
     ok_res = _extract_json(
-        await mcp.call_tool("render_all_selected", {"url": url, "mode": "raw"})
+        await mcp.call_tool("render_all_selected", {"url": url, "mode": "raw", "force": True})
     )
     assert "error" not in ok_res
     assert ok_res["rendered_count"] == 2
@@ -2565,6 +2604,8 @@ async def test_concurrent_render_all_selected_and_render_clip_real_assembly_same
                 f"  output_dir: '{(tmp_path / 'output').as_posix()}'",
                 f"  temp_dir: '{(tmp_path / 'temp').as_posix()}'",
                 f"  cache_dir: '{(tmp_path / '.cache').as_posix()}'",
+                "analysis:",
+                "  min_clip_seconds: 1",
                 "video:",
                 "  resolution: [360, 640]",
                 "  fps: 15",
@@ -2640,3 +2681,350 @@ async def test_concurrent_render_all_selected_and_render_clip_real_assembly_same
     assert len(set(paths)) == 2
     assert all(p.is_file() and p.stat().st_size > 1000 for p in paths)
 
+
+
+# ---------------------------------------------------------------------------
+# Review-fix regression tests (M7 M8 M9 M10 M4 L17 L18 L19 L20 G9 G11)
+# ---------------------------------------------------------------------------
+
+
+def _seed_state(cache: StepCache, url: str, video_id: str, **kwargs: Any) -> PipelineState:
+    state = PipelineState(
+        stream_info=StreamInfo(
+            url=url,
+            title="Seed",
+            platform=Platform.YOUTUBE,
+            streamer="Seeder",
+            game="GTA 6",
+            duration_seconds=3600,
+            video_id=video_id,
+        ),
+        **kwargs,
+    )
+    cache.save_state(state)
+    return state
+
+
+def _fake_assemble_writer(tmp_path: Path, calls: list[str] | None = None):
+    def fake_assemble(self, highlight, metadata, segment_paths, clip_index, mode, *a, **kw):
+        if calls is not None:
+            calls.append(mode)
+        out_mp4 = tmp_path / "output" / f"fix_clip_{clip_index:02d}.mp4"
+        out_mp4.parent.mkdir(parents=True, exist_ok=True)
+        out_mp4.write_bytes(b"mp4")
+        return ClipResult(
+            video_path=out_mp4,
+            metadata_path=None,
+            metadata=metadata,
+            duration_seconds=35.0,
+        )
+
+    return fake_assemble
+
+
+@pytest.mark.asyncio
+async def test_M7_G9_second_render_all_selected_renders_nothing_new(
+    mcp_env: tuple[Config, StepCache, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, cache, tmp_path = mcp_env
+    url = "https://www.youtube.com/watch?v=skip1234567"
+    h1 = Highlight(start=10.0, end=45.0, score=9.0, title="A", reason="r", final_score=9.0)
+    h2 = Highlight(start=100.0, end=140.0, score=8.0, title="B", reason="r", final_score=8.0)
+    _seed_state(
+        cache, url, "skip1234567",
+        status=PipelineStatus.ASSEMBLING, highlights=[h1, h2], selected_highlights=[h1, h2],
+    )
+    seg = tmp_path / "temp" / "segments" / "s.mp4"
+    seg.parent.mkdir(parents=True, exist_ok=True)
+    seg.write_bytes(b"mp4")
+    monkeypatch.setattr(mcp_server, "download_segment", lambda *a, **kw: seg)
+    calls: list[str] = []
+    monkeypatch.setattr(
+        mcp_server.Pipeline, "_assemble_highlight", _fake_assemble_writer(tmp_path, calls)
+    )
+
+    first = _extract_json(await mcp.call_tool("render_all_selected", {"url": url, "mode": "raw"}))
+    assert first["rendered_count"] == 2 and first["skipped_count"] == 0
+    second = _extract_json(await mcp.call_tool("render_all_selected", {"url": url, "mode": "raw"}))
+    assert second["rendered_count"] == 0 and second["skipped_count"] == 2
+    assert len(calls) == 2
+    forced = _extract_json(
+        await mcp.call_tool("render_all_selected", {"url": url, "mode": "raw", "force": True})
+    )
+    assert forced["rendered_count"] == 2 and forced["skipped_count"] == 0
+    assert len(calls) == 4
+
+
+@pytest.mark.asyncio
+async def test_M8_omitted_mode_uses_config_transformation_mode(
+    mcp_env: tuple[Config, StepCache, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, cache, tmp_path = mcp_env
+    config.data.setdefault("transformation", {})["mode"] = "raw"
+    url = "https://www.youtube.com/watch?v=cfgmode1234"
+    h1 = Highlight(
+        start=10.0, end=45.0, score=9.0, title="A", reason="r", final_score=9.0,
+        narration_intro="hi",
+    )
+    _seed_state(
+        cache, url, "cfgmode1234",
+        status=PipelineStatus.ASSEMBLING, highlights=[h1], selected_highlights=[h1],
+    )
+    seg = tmp_path / "temp" / "segments" / "s.mp4"
+    seg.parent.mkdir(parents=True, exist_ok=True)
+    seg.write_bytes(b"mp4")
+    monkeypatch.setattr(mcp_server, "download_segment", lambda *a, **kw: seg)
+    monkeypatch.setattr(
+        mcp_server.Pipeline, "_assemble_highlight", _fake_assemble_writer(tmp_path)
+    )
+
+    batch = _extract_json(await mcp.call_tool("render_all_selected", {"url": url}))
+    assert batch["mode"] == "raw"
+    single = _extract_json(
+        await mcp.call_tool(
+            "render_clip",
+            {"url": url, "start": 200.0, "end": 240.0, "hook_title": "Single"},
+        )
+    )
+    assert single["mode"] == "raw"
+
+
+@pytest.mark.asyncio
+async def test_M9_submit_and_render_clip_fit_bounds_and_reject_beyond_ceiling(
+    mcp_env: tuple[Config, StepCache, Path],
+) -> None:
+    """Short moments are widened, long ones trimmed, only ranges past the hard ceiling rejected."""
+    config, _, _ = mcp_env
+    min_s = float(config.get("analysis.min_clip_seconds"))
+    max_s = float(config.get("analysis.max_clip_seconds"))
+    hard_max = float(config.get("analysis.hard_max_clip_seconds"))
+    url = "https://www.youtube.com/watch?v=bounds12345"
+    payload = json.dumps(
+        [
+            {"start": 1000.0, "end": 1000.0 + min_s / 3, "score": 9.0, "title": "Too short"},
+            {"start": 2000.0, "end": 2000.0 + max_s + 10, "score": 9.0, "title": "Too long",
+             "peak_time": 2000.0 + max_s + 5},
+            {"start": 3000.0, "end": 3000.0 + hard_max + 60, "score": 9.0, "title": "Way too long"},
+            {"start": 4000.0, "end": 4000.0 + min_s + 5, "score": 9.0, "title": "Just right"},
+        ]
+    )
+    res = _extract_json(await mcp.call_tool("submit_highlights", {"url": url, "highlights": payload}))
+    assert res["accepted_count"] == 3
+    assert res["rejected_count"] == 1
+    assert "hard_max_clip_seconds" in res["rejected"][0]["reason"]
+
+    by_title = {h["title"]: h for h in res["highlights"]}
+    short = by_title["Too short"]
+    assert short["end"] - short["start"] == pytest.approx(min_s)
+    assert short["start"] < 1000.0 and "widened" in short["bounds_adjustment"]
+    long = by_title["Too long"]
+    assert long["end"] - long["start"] == pytest.approx(max_s)
+    assert long["start"] <= 2000.0 + max_s + 5 <= long["end"]  # trimmed window keeps the peak
+    assert "trimmed" in long["bounds_adjustment"]
+    assert by_title["Just right"]["bounds_adjustment"] == ""
+
+    too_long = _extract_json(
+        await mcp.call_tool(
+            "render_clip",
+            {"url": url, "start": 0.0, "end": hard_max + 60, "hook_title": "x"},
+        )
+    )
+    assert "hard_max_clip_seconds" in too_long["error"]
+
+
+@pytest.mark.asyncio
+async def test_M10_mcp_detector_runs_in_thread_and_failure_sets_unknown(
+    mcp_env: tuple[Config, StepCache, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, cache, tmp_path = mcp_env
+    from streamclipper.analysis import copyright_risk
+
+    url = "https://www.youtube.com/watch?v=detthread123"
+    wav = tmp_path / "temp" / "det.wav"
+    wav.parent.mkdir(parents=True, exist_ok=True)
+    wav.write_bytes(b"RIFF")
+    _seed_state(cache, url, "detthread123", status=PipelineStatus.SCORING, audio_path=wav)
+
+    main_thread = threading.get_ident()
+    seen: dict[str, Any] = {}
+
+    def boom(self, audio, highlight):
+        seen["thread"] = threading.get_ident()
+        raise RuntimeError("detector exploded")
+
+    monkeypatch.setattr(copyright_risk.CopyrightRiskDetector, "detect_highlight", boom)
+    monkeypatch.setattr(copyright_risk.CopyrightRiskDetector, "enabled", True, raising=False)
+
+    payload = json.dumps([{"start": 10.0, "end": 45.0, "score": 9.0, "title": "T"}])
+    res = _extract_json(await mcp.call_tool("submit_highlights", {"url": url, "highlights": payload}))
+    assert "error" not in res
+    assert seen["thread"] != main_thread
+    hl = res["highlights"][0]
+    assert hl["music_risk"] == "UNKNOWN"
+    assert hl["music_confidence"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_M4_consumer_chat_scrape_error_keeps_state_retryable_and_empty_cached(
+    mcp_env: tuple[Config, StepCache, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, cache, _ = mcp_env
+    temp_dir = Path(config.get("general.temp_dir"))
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    wav = temp_dir / "m4.wav"
+    wav.write_bytes(b"RIFF")
+    url = "https://www.youtube.com/watch?v=chatm4_1234"
+    _seed_state(cache, url, "chatm4_1234", status=PipelineStatus.TRANSCRIBING, audio_path=wav)
+
+    monkeypatch.setattr(mcp_server.LoudnessDetector, "detect", lambda self, p: [])
+    monkeypatch.setattr(mcp_server.ChatVelocityAnalyzer, "analyze", lambda self, df: [])
+
+    def raising(self, u, d):
+        raise RuntimeError("scrape blew up")
+
+    monkeypatch.setattr(mcp_server.ChatScraper, "scrape", raising)
+    err = _extract_json(await mcp.call_tool("analyze_signals", {"url": url}))
+    assert "error" in err
+    reloaded = cache.load_state(url)
+    assert reloaded is not None and reloaded.analysis_complete is False
+
+    scrape_calls: list[str] = []
+
+    def empty(self, u, d):
+        scrape_calls.append(u)
+        return pd.DataFrame(columns=["offset_seconds", "author", "message"])
+
+    monkeypatch.setattr(mcp_server.ChatScraper, "scrape", empty)
+    ok = _extract_json(await mcp.call_tool("analyze_signals", {"url": url}))
+    assert "error" not in ok
+    csv_path = temp_dir / "chatm4_1234_chat.csv"
+    assert csv_path.is_file()
+    assert csv_path.read_text(encoding="utf-8").strip().startswith("offset_seconds")
+    await mcp.call_tool("analyze_signals", {"url": url})
+    assert len(scrape_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_L17_cleanup_temp_with_url_acquires_url_lock(
+    mcp_env: tuple[Config, StepCache, Path],
+) -> None:
+    _, cache, _ = mcp_env
+    url = "https://www.youtube.com/watch?v=lock1234567"
+    lock = mcp_server._get_url_lock(cache.get_cache_key(url))
+    await lock.acquire()
+    try:
+        task = asyncio.create_task(mcp.call_tool("cleanup_temp", {"url": url}))
+        await asyncio.sleep(0.2)
+        assert not task.done()
+    finally:
+        lock.release()
+    res = _extract_json(await asyncio.wait_for(task, timeout=5))
+    assert res["scope"] == "stream"
+
+
+@pytest.mark.asyncio
+async def test_L18_failed_state_recovered_before_stage_logic_in_analyze_signals(
+    mcp_env: tuple[Config, StepCache, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, cache, _ = mcp_env
+    temp_dir = Path(config.get("general.temp_dir"))
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    wav = temp_dir / "l18.wav"
+    wav.write_bytes(b"RIFF")
+    url = "https://www.youtube.com/watch?v=l18_1234567"
+    h = Highlight(start=10.0, end=45.0, score=9.0, title="H", reason="r", final_score=9.0)
+    _seed_state(
+        cache, url, "l18_1234567",
+        status=PipelineStatus.FAILED, audio_path=wav,
+        highlights=[h], selected_highlights=[h],
+    )
+    monkeypatch.setattr(mcp_server.LoudnessDetector, "detect", lambda self, p: [])
+    monkeypatch.setattr(
+        mcp_server.ChatScraper, "scrape",
+        lambda self, u, d: pd.DataFrame(columns=["offset_seconds", "author", "message"]),
+    )
+    monkeypatch.setattr(mcp_server.ChatVelocityAnalyzer, "analyze", lambda self, df: [])
+
+    res = _extract_json(await mcp.call_tool("analyze_signals", {"url": url}))
+    assert res["status"] == "assembling"
+    reloaded = cache.load_state(url)
+    assert reloaded is not None and reloaded.status == PipelineStatus.ASSEMBLING
+
+
+@pytest.mark.asyncio
+async def test_L19_render_all_selected_reports_resolved_mode_per_clip(
+    mcp_env: tuple[Config, StepCache, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, cache, tmp_path = mcp_env
+    url = "https://www.youtube.com/watch?v=l19_1234567"
+    h1 = Highlight(start=10.0, end=45.0, score=9.0, title="Plain", reason="r", final_score=9.0)
+    h2 = Highlight(
+        start=300.0, end=350.0, score=8.8, title="Story", reason="r", final_score=8.8,
+        sub_clips=[
+            {"start": 300.0, "end": 310.0, "label": "Setup"},
+            {"start": 330.0, "end": 350.0, "label": "Payoff"},
+        ],
+    )
+    _seed_state(
+        cache, url, "l19_1234567",
+        status=PipelineStatus.ASSEMBLING, highlights=[h1, h2], selected_highlights=[h1, h2],
+    )
+    seg = tmp_path / "temp" / "segments" / "s.mp4"
+    seg.parent.mkdir(parents=True, exist_ok=True)
+    seg.write_bytes(b"mp4")
+    monkeypatch.setattr(mcp_server, "download_segment", lambda *a, **kw: seg)
+    monkeypatch.setattr(mcp_server, "download_multiple_segments", lambda *a, **kw: [seg, seg])
+    monkeypatch.setattr(
+        mcp_server.Pipeline, "_assemble_highlight", _fake_assemble_writer(tmp_path)
+    )
+    res = _extract_json(await mcp.call_tool("render_all_selected", {"url": url, "mode": "auto"}))
+    assert [c["mode"] for c in res["clips"]] == ["narrative", "story"]
+
+
+@pytest.mark.asyncio
+async def test_L20_chat_cache_filename_uses_sanitized_video_id_like_cli(
+    mcp_env: tuple[Config, StepCache, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from streamclipper.pipeline import _sanitize_path_segment
+
+    config, cache, _ = mcp_env
+    temp_dir = Path(config.get("general.temp_dir"))
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    wav = temp_dir / "l20.wav"
+    wav.write_bytes(b"RIFF")
+    url = "https://www.twitch.tv/videos/l20"
+    raw_id = "vid*id?x"
+    _seed_state(cache, url, raw_id, status=PipelineStatus.TRANSCRIBING, audio_path=wav)
+    monkeypatch.setattr(mcp_server.LoudnessDetector, "detect", lambda self, p: [])
+    monkeypatch.setattr(
+        mcp_server.ChatScraper, "scrape",
+        lambda self, u, d: pd.DataFrame(
+            [{"offset_seconds": 1.0, "author": "u", "message": "pog"}]
+        ),
+    )
+    monkeypatch.setattr(mcp_server.ChatVelocityAnalyzer, "analyze", lambda self, df: [])
+
+    res = _extract_json(await mcp.call_tool("analyze_signals", {"url": url}))
+    assert "error" not in res
+    assert (temp_dir / f"{_sanitize_path_segment(raw_id)}_chat.csv").is_file()
+
+
+@pytest.mark.asyncio
+async def test_G11_submit_highlights_dedupes_overlaps_and_caps_to_max_clips(
+    mcp_env: tuple[Config, StepCache, Path],
+) -> None:
+    config, _, _ = mcp_env
+    config.data.setdefault("analysis", {})["max_clips_per_stream"] = 2
+    url = "https://www.youtube.com/watch?v=g11_1234567"
+    payload = json.dumps(
+        [
+            {"start": 100.0, "end": 140.0, "score": 9.0, "title": "Best"},
+            {"start": 105.0, "end": 145.0, "score": 7.0, "title": "Overlap"},
+            {"start": 300.0, "end": 340.0, "score": 8.0, "title": "Second"},
+            {"start": 500.0, "end": 540.0, "score": 6.0, "title": "Third"},
+        ]
+    )
+    res = _extract_json(await mcp.call_tool("submit_highlights", {"url": url, "highlights": payload}))
+    assert res["accepted_count"] == 2
+    assert res["dropped_count"] == 2
+    assert [h["title"] for h in res["highlights"]] == ["Best", "Second"]

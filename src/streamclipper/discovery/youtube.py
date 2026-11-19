@@ -1,8 +1,11 @@
 """YouTube stream discovery using yt-dlp ytsearch."""
 from __future__ import annotations
 
+import calendar
 import logging
 import math
+import re
+import time
 from typing import Any
 
 import yt_dlp
@@ -95,6 +98,10 @@ class YouTubeDiscovery:
             self.region = "US"
         raw_proxy = config.get("discovery.proxy", "")
         self.proxy: str = str(raw_proxy or "").strip()
+        self.max_age_days: float = float(config.get("discovery.max_age_days", 30))
+        self.require_title_match: bool = bool(
+            config.get("discovery.require_title_match", True)
+        )
 
     def _build_queries(self, game: str | None) -> tuple[str, list[str]]:
         """Resolve the target game label and deduplicated search queries."""
@@ -179,6 +186,39 @@ class YouTubeDiscovery:
 
         return [entry for entry in entries if isinstance(entry, dict)]
 
+    def _is_too_old(self, entry: dict[str, Any]) -> bool:
+        """Return True when the entry's known publish date is older than max_age_days."""
+        if self.max_age_days <= 0:
+            return False
+        published: float | None = None
+        ts = entry.get("release_timestamp")
+        if isinstance(ts, (int, float)) and not isinstance(ts, bool) and math.isfinite(ts):
+            published = float(ts)
+        else:
+            upload_date = entry.get("upload_date")
+            if isinstance(upload_date, str) and re.fullmatch(r"\d{8}", upload_date.strip()):
+                try:
+                    published = calendar.timegm(
+                        time.strptime(upload_date.strip(), "%Y%m%d")
+                    )
+                except ValueError:
+                    published = None
+        if published is None:
+            return False
+        return (time.time() - published) > self.max_age_days * 86400.0
+
+    def _title_matches(self, title: str, game: str) -> bool:
+        """Require at least one game keyword token (len >= 3) in the title."""
+        tokens: set[str] = set()
+        for phrase in [game, *self.keywords]:
+            for tok in re.split(r"[^0-9a-zA-Z]+", str(phrase).lower()):
+                if len(tok) >= 3:
+                    tokens.add(tok)
+        if not tokens:
+            return True
+        lower_title = title.lower()
+        return any(tok in lower_title for tok in tokens)
+
     def _filter_streams(
         self,
         results: list[dict[str, Any]],
@@ -207,6 +247,22 @@ class YouTubeDiscovery:
 
             view_count = _coerce_non_negative_int(entry.get("view_count"))
             if view_count is None or view_count < self.min_viewers:
+                continue
+
+            live_status = entry.get("live_status")
+            if live_status is not None and live_status != "was_live":
+                continue
+            if live_status is None and entry.get("was_live") is not None and not entry.get(
+                "was_live"
+            ):
+                continue
+
+            if self._is_too_old(entry):
+                continue
+
+            if self.require_title_match and not self._title_matches(
+                str(entry.get("title") or ""), game
+            ):
                 continue
 
             seen_ids.add(video_id)

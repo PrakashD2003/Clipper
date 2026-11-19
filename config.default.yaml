@@ -9,6 +9,7 @@ general:
   cache_dir: "./.cache"
   max_concurrent_streams: 2
   log_level: "INFO"
+  cross_process_gpu_lock: false         # Serialize GPU work across processes with a file lock
 
 discovery:
   platform: "youtube"
@@ -20,6 +21,11 @@ discovery:
   language: "en-US"      # Target search language (Accept-Language + yt-dlp youtube lang)
   region: "US"           # Target search country/region (geo_bypass_country)
   proxy: ""              # Optional HTTP/SOCKS5 proxy for yt-dlp discovery
+  max_age_days: 30       # Skip streams older than N days
+  require_title_match: true  # Require a game keyword in the stream title
+
+download:
+  retries: 3             # Retry count for transient download failures
 
 transcription:
   engine: "whisperx"      # whisperx | faster-whisper
@@ -31,10 +37,13 @@ transcription:
 
 analysis:
   chunk_minutes: 12
-  min_clip_seconds: 30
+  min_clip_seconds: 15
   max_clip_seconds: 90
+  hard_max_clip_seconds: 180          # Ranges longer than this are rejected outright (Shorts limit)
+  adjust_clip_bounds: true            # Widen short / trim long moments instead of rejecting them
   max_clips_per_stream: 5
   min_highlight_score: 7.0
+  skip_high_music: false               # Skip (instead of penalize) highlights flagged HIGH_MUSIC_DETECTED
   copyright_check: true                # Pre-flight acoustic music risk check on speech gaps
   music_risk_threshold: 0.65           # Harmonic-percussive music confidence threshold
   music_penalty_factor: 0.80           # Score multiplier for clips flagged with high music

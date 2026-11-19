@@ -119,6 +119,23 @@ class FileOrganizer:
         stem = self._sanitize_name(raw_stem, fallback=default_stem)
         return clip_dir / f"{stem}.{self.video_format}"
 
+    def next_available_index(
+        self,
+        game: str,
+        streamer: str,
+        min_index: int = 1,
+        date_str: str | None = None,
+    ) -> int:
+        """Return the lowest index >= min_index whose clip path does not exist yet."""
+        index = max(1, int(min_index))
+        first = self.get_clip_path(game, streamer, index, date_str)
+        if self.get_clip_path(game, streamer, index + 1, date_str) == first:
+            # Filename template does not vary with index; probing further is pointless.
+            return index
+        while self.get_clip_path(game, streamer, index, date_str).exists():
+            index += 1
+        return index
+
     @staticmethod
     def _probe_duration_seconds(video_path: Path, metadata: ClipMetadata) -> float:
         """Probe actual video duration via ffprobe, falling back to metadata clip bounds."""

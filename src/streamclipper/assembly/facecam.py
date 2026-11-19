@@ -69,6 +69,10 @@ class FacecamDetector:
         self.cascade = cv2.CascadeClassifier(cascade_path)
         if self.cascade.empty():
             logger.warning("Haar cascade classifier failed to load from %s", cascade_path)
+        profile_path = cv2.data.haarcascades + "haarcascade_profileface.xml"
+        self.profile_cascade = cv2.CascadeClassifier(profile_path)
+        if self.profile_cascade.empty():
+            logger.warning("Profile-face cascade failed to load from %s", profile_path)
 
     @staticmethod
     def _is_in_corner(x: int, y: int, w: int, h: int, frame_w: int, frame_h: int) -> bool:
@@ -191,12 +195,22 @@ class FacecamDetector:
                     frame_h, frame_w = frame.shape[:2]
 
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                detected_faces = self.cascade.detectMultiScale(
-                    gray,
-                    scaleFactor=1.1,
-                    minNeighbors=4,
-                    minSize=(20, 20),
+                detected_faces = list(
+                    self.cascade.detectMultiScale(
+                        gray,
+                        scaleFactor=1.1,
+                        minNeighbors=4,
+                        minSize=(20, 20),
+                    )
                 )
+                if not self.profile_cascade.empty():
+                    profile_faces = self.profile_cascade.detectMultiScale(
+                        gray,
+                        scaleFactor=1.1,
+                        minNeighbors=4,
+                        minSize=(20, 20),
+                    )
+                    detected_faces.extend(list(profile_faces))
 
                 # Group valid corner faces detected in this frame by quadrant
                 frame_quadrant_faces: dict[str, list[tuple[int, int, int, int]]] = {}

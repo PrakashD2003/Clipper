@@ -11,6 +11,8 @@ import yt_dlp
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_RETRIES = 3
+
 CHAT_COLUMNS: list[str] = ["offset_seconds", "author", "message"]
 
 
@@ -48,6 +50,10 @@ def _extract_message_text(runs: Any) -> str:
     return "".join(parts)
 
 
+class ChatScrapeError(RuntimeError):
+    """Raised when yt-dlp fails while downloading the live chat replay."""
+
+
 class ChatScraper:
     """Download YouTube live_chat replay via yt-dlp and parse JSONLines records."""
 
@@ -72,14 +78,17 @@ class ChatScraper:
             "noplaylist": True,
             "quiet": True,
             "no_warnings": True,
+            "retries": _DEFAULT_RETRIES,
+            "fragment_retries": _DEFAULT_RETRIES,
+            "extractor_retries": _DEFAULT_RETRIES,
         }
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(clean_url, download=True)
-        except (yt_dlp.utils.DownloadError, yt_dlp.utils.ExtractorError) as exc:
+        except (yt_dlp.utils.DownloadError, yt_dlp.utils.ExtractorError, OSError) as exc:
             logger.warning("Failed to download live_chat for %s: %s", clean_url, exc)
-            return _empty_chat_df()
+            raise ChatScrapeError(f"Failed to download live_chat for {clean_url}: {exc}") from exc
 
         if not isinstance(info, dict):
             return _empty_chat_df()
@@ -129,44 +138,55 @@ class ChatScraper:
                         continue
 
                     for action in actions:
-                        if not isinstance(action, dict):
-                            continue
-                        add_action = action.get("addChatItemAction")
-                        if not isinstance(add_action, dict):
-                            continue
-                        item_wrapper = add_action.get("item")
-                        if not isinstance(item_wrapper, dict):
-                            continue
+                        try:
+                            if not isinstance(action, dict):
+                                continue
+                            add_action = action.get("addChatItemAction")
+                            if not isinstance(add_action, dict):
+                                continue
+                            item_wrapper = add_action.get("item")
+                            if not isinstance(item_wrapper, dict):
+                                continue
 
-                        item = (
-                            item_wrapper.get("liveChatTextMessageRenderer")
-                            or item_wrapper.get("liveChatPaidMessageRenderer")
-                        )
-                        if not isinstance(item, dict):
-                            continue
-
-                        author_obj = item.get("authorName")
-                        author = (
-                            str(author_obj.get("simpleText", ""))
-                            if isinstance(author_obj, dict)
-                            else ""
-                        )
-
-                        message_obj = item.get("message")
-                        runs = (
-                            message_obj.get("runs", [])
-                            if isinstance(message_obj, dict)
-                            else []
-                        )
-                        text = _extract_message_text(runs)
-                        if text.strip():
-                            rows.append(
-                                {
-                                    "offset_seconds": offset_ms / 1000.0,
-                                    "author": author,
-                                    "message": text,
-                                }
+                            item = (
+                                item_wrapper.get("liveChatTextMessageRenderer")
+                                or item_wrapper.get("liveChatPaidMessageRenderer")
                             )
+                            if not isinstance(item, dict):
+                                continue
+
+                            author_obj = item.get("authorName")
+                            author = (
+                                str(author_obj.get("simpleText", ""))
+                                if isinstance(author_obj, dict)
+                                else ""
+                            )
+
+                            message_obj = item.get("message")
+                            runs = (
+                                message_obj.get("runs", [])
+                                if isinstance(message_obj, dict)
+                                else []
+                            )
+                            text = _extract_message_text(runs)
+                            if not text.strip() and "purchaseAmountText" in item:
+                                amount_obj = item.get("purchaseAmountText")
+                                amount = (
+                                    str(amount_obj.get("simpleText", ""))
+                                    if isinstance(amount_obj, dict)
+                                    else str(amount_obj or "")
+                                )
+                                text = f"[Super Chat {amount}]".replace("  ", " ")
+                            if text.strip():
+                                rows.append(
+                                    {
+                                        "offset_seconds": offset_ms / 1000.0,
+                                        "author": author,
+                                        "message": text,
+                                    }
+                                )
+                        except (ValueError, TypeError, AttributeError):
+                            continue
                 except (json.JSONDecodeError, ValueError, TypeError):
                     continue
 

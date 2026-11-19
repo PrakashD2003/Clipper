@@ -179,6 +179,7 @@ class Highlight(SerializableModel):
     breakdown_callout: str = ""        # 2-5 word on-screen callout note
     music_risk: str = "CLEAN"          # CLEAN | LOW | HIGH_MUSIC_DETECTED
     music_confidence: float = 0.0      # Harmonic-percussive music confidence 0.0-1.0
+    bounds_adjustment: str = ""        # How the clip range was fitted to length limits ("" = unchanged)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Highlight":
@@ -217,6 +218,7 @@ class Highlight(SerializableModel):
             music_confidence=float(
                 data.get("music_confidence") if data.get("music_confidence") is not None else 0.0
             ),
+            bounds_adjustment=data.get("bounds_adjustment") or "",
         )
 
 
@@ -321,6 +323,7 @@ class PipelineState(SerializableModel):
     clips: list[ClipResult] = field(default_factory=list)
     cache_dir: Optional[Path] = None
     analysis_complete: bool = False
+    requested_max_clips: Optional[int] = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "PipelineState":
@@ -350,4 +353,9 @@ class PipelineState(SerializableModel):
             clips=[ClipResult.from_dict(c) for c in (data.get("clips") or [])],
             cache_dir=Path(data["cache_dir"]) if data.get("cache_dir") else None,
             analysis_complete=bool(data.get("analysis_complete", False)),
+            requested_max_clips=(
+                int(data["requested_max_clips"])
+                if data.get("requested_max_clips") is not None
+                else None
+            ),
         )

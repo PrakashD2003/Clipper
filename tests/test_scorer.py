@@ -19,7 +19,7 @@ from streamclipper.models import (
     SignalType,
 )
 from streamclipper.scoring.ollama_scorer import OllamaConnectionError, OllamaScorer
-from streamclipper.scoring.scorer import Scorer, TranscriptChunk
+from streamclipper.scoring.scorer import Scorer, TranscriptChunk, fit_clip_range
 from streamclipper.config import Config, HardwareProfile
 
 
@@ -1316,7 +1316,7 @@ class TestOllamaScorerEdgeCasesAndHardening:
     def test_relative_offset_shift_does_not_overshift_out_of_window_timestamps(
         self, scorer: OllamaScorer
     ):
-        """On chunk 3 (offset=1320s), end=950s (> 720s chunk duration) is NOT shifted past chunk end."""
+        """M2: on chunk 3 (offset=1320s) any range ending before the offset is chunk-relative and shifts."""
         payload = [
             {"start": 20.0, "end": 75.0, "score": 8.0, "title": "Relative", "reason": "r"},
             {"start": 900.0, "end": 950.0, "score": 8.0, "title": "Hallucinated", "reason": "r"},
@@ -1325,8 +1325,8 @@ class TestOllamaScorerEdgeCasesAndHardening:
         assert len(highlights) == 2
         assert highlights[0].start == 1340.0
         assert highlights[0].end == 1395.0
-        assert highlights[1].start == 900.0
-        assert highlights[1].end == 950.0
+        assert highlights[1].start == 2220.0
+        assert highlights[1].end == 2270.0
 
     def test_rejects_nan_infinity_bool_and_negative_timestamps(self, scorer: OllamaScorer):
         """NaN, Infinity, booleans, and negative starts are skipped; bad scores become 0.0."""
@@ -1475,10 +1475,10 @@ class TestOllamaScorerEdgeCasesAndHardening:
     def test_score_and_select_enforces_clip_bounds_scopes_transcript_and_max_clips_override(
         self, config: Config, long_transcript: TranscriptionResult
     ):
-        """Enforces min/max_clip_seconds, allows valid stitched beats, scopes transcript_chunk, and honors max_clips."""
+        """Widens short moments, rejects ranges past the hard ceiling, keeps stitched beats, scopes transcript, honors max_clips."""
         canned = [
-            _make_highlight(10.0, 20.0, 9.5, title="Too Short"),          # 10s < 30s -> rejected
-            _make_highlight(100.0, 400.0, 9.5, title="Too Long"),         # 300s > 90s -> rejected
+            _make_highlight(10.0, 20.0, 9.5, title="Too Short"),          # 10s < 30s -> widened to 30s
+            _make_highlight(100.0, 400.0, 9.5, title="Too Long"),         # 300s > 180s ceiling -> rejected
             _make_highlight(60.0, 105.0, 9.2, title="Valid Single"),      # 45s -> kept
             _make_highlight(
                 300.0, 420.0, 9.0, title="Valid MultiBeat",
@@ -1494,9 +1494,13 @@ class TestOllamaScorerEdgeCasesAndHardening:
             canned.append(_make_highlight(base, base + 40.0, 8.8, title=f"Extra {idx}"))
 
         scorer = _StubScorer(config, canned=canned)
+        scorer.min_clip_seconds = 30
         selected = scorer.score_and_select(long_transcript, [], [], max_clips=7)
         titles = [h.title for h in selected]
-        assert "Too Short" not in titles
+        assert "Too Short" in titles
+        short = next(h for h in selected if h.title == "Too Short")
+        assert short.end - short.start == pytest.approx(30.0)
+        assert "widened" in short.bounds_adjustment
         assert "Too Long" not in titles
         assert "Valid Single" in titles
         assert "Valid MultiBeat" in titles
@@ -1567,13 +1571,13 @@ class TestOllamaScorerEdgeCasesAndHardening:
             ]
             scorer = OllamaScorer(cfg)
 
-            # Late Chunk 1 relative range [650, 700] on chunk_offset=660 must shift to [1310, 1360]
+            # M2: [650, 700] ends after chunk_offset=660 so it is treated as absolute (unchanged)
             late_payload = json.dumps(
                 [{"start": 650.0, "end": 700.0, "score": 8.5, "title": "Late", "reason": "r"}]
             )
             parsed = scorer._parse_response(late_payload, chunk_offset=660.0)
-            assert parsed[0].start == 1310.0
-            assert parsed[0].end == 1360.0
+            assert parsed[0].start == 650.0
+            assert parsed[0].end == 700.0
 
             # Explicit mode='raw' skips narrative_writer LLM call and clears narration/badge fields
             h = _make_highlight(
@@ -1669,11 +1673,11 @@ class TestOllamaScorerEdgeCasesAndHardening:
                 ]
             )
             parsed = scorer._parse_response(payload, chunk_offset=660.0)
-            assert parsed[0].start == 1260.0
-            assert parsed[0].end == 1360.0
+            assert parsed[0].start == 600.0
+            assert parsed[0].end == 700.0
             assert parsed[0].sub_clips == [
-                {"start": 1260.0, "end": 1280.0, "label": "Setup"},
-                {"start": 1330.0, "end": 1360.0, "label": "Payoff"},
+                {"start": 600.0, "end": 620.0, "label": "Setup"},
+                {"start": 670.0, "end": 700.0, "label": "Payoff"},
             ]
             assert len(
                 Scorer._validate_sub_clips(parsed[0].sub_clips, parsed[0].start, parsed[0].end)
@@ -1770,7 +1774,7 @@ class TestOllamaScorerEdgeCasesAndHardening:
                     {"start": 145.0, "end": 153.0, "label": "Payoff"},
                 ],
             ),
-            # 20s parent (too short) + 16s stitched sub_clips (< 30s) -> still dropped
+            # 20s parent (too short) + 16s stitched sub_clips (< 30s) -> single cut widened to 30s
             _make_highlight(
                 200.0,
                 220.0,
@@ -1798,11 +1802,14 @@ class TestOllamaScorerEdgeCasesAndHardening:
             full_text="clip talk",
         )
         scorer = _StubScorer(config, canned=highlights)
+        scorer.min_clip_seconds = 30
         selected = scorer.score_and_select(tr, [], [])
         by_title = {h.title: h for h in selected}
         assert "Short Beats Valid Parent" in by_title
         assert by_title["Short Beats Valid Parent"].sub_clips == []
-        assert "Too Short Overall" not in by_title
+        widened = by_title["Too Short Overall"]
+        assert widened.sub_clips == []
+        assert widened.end - widened.start == pytest.approx(30.0)
         assert "Valid Story Beats" in by_title
         assert len(by_title["Valid Story Beats"].sub_clips) == 2
 
@@ -1862,3 +1869,244 @@ class TestMusicPenaltyAffectsSelection:
             selected = scorer.score_and_select(long_transcript, [], [], audio_path=audio)
 
         assert [h.title for h in selected] == ["Clean"]
+
+    def test_detector_receives_word_timestamps_before_detection(
+        self, config: Config, long_transcript: TranscriptionResult, tmp_path: Path
+    ) -> None:
+        """H1: word_timestamps must be populated before detect_highlight runs."""
+        h = _make_highlight(60.0, 100.0, 9.0, title="Speech")
+        expected = Scorer._extract_words_for_range(long_transcript, 60.0, 100.0)
+        assert expected, "fixture must contain words in the highlight range"
+        scorer = _StubScorer(config, canned=[h])
+        audio = tmp_path / "a.wav"
+        audio.write_bytes(b"RIFF")
+        seen: list[int] = []
+
+        def fake_detect(self, audio_path, hl):
+            seen.append(len(hl.word_timestamps))
+            return ("CLEAN", 0.0)
+
+        with (
+            patch(
+                "streamclipper.analysis.copyright_risk.CopyrightRiskDetector.detect_highlight",
+                fake_detect,
+            ),
+            patch.object(scorer, "_compute_weighted_score", side_effect=lambda h, *_: h.score),
+        ):
+            scorer.score_and_select(long_transcript, [], [], audio_path=audio)
+
+        assert seen == [len(expected)]
+
+
+# ===========================================================================
+# Reviewed-defect regression tests (X1, M1, M2, M3, M10, L7, L23, G3, G4)
+# ===========================================================================
+
+def _set_cache_dir(config: Config, path: Path) -> None:
+    config._data.setdefault("general", {})["cache_dir"] = str(path)
+
+
+class TestReviewedDefects:
+    def test_X1_dedupe_runs_after_copyright_penalty(
+        self, config: Config, long_transcript: TranscriptionResult, tmp_path: Path
+    ) -> None:
+        a = _make_highlight(60.0, 100.0, 8.6, title="A")
+        b = _make_highlight(65.0, 105.0, 8.0, title="B")
+        scorer = _StubScorer(config, canned=[a, b])
+        _set_cache_dir(config, tmp_path)
+        audio = tmp_path / "a.wav"
+        audio.write_bytes(b"RIFF")
+
+        def fake_detect(self, audio_path, h):
+            return ("HIGH_MUSIC_DETECTED", 0.9) if h.title == "A" else ("CLEAN", 0.0)
+
+        with (
+            patch(
+                "streamclipper.analysis.copyright_risk.CopyrightRiskDetector.detect_highlight",
+                fake_detect,
+            ),
+            patch.object(scorer, "_compute_weighted_score", side_effect=lambda h, *_: h.score),
+        ):
+            selected = scorer.score_and_select(long_transcript, [], [], audio_path=audio)
+        assert [h.title for h in selected] == ["B"]
+
+    def test_M1_chat_burst_filters_range_sorts_dedupes_caps(self) -> None:
+        h = _make_highlight(100.0, 140.0, 9.0)
+        msgs = [
+            {"message": "late", "offset_seconds": 500.0},
+            {"message": "c", "offset_seconds": 130.0},
+            {"message": "a", "offset_seconds": 105.0},
+            {"message": "a", "offset_seconds": 106.0},
+            {"message": "b", "time": 110.0},
+            {"message": "d", "offset": 120.0},
+            {"message": "e", "offset_seconds": 125.0},
+            {"message": "f", "offset_seconds": 135.0},
+            {"message": "nooffset"},
+        ]
+        spike = TimeRange(start=100.0, end=140.0, score=8.0, signal_type=SignalType.CHAT_VELOCITY,
+                          metadata={"sample_messages": msgs})
+        burst = [m["message"] for m in Scorer._extract_chat_burst(h, [spike])]
+        assert burst == ["a", "b", "d", "e", "c"]
+        assert "late" not in burst
+
+    def test_M2_chunk_offset_shift_only_when_end_before_offset(self, config: Config) -> None:
+        with patch("streamclipper.scoring.ollama_scorer.ollama.Client"):
+            scorer = OllamaScorer(config)
+        payload = json.dumps([
+            {"start": 655.0, "end": 700.0, "score": 8,
+             "sub_clips": [{"start": 655.0, "end": 665.0}, {"start": 680.0, "end": 700.0}]},
+            {"start": 10.0, "end": 40.0, "score": 8,
+             "sub_clips": [{"start": 10.0, "end": 20.0}, {"start": 30.0, "end": 40.0}]},
+        ])
+        hs = scorer._parse_response(payload, chunk_offset=660.0)
+        assert (hs[0].start, hs[0].end) == (655.0, 700.0)
+        assert hs[0].sub_clips[0]["start"] == 655.0
+        assert (hs[1].start, hs[1].end) == (670.0, 700.0)
+        assert hs[1].sub_clips[0]["start"] == 670.0 and hs[1].sub_clips[1]["end"] == 700.0
+
+    def test_M3_timeout_retries_once_then_returns_empty(self, config: Config) -> None:
+        import httpx
+
+        with patch("streamclipper.scoring.ollama_scorer.ollama.Client") as cls:
+            client = cls.return_value
+            client.generate.side_effect = httpx.ReadTimeout("timed out")
+            scorer = OllamaScorer(config)
+            chunk = TranscriptChunk(start=0.0, end=60.0, text="hello")
+            assert scorer._score_chunk(chunk, [], []) == []
+            assert client.generate.call_count == 2
+
+    def test_M3_connection_error_still_raises(self, config: Config) -> None:
+        with patch("streamclipper.scoring.ollama_scorer.ollama.Client") as cls:
+            cls.return_value.generate.side_effect = ConnectionError("refused")
+            scorer = OllamaScorer(config)
+            with pytest.raises(OllamaConnectionError):
+                scorer._score_chunk(TranscriptChunk(0.0, 60.0, "hello"), [], [])
+            assert cls.return_value.generate.call_count == 1
+
+    def test_M10_scoring_detection_error_marks_unknown_no_penalty(
+        self, config: Config, long_transcript: TranscriptionResult, tmp_path: Path, caplog
+    ) -> None:
+        h = _make_highlight(60.0, 100.0, 9.0)
+        scorer = _StubScorer(config, canned=[h])
+        _set_cache_dir(config, tmp_path)
+        audio = tmp_path / "a.wav"
+        audio.write_bytes(b"RIFF")
+
+        def boom(self, audio_path, hl):
+            raise RuntimeError("decode fail")
+
+        with (
+            patch("streamclipper.analysis.copyright_risk.CopyrightRiskDetector.detect_highlight", boom),
+            patch.object(scorer, "_compute_weighted_score", side_effect=lambda h, *_: h.score),
+            caplog.at_level("WARNING"),
+        ):
+            selected = scorer.score_and_select(long_transcript, [], [], audio_path=audio)
+        assert len(selected) == 1
+        assert selected[0].music_risk == "UNKNOWN"
+        assert selected[0].music_confidence == 0.0
+        assert selected[0].final_score == 9.0
+        assert any("Copyright risk detection failed" in r.message for r in caplog.records)
+
+    def test_L7_debug_log_when_highlight_overlaps_no_spikes(self, config: Config, caplog) -> None:
+        scorer = _StubScorer(config)
+        h = _make_highlight(500.0, 540.0, 7.0)
+        far = TimeRange(start=0.0, end=5.0, score=9.0, signal_type=SignalType.LOUDNESS)
+        with caplog.at_level("DEBUG", logger="streamclipper.scoring.scorer"):
+            scorer._compute_weighted_score(h, [far], [])
+        assert any("overlaps no loudness/chat spikes" in r.message for r in caplog.records)
+
+    def test_L23_provider_warning_and_narration_style_in_prompt(self, config: Config, caplog) -> None:
+        config._data["llm"]["provider"] = "openai"
+        config._data.setdefault("transformation", {})["narration_style"] = "deadpan"
+        with patch("streamclipper.scoring.ollama_scorer.ollama.Client") as cls:
+            with caplog.at_level("WARNING"):
+                scorer = OllamaScorer(config)
+            assert any("llm.provider" in r.message for r in caplog.records)
+            cls.return_value.generate.return_value = {
+                "response": '{"narration_intro": "i", "narration_outro": "o", "context_badge": "b"}'
+            }
+            scorer.generate_narrative(_make_highlight(0.0, 40.0, 8.0), "Streamer", "GTA 6")
+            prompt = cls.return_value.generate.call_args.kwargs["prompt"]
+        assert "deadpan" in prompt
+
+    def test_G3_checkpoint_skips_completed_chunks_on_rerun(
+        self, config: Config, long_transcript: TranscriptionResult, tmp_path: Path
+    ) -> None:
+        _set_cache_dir(config, tmp_path)
+        calls: list[float] = []
+
+        class _Flaky(_StubScorer):
+            fail = True
+
+            def _score_chunk(self, chunk, loudness, chat):
+                calls.append(chunk.start)
+                if self.fail and len(calls) == 2:
+                    raise RuntimeError("boom")
+                return [_make_highlight(chunk.start + 5.0, chunk.start + 45.0, 9.0, title=f"c{chunk.start}")]
+
+        scorer = _Flaky(config)
+        with pytest.raises(RuntimeError):
+            scorer.score_and_select(long_transcript, [], [])
+        assert len(list(tmp_path.glob("scoring_ckpt_*.json"))) == 1
+        first_chunk_start = calls[0]
+
+        calls.clear()
+        scorer.fail = False
+        scorer.score_and_select(long_transcript, [], [])
+        assert first_chunk_start not in calls
+        assert list(tmp_path.glob("scoring_ckpt_*.json")) == []
+
+    def test_G4_empty_chunk_text_not_sent_to_scorer(self, config: Config, tmp_path: Path) -> None:
+        _set_cache_dir(config, tmp_path)
+        seen: list[str] = []
+
+        class _Rec(_StubScorer):
+            def _chunk_transcript(self, transcript, chunk_minutes=None, overlap_seconds=60.0):
+                return [TranscriptChunk(0.0, 60.0, "   "), TranscriptChunk(60.0, 120.0, "real")]
+
+            def _score_chunk(self, chunk, loudness, chat):
+                seen.append(chunk.text)
+                return []
+
+        tr = TranscriptionResult(
+            segments=[TranscriptSegment(text="x", start=0.0, end=120.0, words=[])], full_text="x"
+        )
+        _Rec(config).score_and_select(tr, [], [])
+        assert seen == ["real"]
+
+
+
+class TestFitClipRange:
+    """Clip length limits widen/trim instead of rejecting; only the hard ceiling rejects."""
+
+    def test_short_range_widened_setup_weighted(self) -> None:
+        fit = fit_clip_range(100.0, 110.0, min_s=30, max_s=90, hard_max_s=180)
+        assert not fit.rejected
+        assert fit.end - fit.start == pytest.approx(30.0)
+        assert 100.0 - fit.start > fit.end - 110.0  # more setup than aftermath
+
+    def test_widen_clamped_at_stream_start_and_end(self) -> None:
+        at_start = fit_clip_range(0.0, 5.0, min_s=30, max_s=90, hard_max_s=180)
+        assert at_start.start == 0.0 and at_start.end == pytest.approx(30.0)
+        at_end = fit_clip_range(
+            995.0, 1000.0, min_s=30, max_s=90, hard_max_s=180, stream_duration=1000.0
+        )
+        assert at_end.end == 1000.0 and at_end.start == pytest.approx(970.0)
+
+    def test_long_range_trimmed_around_peak(self) -> None:
+        fit = fit_clip_range(0.0, 150.0, min_s=30, max_s=90, hard_max_s=180, peak_time=140.0)
+        assert fit.end - fit.start == pytest.approx(90.0)
+        assert fit.end == pytest.approx(150.0)  # window stays inside the original range
+        assert fit.start <= 140.0 <= fit.end
+        mid = fit_clip_range(0.0, 150.0, min_s=30, max_s=90, hard_max_s=180)
+        assert (mid.start, mid.end) == (pytest.approx(30.0), pytest.approx(120.0))
+
+    def test_beyond_hard_ceiling_rejected(self) -> None:
+        fit = fit_clip_range(0.0, 7200.0, min_s=30, max_s=90, hard_max_s=180)
+        assert fit.rejected and "hard_max_clip_seconds" in fit.adjustment
+
+    def test_adjust_disabled_restores_strict_reject(self) -> None:
+        assert fit_clip_range(0.0, 10.0, min_s=30, max_s=90, hard_max_s=180, adjust=False).rejected
+        assert fit_clip_range(0.0, 120.0, min_s=30, max_s=90, hard_max_s=180, adjust=False).rejected
+        ok = fit_clip_range(0.0, 45.0, min_s=30, max_s=90, hard_max_s=180, adjust=False)
+        assert not ok.rejected and ok.adjustment == ""

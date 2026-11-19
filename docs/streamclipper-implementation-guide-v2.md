@@ -2209,7 +2209,7 @@ This is the central orchestrator that wires everything together. It manages the 
 - Orchestrates the full pipeline: discover → download → transcribe → analyze → score → (optional user review) → assemble → export
 - Uses `IntEnum` comparisons (`state.status < PipelineStatus.TRANSCRIBING`) so resumed pipelines accurately skip completed stages
 - **CRITICAL `FAILED` RETRY RECOVERY**: Because `PipelineStatus.FAILED = 99`, if a cached state is `FAILED`, `_recover_failed_state(state)` MUST inspect existing cached artifacts (`clips`, `selected_highlights`, `highlights`, `loudness_spikes`/`chat_spikes`, `transcript`, `audio_path`) and reset `state.status` back to the last safely completed stage before running the `< PipelineStatus.*` guards!
-- Accepts `interactive: bool = False`, `mode: str | None = None`, `voice_intro_path: Path | None = None`, and `voice_outro_path: Path | None = None` so CLI single-stream runs can review/select highlights and pass `--mode [narrative|story|raw]` or custom human voiceover WAVs (`--voice-intro` / `--voice-outro`), while `process_streams_parallel()` and MCP tool runs select the top-N highlights automatically without blocking the `asyncio` event loop on `input()`
+- Accepts `interactive: bool = False`, `mode: str | None = None`, `voice_intro_path: Path | None = None`, and `voice_outro_path: Path | None = None` so CLI single-stream runs can review/select highlights and pass `--mode [auto|narrative|story|raw|breakdown]` or custom human voiceover WAVs (`--voice-intro` / `--voice-outro`), while `process_streams_parallel()` and MCP tool runs select the top-N highlights automatically without blocking the `asyncio` event loop on `input()`
 - In `_interactive_select()`, display each highlight's `moment_type`, proposed `narration_intro`, and beat count (`len(h.sub_clips)`) so the user can review before rendering
 
 ```python
@@ -2410,7 +2410,7 @@ stateDiagram-v2
 - [ ] Interactive selection works in CLI when `interactive=True`
 - [ ] Parallel processing runs with `interactive=False` so `input()` never blocks the event loop
 - [ ] Errors in one stream do not crash others in parallel mode
-- [ ] `cli.py` `clip` and `auto` commands wire into `Pipeline` and support `--mode [narrative|story|raw]`, `--voice-intro PATH`, and `--voice-outro PATH`
+- [ ] `cli.py` `clip` and `auto` commands wire into `Pipeline` and support `--mode [auto|narrative|story|raw|breakdown]`, `--voice-intro PATH`, and `--voice-outro PATH`
 - [ ] `_interactive_select()` displays `moment_type`, proposed `narration_intro`, and beat count before rendering
 
 ## Phase 4: Video Assembly & Output
@@ -3352,7 +3352,7 @@ if __name__ == "__main__":
 - [ ] `streamclipper-mcp` starts cleanly over stdio via `MCPServer.run()` (`mcp>=2.0.0`)
 - [ ] All 11 tools register with valid JSON schemas (`await mcp.list_tools()`, checking `tool.input_schema`)
 - [ ] `transcribe_audio`, `analyze_signals`, and `get_transcript_chunks` cleanly resolve `StepCache` by `url` OR `StepCache.find_by_audio_path(audio_path)`
-- [ ] `submit_highlights` and `render_clip` accept YPP transformative fields (`moment_type`, `narration_intro`, `narration_outro`, `context_badge`, `sub_clips`, `mode` in `auto|narrative|story|raw`, `voice_intro_path`, `voice_outro_path`)
+- [ ] `submit_highlights` and `render_clip` accept YPP transformative fields (`moment_type`, `narration_intro`, `narration_outro`, `context_badge`, `sub_clips`, `mode` in `auto|narrative|story|raw|breakdown`, `voice_intro_path`, `voice_outro_path`)
 - [ ] `get_transcript_chunks` filters to signal-active timestamped chunks by default (`only_with_signals=True`)
 - [ ] `generate_post_metadata` works offline without requiring Ollama by default (`use_ollama=False`)
 - [ ] Error handling returns structured JSON error messages instead of raw tracebacks

@@ -266,3 +266,31 @@ class TestCopyrightRiskDetection:
         else:
             # CPU-only environment
             detector.detect(wav_path, clip_start=0.0, clip_end=2.0)
+
+
+class TestReviewedDefects:
+    def test_G2_all_gaps_failing_returns_unknown(self, tmp_path: Path) -> None:
+        from unittest.mock import patch
+
+        wav = _create_wav_file(tmp_path / "m.wav", _generate_sine_chord(3.0))
+        detector = CopyrightRiskDetector()
+        with patch(
+            "streamclipper.analysis.copyright_risk.librosa.effects.hpss",
+            side_effect=RuntimeError("x"),
+        ):
+            assert detector.detect(wav, 0.0, 3.0) == ("UNKNOWN", 0.0)
+
+    def test_L23_threshold_config_keys(self, tmp_path: Path) -> None:
+        cfg = _make_config(
+            tmp_path,
+            {"copyright": {"high_risk_threshold": 0.8, "low_risk_threshold": 0.2}},
+        )
+        det = CopyrightRiskDetector(cfg)
+        assert det.risk_threshold == 0.8 and det.low_risk_threshold == 0.2
+
+        class _Cfg:
+            def get(self, key, default=None):
+                return {"analysis.music_risk_threshold": 0.7}.get(key, default)
+
+        fb = CopyrightRiskDetector(_Cfg())  # type: ignore[arg-type]
+        assert fb.risk_threshold == 0.7 and fb.low_risk_threshold == 0.35

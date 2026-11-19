@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from datetime import date
 import inspect
 import logging
+import os
 from pathlib import Path
 import re
-from typing import Any
+from typing import Any, AsyncIterator
 
 from rich.console import Console
 from rich.table import Table
@@ -49,6 +51,13 @@ _PHASE4_MODULES = frozenset(
 )
 
 
+def _is_espeak_available() -> bool:
+    """Lazy proxy for the narrator's espeak probe (keeps assembly imports out of module load)."""
+    from .assembly import narrator as _narrator_mod
+
+    return bool(_narrator_mod._is_espeak_available())
+
+
 def format_time(seconds: float) -> str:
     """Format seconds as HH:MM:SS."""
     total = max(0, int(seconds))
@@ -81,6 +90,16 @@ def _sanitize_path_segment(name: str, fallback: str = "unknown") -> str:
     return cleaned
 
 
+class _AsyncNull:
+    """No-op async context manager (assembly that cannot touch the GPU runs unlocked)."""
+
+    async def __aenter__(self) -> None:
+        return None
+
+    async def __aexit__(self, *exc: Any) -> None:
+        return None
+
+
 class Pipeline:
     """Central orchestrator wiring discovery, download, analysis, scoring, and assembly."""
 
@@ -91,6 +110,80 @@ class Pipeline:
         self.temp_dir = Path(config.get("general.temp_dir", "./temp"))
         self.output_dir = Path(config.get("general.output_dir", "./output"))
         self._gpu_lock = asyncio.Lock()
+
+    def _acquire_file_lock(self) -> Any:
+        """Blocking exclusive lock on <cache_dir>/gpu.lock (run via asyncio.to_thread)."""
+        import time
+
+        lock_dir = Path(self.config.get("general.cache_dir", "./.cache"))
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        fh = open(lock_dir / "gpu.lock", "a+b")
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                fh.seek(0, os.SEEK_END)
+                if fh.tell() == 0:
+                    fh.write(b"0")
+                    fh.flush()
+                while True:
+                    fh.seek(0)
+                    try:
+                        msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+                        break
+                    except OSError:
+                        time.sleep(0.25)
+            else:
+                import fcntl
+
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        except BaseException:
+            fh.close()
+            raise
+        return fh
+
+    @staticmethod
+    def _release_file_lock(fh: Any) -> None:
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        except OSError as exc:
+            logger.debug("Ignoring error releasing GPU file lock: %s", exc)
+        finally:
+            fh.close()
+
+    @contextlib.asynccontextmanager
+    async def _gpu_guard(self) -> AsyncIterator[None]:
+        """Hold the in-process GPU lock (and the optional cross-process file lock)."""
+        async with self._gpu_lock:
+            if not bool(self.config.get("general.cross_process_gpu_lock", False)):
+                yield
+                return
+            fh = await asyncio.to_thread(self._acquire_file_lock)
+            try:
+                yield
+            finally:
+                await asyncio.to_thread(self._release_file_lock, fh)
+
+    def _narration_may_use_gpu(self, clip_mode: str) -> bool:
+        """True when narration synthesis for this clip may load Kokoro on the GPU."""
+        if clip_mode == "raw":
+            return False
+        engine = str(
+            self.config.get("transformation.tts_engine", "auto") or "auto"
+        ).strip().lower()
+        if engine == "kokoro":
+            return True
+        if engine == "auto":
+            return _is_espeak_available()
+        return False
 
     @staticmethod
     def _recover_failed_state(state: PipelineState) -> PipelineState:
@@ -232,6 +325,34 @@ class Pipeline:
         if streamer:
             state.stream_info.streamer = streamer
 
+        requested_clips = (
+            int(max_clips)
+            if max_clips is not None
+            else int(self.config.get("analysis.max_clips_per_stream", 5))
+        )
+        # StepCache does not persist requested_max_clips yet, so fall back to the number
+        # of highlights the cached scoring produced (score_and_select returns <= max_clips).
+        stored_max_clips = (
+            state.requested_max_clips
+            if state.requested_max_clips is not None
+            else (len(state.highlights) or None)
+        )
+        if (
+            state.status >= PipelineStatus.ASSEMBLING
+            and state.status != PipelineStatus.FAILED
+            and max_clips is not None
+            and stored_max_clips is not None
+            and requested_clips > stored_max_clips
+        ):
+            logger.warning(
+                "Cached scoring used max_clips=%d but %d requested; re-running scoring.",
+                stored_max_clips,
+                requested_clips,
+            )
+            state.status = PipelineStatus.SCORING
+            state.selected_highlights = []
+            state.clips = []
+
         if state.status == PipelineStatus.COMPLETE and (
             mode is not None
             or max_clips is not None
@@ -254,7 +375,7 @@ class Pipeline:
 
             # Step 3: Transcribe (skip if cached; serialized on GPU lock)
             if state.status < PipelineStatus.ANALYZING:
-                async with self._gpu_lock:
+                async with self._gpu_guard():
                     state = await self._step_transcribe(state)
                 self.cache.save_state(state)
 
@@ -268,7 +389,7 @@ class Pipeline:
 
             # Step 5: Score with LLM (skip if cached; serialized on GPU lock)
             if state.status < PipelineStatus.ASSEMBLING:
-                async with self._gpu_lock:
+                async with self._gpu_guard():
                     state = await self._step_score(state, max_clips=max_clips)
                 self.cache.save_state(state)
 
@@ -293,6 +414,7 @@ class Pipeline:
                     voice_intro_path=intro_path,
                     voice_outro_path=outro_path,
                     voice_breakdown_path=breakdown_path,
+                    interactive=interactive,
                 )
                 self.cache.save_state(state)
         except Exception:
@@ -424,8 +546,8 @@ class Pipeline:
             if cached is not None:
                 return cached
             df = scraper.scrape(state.stream_info.url, self.temp_dir)
-            if not df.empty:
-                scraper.save_cache(df, chat_cache_path)
+            # Persist even an empty (header-only) frame so "no chat" is not re-scraped.
+            scraper.save_cache(df, chat_cache_path)
             return df
 
         chat_df = await asyncio.to_thread(_fetch_chat)
@@ -457,6 +579,11 @@ class Pipeline:
             state.chat_spikes,
             audio_path=state.audio_path,
         )
+        state.requested_max_clips = (
+            int(max_clips)
+            if max_clips is not None
+            else int(self.config.get("analysis.max_clips_per_stream", 5))
+        )
         state.status = PipelineStatus.ASSEMBLING
         return state
 
@@ -467,6 +594,7 @@ class Pipeline:
         voice_intro_path: Path | None = None,
         voice_outro_path: Path | None = None,
         voice_breakdown_path: Path | None = None,
+        interactive: bool = False,
     ) -> PipelineState:
         """Download highlight video segments, generate metadata, and assemble/export clips."""
         base_mode = self._resolve_base_mode(mode)
@@ -495,11 +623,34 @@ class Pipeline:
             self.config.get("discovery.default_game", "GTA 6")
         )
 
-        clips: list[ClipResult] = []
+        skip_high_music = bool(self.config.get("analysis.skip_high_music", False))
         buffer_seconds = 3.0
         for idx, highlight in enumerate(state.selected_highlights, start=1):
+            if self._already_rendered(state, highlight):
+                logger.info("Skipping already-rendered highlight %d on resume.", idx)
+                continue
+            if (
+                skip_high_music
+                and not interactive
+                and highlight.music_risk == "HIGH_MUSIC_DETECTED"
+            ):
+                logger.warning(
+                    "Skipping highlight %d (%.1f-%.1f): HIGH_MUSIC_DETECTED and "
+                    "analysis.skip_high_music is enabled.",
+                    idx,
+                    highlight.start,
+                    highlight.end,
+                )
+                continue
             clip_mode, valid_beats = self._resolve_highlight_mode(base_mode, highlight)
             use_multi_beat = clip_mode == "story" and len(valid_beats) >= 2
+            if clip_mode != "story" and valid_beats:
+                logger.info(
+                    "Ignoring %d validated sub_clips beats for highlight %d (mode=%s).",
+                    len(valid_beats),
+                    idx,
+                    clip_mode,
+                )
             if use_multi_beat:
                 beat_ranges = [
                     (float(beat["start"]), float(beat["end"]))
@@ -511,6 +662,7 @@ class Pipeline:
                     beat_ranges,
                     segments_dir,
                     buffer_seconds,
+                    video_id=state.stream_info.video_id or None,
                 )
             else:
                 single_path = await asyncio.to_thread(
@@ -520,10 +672,11 @@ class Pipeline:
                     highlight.end,
                     segments_dir,
                     buffer_seconds,
+                    video_id=state.stream_info.video_id or None,
                 )
                 segment_paths = [single_path]
 
-            async with self._gpu_lock:
+            async with self._gpu_guard():
                 if supports_mode_kwarg:
                     metadata = await asyncio.to_thread(
                         scorer.generate_metadata,
@@ -547,6 +700,12 @@ class Pipeline:
                     metadata.narration_outro = ""
                     metadata.context_badge = ""
 
+            assemble_guard = (
+                self._gpu_guard()
+                if self._narration_may_use_gpu(clip_mode)
+                else _AsyncNull()
+            )
+            async with assemble_guard:
                 clip_result = await asyncio.to_thread(
                     self._assemble_highlight,
                     highlight,
@@ -560,11 +719,24 @@ class Pipeline:
                     buffer_seconds=buffer_seconds,
                     voice_breakdown_path=voice_breakdown_path,
                 )
-            clips.append(clip_result)
+            state.clips.append(clip_result)
+            self.cache.save_state(state)
 
-        state.clips = clips
         state.status = PipelineStatus.COMPLETE
         return state
+
+    @staticmethod
+    def _already_rendered(state: PipelineState, highlight: Highlight) -> bool:
+        """True when state.clips already holds an existing video for this highlight window."""
+        for clip in state.clips:
+            meta = clip.metadata
+            if (
+                abs(float(meta.clip_start) - float(highlight.start)) <= 0.01
+                and abs(float(meta.clip_end) - float(highlight.end)) <= 0.01
+                and Path(clip.video_path).exists()
+            ):
+                return True
+        return False
 
     def _assemble_highlight(
         self,
@@ -648,6 +820,29 @@ class Pipeline:
                     beat_trim_ranges=beat_trim_ranges,
                     peak_offset=peak_offset,
                 )
+                actual_durations = getattr(composed, "_beat_durations", None)
+                if (
+                    isinstance(actual_durations, list)
+                    and len(actual_durations) == len(beats)
+                    and any(
+                        abs(float(a) - (float(b["end"]) - float(b["start"]))) > 0.05
+                        for a, b in zip(actual_durations, beats)
+                    )
+                ):
+                    logger.warning(
+                        "Story beat durations differ from requested ranges; remapping "
+                        "captions/chat to actual durations."
+                    )
+                    actual_beats = [
+                        {**b, "end": float(b["start"]) + float(a)}
+                        for a, b in zip(actual_durations, beats)
+                    ]
+                    remapped_words, remapped_chat, _ = remap_timeline_for_beats(
+                        highlight.word_timestamps,
+                        highlight.chat_burst,
+                        highlight.peak_time,
+                        actual_beats,
+                    )
                 clip_start_offset = 0.0
                 words_for_export = remapped_words
                 chat_for_export = remapped_chat
@@ -745,7 +940,9 @@ class Pipeline:
             output_video_path = organizer.get_clip_path(
                 game=metadata.game,
                 streamer=metadata.streamer,
-                index=clip_index,
+                index=organizer.next_available_index(
+                    metadata.game, metadata.streamer, clip_index
+                ),
             )
 
             exporter = Exporter(self.config)
@@ -850,8 +1047,8 @@ class Pipeline:
             if callable(close_fn):
                 try:
                     close_fn()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Ignoring error closing composed clip handle: %s", exc)
 
     def _fallback_save_segment(
         self,

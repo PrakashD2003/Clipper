@@ -42,7 +42,7 @@ def _make_config(tmp_path: Path, discovery_overrides: dict[str, Any] | None = No
 def _make_entry(
     video_id: str,
     *,
-    title: str = "Long Stream VOD",
+    title: str = "GTA 6 Long Stream VOD",
     uploader: str = "TopStreamer",
     duration: int | None = 7200,
     view_count: int | None = 25_000,
@@ -242,16 +242,16 @@ class TestFilterStreams:
         raw_results = [
             # Invalid entry with same ID should not block a later valid entry
             _make_entry("dup1", duration=100, view_count=5000),
-            _make_entry("dup1", title="First Valid", duration=7200, view_count=15_000),
+            _make_entry("dup1", title="GTA 6 First Valid", duration=7200, view_count=15_000),
             _make_entry("dup1", title="Duplicate Valid", duration=7200, view_count=15_000),
-            _make_entry("unique2", title="Second Stream", duration=5400, view_count=20_000),
+            _make_entry("unique2", title="GTA 6 Second Stream", duration=5400, view_count=20_000),
         ]
 
         streams = discovery._filter_streams(raw_results, "GTA 6")
 
         assert len(streams) == 2
         assert [s.video_id for s in streams] == ["unique2", "dup1"]
-        assert streams[1].title == "First Valid"
+        assert streams[1].title == "GTA 6 First Valid"
 
     def test_sorts_by_view_count_descending_and_respects_max_streams(
         self, tmp_path: Path
@@ -281,14 +281,14 @@ class TestFilterStreams:
         raw_results = [
             {
                 "id": "chan_only",
-                "title": "Channel Fallback",
+                "title": "GTA 6 Channel Fallback",
                 "channel": "ChannelHost",
                 "duration": 4000,
                 "view_count": 3000,
             },
             {
                 "id": "creator_only",
-                "title": "Creator Fallback",
+                "title": "GTA 6 Creator Fallback",
                 "creator": "CreatorHost",
                 "url": "not-an-http-url",
                 "duration": 4000,
@@ -296,7 +296,7 @@ class TestFilterStreams:
             },
             {
                 "id": "unknown_host",
-                "title": "No Host",
+                "title": "GTA 6 No Host",
                 "duration": 4000,
                 "view_count": 1500,
             },
@@ -339,3 +339,23 @@ class TestFilterStreams:
         assert [s.video_id for s in streams] == ["float_str"]
         assert streams[0].duration_seconds == 7200
         assert streams[0].view_count == 2500
+
+
+# --- Review-fix regression tests (L5, G6) ---
+
+
+def test_L5_G6_filters_live_status_age_and_title(tmp_path):
+    import time as _t
+
+    disc = YouTubeDiscovery(_make_config(tmp_path, {"min_viewers": 0, "min_duration_hours": 0}))
+    today = _t.strftime("%Y%m%d")
+    base = {"duration": 7200, "view_count": 5000, "title": "GTA 6 stream"}
+    entries = [
+        {**base, "id": "good000000a", "live_status": "was_live", "upload_date": today},
+        {**base, "id": "live0000000", "live_status": "is_live"},
+        {**base, "id": "old00000000", "upload_date": "20000101"},
+        {**base, "id": "offtopic000", "title": "Minecraft marathon"},
+        {**base, "id": "nostatus000"},
+    ]
+    ids = {s.video_id for s in disc._filter_streams(entries, "GTA 6")}
+    assert ids == {"good000000a", "nostatus000"}
