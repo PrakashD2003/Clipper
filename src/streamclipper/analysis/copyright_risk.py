@@ -38,6 +38,9 @@ class CopyrightRiskDetector:
                 config.get("analysis.copyright.low_risk_threshold", 0.35)
             )
             self.min_gap_seconds: float = float(config.get("analysis.music_min_gap_seconds", 0.4))
+            self.min_tested_seconds: float = float(
+                config.get("analysis.copyright.min_gap_seconds", 2.0)
+            )
             self.flatness_threshold: float = float(
                 config.get("analysis.music_flatness_threshold", 0.15)
             )
@@ -47,6 +50,7 @@ class CopyrightRiskDetector:
             self.risk_threshold = 0.65
             self.low_risk_threshold = 0.35
             self.min_gap_seconds = 0.4
+            self.min_tested_seconds = 2.0
             self.flatness_threshold = 0.15
             self.min_rms = 0.005
 
@@ -120,7 +124,8 @@ class CopyrightRiskDetector:
             (music_risk, music_confidence) where music_risk is one of:
             - "HIGH_MUSIC_DETECTED" (music_confidence >= 0.65 or peak_gap_conf >= 0.65 for >= 1.0s)
             - "LOW" (0.35 <= music_confidence < 0.65 or peak_gap_conf >= 0.50)
-            - "CLEAN" (music_confidence < 0.35)
+            - "CLEAN" (music_confidence < 0.35 over >= min_tested_seconds of tested gap audio)
+            - "UNKNOWN" (too little non-speech audio tested, or analysis failed)
         """
         if not self.enabled:
             return ("CLEAN", 0.0)
@@ -132,11 +137,12 @@ class CopyrightRiskDetector:
         start = float(clip_start)
         end = float(clip_end)
         if end <= start or (end - start) < self.min_gap_seconds:
-            return ("CLEAN", 0.0)
+            return ("UNKNOWN", 0.0)
 
         gaps = self.find_non_speech_intervals(start, end, word_timestamps)
-        if not gaps:
-            return ("CLEAN", 0.0)
+        # Not enough speech-free audio to judge: never claim CLEAN for an untested clip.
+        if sum(g1 - g0 for g0, g1 in gaps) < self.min_tested_seconds:
+            return ("UNKNOWN", 0.0)
 
         gap_confidences: list[tuple[float, float]] = []  # (confidence, duration)
         failed_gaps = 0
@@ -190,13 +196,11 @@ class CopyrightRiskDetector:
                     continue
 
         if not gap_confidences:
-            if failed_gaps:
-                return ("UNKNOWN", 0.0)
-            return ("CLEAN", 0.0)
+            return ("UNKNOWN", 0.0)
 
         total_gap_dur = sum(dur for _, dur in gap_confidences)
-        if total_gap_dur <= 0.0:
-            return ("CLEAN", 0.0)
+        if total_gap_dur < self.min_tested_seconds:
+            return ("UNKNOWN", 0.0)
 
         weighted_conf = sum(conf * dur for conf, dur in gap_confidences) / total_gap_dur
         peak_conf = max(conf for conf, _ in gap_confidences)

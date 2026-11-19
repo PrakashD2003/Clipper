@@ -177,7 +177,7 @@ class Highlight(SerializableModel):
     sub_clips: list[dict[str, Any]] = field(default_factory=list)   # Optional [{"start": s, "end": e, "label": "Setup"}]
     breakdown_commentary: str = ""     # Spoken breakdown analyzing mechanics/physics/mistake during replay
     breakdown_callout: str = ""        # 2-5 word on-screen callout note
-    music_risk: str = "CLEAN"          # CLEAN | LOW | HIGH_MUSIC_DETECTED
+    music_risk: str = "CLEAN"          # CLEAN | LOW | UNKNOWN | HIGH_MUSIC_DETECTED
     music_confidence: float = 0.0      # Harmonic-percussive music confidence 0.0-1.0
     bounds_adjustment: str = ""        # How the clip range was fitted to length limits ("" = unchanged)
     callout: str = ""                  # 4-6 word voiced callout said during the build-up
@@ -303,6 +303,8 @@ class ClipResult(SerializableModel):
     metadata_path: Optional[Path]
     metadata: ClipMetadata
     duration_seconds: float
+    quarantined: bool = False        # True when the narration gate moved the clip to the quarantine dir
+    quarantine_reason: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ClipResult":
@@ -312,6 +314,8 @@ class ClipResult(SerializableModel):
             metadata_path=Path(raw_meta_path) if raw_meta_path else None,
             metadata=ClipMetadata.from_dict(data["metadata"]),
             duration_seconds=float(data["duration_seconds"]),
+            quarantined=bool(data.get("quarantined", False)),
+            quarantine_reason=str(data.get("quarantine_reason") or ""),
         )
 
 

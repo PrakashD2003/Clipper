@@ -179,6 +179,7 @@ class AssCaptionBurner:
             named_style = _NAMED_ASS_COLORS.get(raw_highlight.strip().lower())
             highlight_bgr = f"&H{named_style[4:]}&" if named_style else "&H00D7FF&"
         self.highlight_bgr = highlight_bgr
+        self._ticker_font = self.font  # ChatTicker keeps the base font; presets never touch it
 
         self.codec = str(config.get("video.codec", "libx264") or "libx264").strip().lower()
         resolution = config.get("video.resolution", [1080, 1920])
@@ -194,7 +195,36 @@ class AssCaptionBurner:
         self.margin_v = round(self.height * (1.0 - pos_y_ratio))
         self.show_chat_ticker = bool(config.get("transformation.show_chat_ticker", True))
 
-    def generate_ass(
+    def generate_ass(self, *args: Any, style_preset: dict[str, Any] | None = None, **kwargs: Any) -> Path:
+        """Write the .ass file; `style_preset` ({font, primary_color, highlight_color, outline_color})
+        overrides the word-caption and narration-card styles only (ChatTicker is left alone)."""
+        if not style_preset:
+            return self._generate_ass(*args, **kwargs)
+        saved = (self.font, self.primary_color, self.stroke_color, self.highlight_bgr)
+        try:
+            font = re.sub(r"[,\r\n]+", " ", str(style_preset.get("font") or "")).strip()
+            if font:
+                self.font = font
+            if style_preset.get("primary_color"):
+                self.primary_color = _color_to_ass_style(
+                    style_preset["primary_color"], default=self.primary_color
+                )
+            if style_preset.get("outline_color"):
+                self.stroke_color = _color_to_ass_style(
+                    style_preset["outline_color"], default=self.stroke_color
+                )
+            if style_preset.get("highlight_color"):
+                raw = str(style_preset["highlight_color"])
+                bgr = _hex_to_ass_bgr(raw, default="")
+                if not bgr:
+                    named = _NAMED_ASS_COLORS.get(raw.strip().lower())
+                    bgr = f"&H{named[4:]}&" if named else self.highlight_bgr
+                self.highlight_bgr = bgr
+            return self._generate_ass(*args, **kwargs)
+        finally:
+            self.font, self.primary_color, self.stroke_color, self.highlight_bgr = saved
+
+    def _generate_ass(
         self,
         words: list[WordTimestamp],
         clip_start_offset: float,
@@ -242,7 +272,7 @@ WrapStyle: 0
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Hormozi,{self.font},{self.font_size},{self.primary_color},{secondary_style_color},{self.stroke_color},&H80000000,-1,0,0,0,100,100,0,0,1,{self.stroke_width},0,2,60,60,{hormozi_margin_v},1
-Style: ChatTicker,{self.font},34,&H00FFFFFF,&H00FFFFFF,&H99000000,&H99000000,-1,0,0,0,100,100,0,0,3,2,0,{ticker_align},40,40,{ticker_margin_v},1
+Style: ChatTicker,{self._ticker_font},34,&H00FFFFFF,&H00FFFFFF,&H99000000,&H99000000,-1,0,0,0,100,100,0,0,3,2,0,{ticker_align},40,40,{ticker_margin_v},1
 {callout_style_line}
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text

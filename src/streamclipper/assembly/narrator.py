@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gc
 import logging
+import time
 import os
 import shutil
 import subprocess
@@ -25,6 +26,7 @@ from .tts_engines import (
 logger = logging.getLogger(__name__)
 
 WORDS_PER_SECOND = 2.7
+TTS_RETRY_SLEEP_SECONDS = 0.5  # pause before retrying a fully failed engine chain (patchable in tests)
 
 
 class TransformativeNarrator:
@@ -202,14 +204,24 @@ class TransformativeNarrator:
         output_wav.parent.mkdir(parents=True, exist_ok=True)
 
         lang = str(language or self.language or "english").strip().lower()
-        for name in self._engine_chain(lang):
-            res = self._run_engine(name, clean_text, output_wav, language=lang)
-            if res is not None and res.is_file() and res.stat().st_size > 0:
-                return res
-            if name == "kokoro":
-                logger.warning("Kokoro produced no audio (espeak-ng missing?); falling back to edge-tts")
-            else:
-                logger.info("TTS engine %s produced no audio; trying next", name)
+        try:
+            retries = max(0, int(self.config.get("transformation.tts_retries", 1) or 0))
+        except (TypeError, ValueError):
+            retries = 1
+        for attempt in range(retries + 1):
+            if attempt > 0:
+                logger.warning(
+                    "All TTS engines failed; retrying chain (%d/%d).", attempt, retries
+                )
+                time.sleep(TTS_RETRY_SLEEP_SECONDS)
+            for name in self._engine_chain(lang):
+                res = self._run_engine(name, clean_text, output_wav, language=lang)
+                if res is not None and res.is_file() and res.stat().st_size > 0:
+                    return res
+                if name == "kokoro":
+                    logger.warning("Kokoro produced no audio (espeak-ng missing?); falling back to edge-tts")
+                else:
+                    logger.info("TTS engine %s produced no audio; trying next", name)
         logger.debug("No TTS engine succeeded")
         return None
 

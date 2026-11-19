@@ -151,7 +151,7 @@ def test_L4_hinglish_never_runs_kokoro_or_chatterbox(tmp_path, monkeypatch):
 
     n._run_engine = fake_run  # type: ignore[method-assign]
     assert n.synthesize_speech("namaste", tmp_path / "x.wav", language="hinglish") is None
-    assert ran == ["edge-tts"]
+    assert set(ran) == {"edge-tts"}  # chain is retried (transformation.tts_retries) but never kokoro/chatterbox
 
 
 def test_L4_elevenlabs_uses_per_language_voice(tmp_path, monkeypatch):

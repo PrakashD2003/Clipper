@@ -84,6 +84,21 @@ class Exporter:
         self.temp_dir = Path(config.get("general.temp_dir", "./temp"))
         self.caption_burner = AssCaptionBurner(config)
         self.narrator = TransformativeNarrator(config)
+        # What the last export() actually did (mix ran, probed narration seconds, ...).
+        self.last_export_info: dict[str, Any] = self._empty_export_info()
+
+    @staticmethod
+    def _empty_export_info() -> dict[str, Any]:
+        return {
+            "mix_ran": False,
+            "narration_expected": False,
+            "intro_seconds": 0.0,
+            "outro_seconds": 0.0,
+            "callout_seconds": 0.0,
+            "breakdown_seconds": 0.0,
+            "spoken_seconds": 0.0,
+            "final_duration": 0.0,
+        }
 
     @staticmethod
     def _notify_progress(progress_callback: Callable | None, value: float) -> None:
@@ -175,8 +190,10 @@ class Exporter:
         callout_start: float | None = None,
         duck_full: bool = False,
         language: str | None = None,
+        style_preset: dict[str, Any] | None = None,
     ) -> Path:
         """Render composed clip, mix narrator ducking, burn ASS captions+chat ticker, and release handles."""
+        self.last_export_info = self._empty_export_info()
         if language:
             self.narrator.language = str(language).strip().lower()
         final_output = Path(output_path)
@@ -241,6 +258,11 @@ class Exporter:
             breakdown_window: tuple[float | None, float | None] | None = None
             callout_window: tuple[float, float] | None = None
             mix_ran = False
+            breakdown_dur: float | None = None
+            callout_dur: float | None = None
+            self.last_export_info["narration_expected"] = bool(
+                effective_mode != "raw" and has_narration_input
+            )
 
             if effective_mode != "raw" and has_narration_input:
                 orig_enabled = self.narrator.enabled
@@ -323,7 +345,8 @@ class Exporter:
                             )
                             breakdown_kwargs["callout_wav"] = callout_wav
                             breakdown_kwargs["callout_start"] = c_start
-                            c_dur = self.narrator._probe_audio_duration(callout_wav) or 2.0
+                            callout_dur = self.narrator._probe_audio_duration(callout_wav)
+                            c_dur = callout_dur or 2.0
                             callout_window = (c_start, min(clip_duration, c_start + float(c_dur)))
                         if duck_full:
                             breakdown_kwargs["duck_full"] = True
@@ -347,12 +370,21 @@ class Exporter:
                         if mixed_path:
                             current_video = Path(mixed_path)
                             mix_ran = True
+                            parts = {
+                                "intro_seconds": intro_dur,
+                                "outro_seconds": outro_dur,
+                                "callout_seconds": callout_dur,
+                                "breakdown_seconds": breakdown_dur,
+                            }
+                            for key, val in parts.items():
+                                self.last_export_info[key] = round(float(val or 0.0), 3)
                         else:
                             if not mixed_path:
                                 logger.warning(
                                     "Narration mix produced no output; keeping un-narrated video."
                                 )
                             intro_dur = outro_dur = None
+                            callout_dur = breakdown_dur = None
                             eff_intro = eff_outro = None
                             breakdown_window = None
                             callout_window = None
@@ -422,6 +454,7 @@ class Exporter:
                     breakdown_callout="" if is_raw else breakdown_callout,
                     breakdown_window=None if is_raw else breakdown_window,
                     **layout_kwargs,
+                    **({"style_preset": style_preset} if style_preset else {}),
                 )
                 try:
                     result_path = self.caption_burner.burn_captions(
@@ -439,6 +472,26 @@ class Exporter:
                     current_video, final_output
                 )
 
+            info = self.last_export_info
+            info["mix_ran"] = bool(mix_ran)
+            info["spoken_seconds"] = round(
+                sum(
+                    float(info[k])
+                    for k in (
+                        "intro_seconds",
+                        "outro_seconds",
+                        "callout_seconds",
+                        "breakdown_seconds",
+                    )
+                ),
+                3,
+            )
+            try:
+                info["final_duration"] = round(
+                    float(self.narrator._probe_audio_duration(Path(result_path)) or 0.0), 3
+                )
+            except Exception as exc:
+                logger.debug("Could not probe final export duration: %s", exc)
             self._notify_progress(progress_callback, 1.0)
             return Path(result_path)
         finally:

@@ -51,7 +51,7 @@ analysis:
   music_penalty_factor: 0.80           # Score multiplier for clips flagged with high music
   copyright:
     enabled: true
-    min_gap_seconds: 0.4
+    min_gap_seconds: 2.0               # Min TOTAL non-speech audio that must be tested; less -> music_risk UNKNOWN (never a false CLEAN)
     high_risk_threshold: 0.65
     low_risk_threshold: 0.35
 
@@ -97,6 +97,11 @@ captions:
   stroke_color: "black"
   stroke_width: 4
   position_y_ratio: 0.75     # 75% down the screen
+  rotate_styles: true        # Rotate style_presets per streamer so clips don't share one template look
+  style_presets:             # Word-caption / narration-card looks (font falls back automatically if missing)
+    - {font: "Arial", primary_color: "#FFFFFF", highlight_color: "#FFD700", outline_color: "#000000"}      # white + gold
+    - {font: "Arial Black", primary_color: "#FFFFFF", highlight_color: "#00E5FF", outline_color: "#000000"} # bold white + cyan
+    - {font: "Segoe UI Black", primary_color: "#FFEB3B", highlight_color: "#FF4081", outline_color: "#000000"} # yellow + pink
 
 hook_title:
   enabled: true
@@ -123,7 +128,9 @@ output:
   max_clips_per_streamer_per_day: 3    # Extra clips are routed to queued_dir
   queued_dir: "queued"                 # Sub-folder for clips over the daily cap
   write_post_file: true                # Write a ready-to-paste post .txt next to each clip
-  min_commentary_ratio: 0.35           # Minimum share of narration vs. stream audio (YPP transformative)
+  min_commentary_ratio: 0.35           # Minimum share of narration vs. stream audio (YPP transformative); measured after export, below this the clip JSON gets low_commentary: true
+  require_narration: true              # Hard gate: a non-raw clip whose narration mix did not run is quarantined, never shipped silent
+  quarantine_dir: "_quarantine"        # Sub-folder of the output dir (game/streamer/date below it) for clips that failed the narration gate
 
 facecam:
   min_area_ratio: 0.002
@@ -165,6 +172,7 @@ transformation:
   tts_external_python: ".venv-tts/Scripts/python.exe"  # Separate venv for engines with conflicting deps
   tts_reference_wav: ""                # Voice-clone reference WAV ("" = engine default voice)
   tts_speed: 1.1
+  tts_retries: 1                       # Extra full passes over the TTS engine chain (0.5 s apart) when every engine failed
   edge_tts_rate: "+10%"
   target_lufs: -14                     # Final loudness normalization target
   narration_gain_db: 3                 # Narration level above the ducked stream bed

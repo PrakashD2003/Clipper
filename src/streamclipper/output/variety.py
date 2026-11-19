@@ -67,6 +67,21 @@ class VarietyState:
     def next_hook_style(self) -> str:
         return self._least_recent(self.hook_styles, self._load(), "hook_style")
 
+    def next_caption_preset(self, n_presets: int, streamer: str | None = None) -> int:
+        """Index in [0, n_presets) unused longest for `streamer` (rotates per streamer, persisted)."""
+        n = int(n_presets)
+        if n <= 1:
+            return 0
+        entries = [
+            e for e in self._load() if streamer is None or e.get("streamer") == streamer
+        ]
+        last_seen: dict[int, int] = {}
+        for pos, entry in enumerate(entries):
+            value = entry.get("caption_preset")
+            if isinstance(value, int) and not isinstance(value, bool) and 0 <= value < n:
+                last_seen[value] = pos
+        return min(range(n), key=lambda i: (last_seen.get(i, -1), i))
+
     def recent_outros(self, n: int = 20) -> list[str]:
         if n <= 0:
             return []
@@ -78,10 +93,34 @@ class VarietyState:
         return sum(
             1
             for e in self._load()
-            if e.get("streamer") == streamer and e.get("date") == today
+            if e.get("streamer") == streamer
+            and e.get("date") == today
+            and not e.get("caption_only")
         )
 
-    def record(self, streamer: str, fmt: str, hook_style: str, outro: str) -> None:
+    def record_caption_preset(self, streamer: str, preset: int) -> None:
+        """Persist a caption-preset pick made outside the CLI loop (MCP render path)."""
+        with _LOCK:
+            entries = self._load()
+            entries.append(
+                {
+                    "streamer": streamer,
+                    "caption_preset": int(preset),
+                    "caption_only": True,
+                    "date": date.today().isoformat(),
+                    "ts": datetime.now().isoformat(timespec="seconds"),
+                }
+            )
+            self._save(entries)
+
+    def record(
+        self,
+        streamer: str,
+        fmt: str,
+        hook_style: str,
+        outro: str,
+        caption_preset: int | None = None,
+    ) -> None:
         with _LOCK:
             entries = self._load()
             entries.append(
@@ -90,6 +129,7 @@ class VarietyState:
                     "format": fmt,
                     "hook_style": hook_style,
                     "outro": outro,
+                    "caption_preset": caption_preset,
                     "date": date.today().isoformat(),
                     "ts": datetime.now().isoformat(timespec="seconds"),
                 }

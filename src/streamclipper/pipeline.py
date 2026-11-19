@@ -9,6 +9,7 @@ import logging
 import os
 from pathlib import Path
 import re
+import shutil
 from typing import Any, AsyncIterator
 
 from rich.console import Console
@@ -818,6 +819,7 @@ class Pipeline:
                 if self._narration_may_use_gpu(clip_mode)
                 else _AsyncNull()
             )
+            caption_preset = self._next_caption_preset_index(variety, streamer_name)
             async with assemble_guard:
                 clip_result = await asyncio.to_thread(
                     self._assemble_highlight,
@@ -834,8 +836,16 @@ class Pipeline:
                     gate_non_gameplay=gate_non_gameplay,
                     queued=queued,
                     stream_info=state.stream_info,
+                    caption_preset=caption_preset,
                 )
             if clip_result is None:
+                continue
+            if getattr(clip_result, "quarantined", False):
+                logger.warning(
+                    "Clip %d not counted as produced (quarantined: %s).",
+                    idx,
+                    clip_result.quarantine_reason,
+                )
                 continue
             state.clips.append(clip_result)
             try:
@@ -844,6 +854,7 @@ class Pipeline:
                     clip_mode,
                     hook_style,
                     metadata.narration_outro or "",
+                    caption_preset=caption_preset,
                 )
             except Exception as exc:
                 logger.warning("Could not record variety state: %s", exc)
@@ -859,7 +870,7 @@ class Pipeline:
                 top3 = await self._build_top3(
                     state, scorer, segments_dir, buffer_seconds, streamer_name, game_name
                 )
-                if top3 is not None:
+                if top3 is not None and not top3.quarantined:
                     state.clips.append(top3)
                     self.cache.save_state(state)
             except Exception as exc:
@@ -886,6 +897,64 @@ class Pipeline:
             )
         return not is_gameplay
 
+    _TOP3_TITLE_TEMPLATES = (
+        "Top 3 {game} moments from {streamer}",
+        "{streamer}'s 3 craziest {game} plays, ranked",
+        "Ranking {streamer}'s best {game} moments",
+        "3 {game} clips from {streamer} you can't miss",
+        "Which {streamer} {game} moment wins? Ranked",
+    )
+
+    def _top3_title(
+        self,
+        scorer: Any,
+        top: list[Highlight],
+        streamer_name: str,
+        game_name: str,
+        url: str,
+        hook_style: str,
+        hook_styles: list[str],
+        language: str,
+    ) -> tuple[str, str, list[str]]:
+        """(title, caption, hashtags): LLM hook when available, else a rotating template."""
+        gen = getattr(scorer, "generate_metadata", None)
+        if callable(gen):
+            try:
+                sig = inspect.signature(gen)
+                has_var_kw = any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+                )
+                kwargs: dict[str, Any] = {}
+                for name, val in (
+                    ("mode", "narrative"),
+                    ("hook_style", hook_style),
+                    ("language", language),
+                ):
+                    if name in sig.parameters or has_var_kw:
+                        kwargs[name] = val
+                meta = gen(top[0], streamer_name, game_name, url, **kwargs)
+                title = str(getattr(meta, "hook_title", "") or "").strip()
+                if title:
+                    caption = str(getattr(meta, "caption", "") or "").strip() or (
+                        f"{streamer_name}'s top 3 {game_name} moments, ranked."
+                    )
+                    tags = [str(t) for t in (getattr(meta, "hashtags", None) or [])]
+                    if "Top3" not in tags and "#Top3" not in tags:
+                        tags.append("Top3")
+                    return title, caption, tags
+            except Exception as exc:
+                logger.warning("Top-3 hook generation failed (%s); using title template.", exc)
+        try:
+            idx = hook_styles.index(hook_style)
+        except ValueError:
+            idx = 0
+        template = self._TOP3_TITLE_TEMPLATES[idx % len(self._TOP3_TITLE_TEMPLATES)]
+        return (
+            template.format(game=game_name, streamer=streamer_name),
+            f"{streamer_name}'s top 3 {game_name} moments, ranked.",
+            ["Top3", "Shorts", "Gaming"],
+        )
+
     async def _build_top3(
         self,
         state: PipelineState,
@@ -901,12 +970,44 @@ class Pipeline:
         from .assembly.narrator import TransformativeNarrator
         from .output.organizer import FileOrganizer
 
-        top = sorted(
+        variety = self._variety_state()
+        daily_cap = int(self.config.get("output.max_clips_per_streamer_per_day", 3) or 0)
+        skip_high_music = bool(self.config.get("analysis.skip_high_music", False))
+        gate_enabled = bool(self.config.get("content_gate.enabled", True))
+
+        ranked = sorted(
             state.selected_highlights,
             key=lambda h: float(h.final_score or h.score),
             reverse=True,
-        )[:3]
-        play_order = list(reversed(top))  # #3 -> #1
+        )
+        top: list[Highlight] = []
+        top_segs: list[Path] = []
+        for h in ranked:
+            if len(top) >= 3:
+                break
+            if skip_high_music and h.music_risk == "HIGH_MUSIC_DETECTED":
+                logger.info("Top-3: skipping %.1f-%.1f (HIGH_MUSIC_DETECTED).", h.start, h.end)
+                continue
+            seg = await asyncio.to_thread(
+                download_segment,
+                state.stream_info.url,
+                h.start,
+                h.end,
+                segments_dir,
+                buffer_seconds,
+                video_id=state.stream_info.video_id or None,
+            )
+            if gate_enabled and await asyncio.to_thread(self._assess_gameplay, seg):
+                logger.info("Top-3: skipping %.1f-%.1f (non-gameplay segment).", h.start, h.end)
+                continue
+            top.append(h)
+            top_segs.append(seg)
+        if len(top) < 3:
+            logger.info("Top-3 compilation skipped: only %d eligible highlights.", len(top))
+            return None
+
+        order = list(range(len(top) - 1, -1, -1))  # #3 -> #1
+        play_order = [top[i] for i in order]
         n_items = len(play_order)
         lines: list[str] = []
         gen = getattr(scorer, "generate_countdown_lines", None)
@@ -921,35 +1022,35 @@ class Pipeline:
         peaks: list[float | None] = []
         cams: list[Any] = []
         detector = FacecamDetector(self.config)
-        for h in play_order:
-            seg = await asyncio.to_thread(
-                download_segment,
-                state.stream_info.url,
-                h.start,
-                h.end,
-                segments_dir,
-                buffer_seconds,
-                video_id=state.stream_info.video_id or None,
-            )
+        for i, h in zip(order, play_order):
+            seg = top_segs[i]
             seg_start = max(0.0, float(h.start) - buffer_seconds)
             segs.append(seg)
             peaks.append(max(0.0, h.peak_time - seg_start) if h.peak_time > 0 else None)
             cams.append(await asyncio.to_thread(detector.detect, [seg], streamer=streamer_name))
 
         organizer = FileOrganizer(self.config)
-        out_path = organizer.get_clip_path(
+        queued = bool(daily_cap > 0 and variety.clips_today(streamer_name) >= daily_cap)
+        path_getter = (
+            getattr(organizer, "get_queued_path", organizer.get_clip_path)
+            if queued
+            else organizer.get_clip_path
+        )
+        out_path = path_getter(
             game=game_name,
             streamer=streamer_name,
             index=organizer.next_available_index(
                 game_name, streamer_name, len(state.selected_highlights) + 1
             ),
         )
-        narrator = TransformativeNarrator(self.config)
-        narrator.language = resolve_narration_language(
+        language = resolve_narration_language(
             self.config,
             state.stream_info.streamer,
             state.transcript.language if state.transcript else None,
         )
+        narrator = TransformativeNarrator(self.config)
+        narrator.language = language
+        info: dict[str, Any] = {}
         guard = self._gpu_guard() if self._narration_may_use_gpu("narrative") else _AsyncNull()
         try:
             async with guard:
@@ -962,16 +1063,29 @@ class Pipeline:
                     out_path,
                     self.config,
                     narrator=narrator,
+                    info=info,
                 )
         finally:
             release = getattr(narrator, "release", None)
             if callable(release):
                 release()
 
+        hook_style = variety.next_hook_style()
+        title, caption, hashtags = await asyncio.to_thread(
+            self._top3_title,
+            scorer,
+            top,
+            streamer_name,
+            game_name,
+            state.stream_info.url,
+            hook_style,
+            list(variety.hook_styles),
+            language,
+        )
         metadata = ClipMetadata(
-            hook_title=f"Top 3 {game_name} moments from {streamer_name}",
-            caption=f"{streamer_name}'s top 3 {game_name} moments, ranked.",
-            hashtags=["Top3", "Shorts", "Gaming"],
+            hook_title=title,
+            caption=caption,
+            hashtags=hashtags,
             streamer=streamer_name,
             game=game_name,
             source_url=state.stream_info.url,
@@ -980,9 +1094,20 @@ class Pipeline:
             highlight_score=float(top[0].final_score or top[0].score),
             moment_type="hype",
             transformation_mode="top3",
+            narration_language=language,
         )
         result = organizer.save_clip(final, metadata, transcript_text="")
+        reason = self._narration_gate_reason(info)
+        if reason:
+            return self._quarantine_clip(result, f"top-3 countdown voice missing: {reason}")
+        measured = self._measured_commentary(info, result, "top3")
+        if measured:
+            self._annotate_clip_json(result, measured)
         self._write_post_file_safe(result.video_path, metadata, state.stream_info)
+        try:
+            variety.record(streamer_name, "top3", hook_style, "")
+        except Exception as exc:
+            logger.warning("Could not record variety state for top-3: %s", exc)
         return result
 
     def _write_post_file_safe(
@@ -1060,6 +1185,8 @@ class Pipeline:
         narration_seconds: float = 0.0,
         callout_seconds: float = 0.0,
         can_trim_moment: bool = True,
+        breakdown_voiced: bool = False,
+        breakdown_seconds: float = 0.0,
     ) -> dict[str, float]:
         """E5: fit moment + replay inside output.max_final_seconds and raise commentary coverage.
 
@@ -1086,8 +1213,11 @@ class Pipeline:
         if moment + rlen > max_final and can_trim_moment:
             moment = max(6.0, max_final - rlen)
         commentary = (narration_seconds + callout_seconds) if mode != "raw" else 0.0
+        # The slow-mo replay only counts as commentary when breakdown speech is voiced over it,
+        # and then only for as long as that speech lasts.
+        replay_credit = min(rlen, max(0.0, float(breakdown_seconds))) if breakdown_voiced else 0.0
         total = moment + rlen
-        coverage = (commentary + rlen) / total if total > 0 else 0.0
+        coverage = (commentary + replay_credit) / total if total > 0 else 0.0
         if (
             mode != "raw"
             and can_trim_moment
@@ -1096,11 +1226,11 @@ class Pipeline:
             and min_ratio > 0
         ):
             floor = float(self.config.get("analysis.min_clip_seconds", 15))
-            target = max(floor, (commentary + rlen) / min_ratio - rlen)
+            target = max(floor, (commentary + replay_credit) / min_ratio - rlen)
             if target < moment:
                 moment = target
                 total = moment + rlen
-                coverage = (commentary + rlen) / total if total > 0 else 0.0
+                coverage = (commentary + replay_credit) / total if total > 0 else 0.0
         return {
             "moment": round(moment, 3),
             "replay_window": round(window, 3),
@@ -1152,6 +1282,7 @@ class Pipeline:
         gate_non_gameplay: bool = False,
         queued: bool = False,
         stream_info: StreamInfo | None = None,
+        caption_preset: int | None = None,
     ) -> ClipResult | None:
         """Run Phase 4 video assembly/export when installed, else persist raw segment + metadata.
 
@@ -1246,6 +1377,15 @@ class Pipeline:
             narr_words / (_WORDS_PER_SECOND * max(0.5, tts_speed)) if mode != "raw" else 0.0
         )
         callout_seconds = len(callout_text.split()) / _WORDS_PER_SECOND if callout_text else 0.0
+        breakdown_text = str(getattr(metadata, "breakdown_commentary", "") or "").strip()
+        has_breakdown_voice = mode == "breakdown" and bool(
+            breakdown_text or voice_breakdown_path is not None
+        )
+        breakdown_seconds_est = (
+            self._estimate_breakdown_seconds(breakdown_text, voice_breakdown_path, tts_speed)
+            if has_breakdown_voice
+            else 0.0
+        )
         duck_full = (
             mode != "raw"
             and highlight.music_risk == "HIGH_MUSIC_DETECTED"
@@ -1285,6 +1425,8 @@ class Pipeline:
                     freeze_duration=freeze_duration,
                     narration_seconds=narration_seconds,
                     callout_seconds=callout_seconds,
+                    breakdown_voiced=has_breakdown_voice,
+                    breakdown_seconds=breakdown_seconds_est,
                     can_trim_moment=False,
                 )
                 composed = composer.compose_story_beats(
@@ -1344,6 +1486,8 @@ class Pipeline:
                     freeze_duration=freeze_duration,
                     narration_seconds=narration_seconds,
                     callout_seconds=callout_seconds,
+                    breakdown_voiced=has_breakdown_voice,
+                    breakdown_seconds=breakdown_seconds_est,
                 )
                 new_dur = float(budget_plan["moment"])
                 if clip_dur > 0 and new_dur < clip_dur - 0.05:
@@ -1461,6 +1605,11 @@ class Pipeline:
                 export_kwargs["callout_start"] = 0.4 * moment_seconds if moment_seconds else None
             if duck_full:
                 export_kwargs["duck_full"] = True
+            style_preset, _preset_idx = self._resolve_caption_preset(
+                metadata.streamer, caption_preset
+            )
+            if style_preset is not None:
+                export_kwargs["style_preset"] = style_preset
             if mode == "breakdown":
                 export_kwargs["breakdown_commentary"] = metadata.breakdown_commentary
                 export_kwargs["breakdown_callout"] = metadata.breakdown_callout
@@ -1481,17 +1630,167 @@ class Pipeline:
             metadata=metadata,
             transcript_text=highlight.transcript_chunk,
         )
+        info = dict(getattr(exporter, "last_export_info", None) or {})
+        reason = self._narration_gate_reason(info)
+        if reason:
+            return self._quarantine_clip(result, reason)
+        extra: dict[str, Any] = {}
         if budget_plan:
-            self._annotate_clip_json(
-                result,
+            extra.update(
                 {
                     "commentary_ratio": budget_plan.get("coverage", 0.0),
+                    "commentary_coverage_estimate": budget_plan.get("coverage", 0.0),
                     "planned_total_seconds": budget_plan.get("total", 0.0),
                     "layout_kind": layout_kind or "auto",
-                },
+                }
             )
+        extra.update(self._measured_commentary(info, result, mode))
+        if extra:
+            self._annotate_clip_json(result, extra)
         self._write_post_file_safe(result.video_path, metadata, stream_info)
         return result
+
+    # ------------------------------------------------------------------
+    # Narration gate, measured commentary, caption presets
+    # ------------------------------------------------------------------
+
+    def _narration_gate_reason(self, info: dict[str, Any]) -> str:
+        """Non-empty reason when a non-raw clip was expected to be narrated but the mix never ran."""
+        if not bool(self.config.get("output.require_narration", True)):
+            return ""
+        if info.get("narration_expected") and not info.get("mix_ran"):
+            return (
+                "narration mix did not run (TTS failed or produced no audio); "
+                "clip would ship without voiceover"
+            )
+        return ""
+
+    def _quarantine_clip(self, result: ClipResult, reason: str) -> ClipResult:
+        """Move the clip files into <output_dir>/<quarantine_dir>/<game>/<streamer>/<date>/."""
+        qname = _sanitize_path_segment(
+            str(self.config.get("output.quarantine_dir", "_quarantine") or "_quarantine"),
+            "_quarantine",
+        )
+        meta = result.metadata
+        dest = (
+            self.output_dir
+            / qname
+            / _sanitize_path_segment(meta.game, "UnknownGame")
+            / _sanitize_path_segment(meta.streamer, "UnknownStreamer")
+            / date.today().isoformat()
+        )
+        dest.mkdir(parents=True, exist_ok=True)
+        video = Path(result.video_path)
+        stem = video.stem
+        target_stem = stem
+        n = 1
+        while (dest / f"{target_stem}{video.suffix}").exists():
+            n += 1
+            target_stem = f"{stem}_{n}"
+
+        def _move(src: Path, new_name: str) -> Path | None:
+            if not src.is_file():
+                return None
+            dst = dest / new_name
+            shutil.move(str(src), str(dst))
+            return dst
+
+        new_video = _move(video, f"{target_stem}{video.suffix}") or video
+        new_meta: Path | None = result.metadata_path
+        if result.metadata_path:
+            new_meta = _move(Path(result.metadata_path), f"{target_stem}.json") or result.metadata_path
+        _move(video.with_name(f"{stem}_transcript.txt"), f"{target_stem}_transcript.txt")
+        _move(video.with_name(f"{stem}_post.txt"), f"{target_stem}_post.txt")
+        quarantined = ClipResult(
+            video_path=new_video,
+            metadata_path=new_meta,
+            metadata=result.metadata,
+            duration_seconds=result.duration_seconds,
+            quarantined=True,
+            quarantine_reason=reason,
+        )
+        self._annotate_clip_json(quarantined, {"quarantined": True, "quarantine_reason": reason})
+        logger.warning("Quarantined %s: %s", new_video, reason)
+        return quarantined
+
+    def _measured_commentary(
+        self, info: dict[str, Any], result: ClipResult, mode: str
+    ) -> dict[str, Any]:
+        """Measured (post-export) commentary keys for the clip JSON; empty when nothing was measured."""
+        if not info or "spoken_seconds" not in info:
+            return {}
+        spoken = float(info.get("spoken_seconds") or 0.0)
+        final = float(info.get("final_duration") or 0.0) or float(result.duration_seconds or 0.0)
+        coverage = round(spoken / final, 3) if final > 0 else 0.0
+        out: dict[str, Any] = {
+            "commentary_seconds": round(spoken, 3),
+            "commentary_coverage": coverage,
+        }
+        min_ratio = float(self.config.get("output.min_commentary_ratio", 0.35))
+        if mode != "raw" and min_ratio > 0 and coverage < min_ratio:
+            logger.warning(
+                "Low commentary on %s: measured coverage %.3f < output.min_commentary_ratio %.2f.",
+                result.video_path,
+                coverage,
+                min_ratio,
+            )
+            out["low_commentary"] = True
+        return out
+
+    @staticmethod
+    def _estimate_breakdown_seconds(
+        text: str, voice_path: Path | None, tts_speed: float
+    ) -> float:
+        """Estimated spoken length of the breakdown commentary (custom WAV duration wins)."""
+        if voice_path is not None:
+            try:
+                import soundfile as sf
+
+                return float(sf.info(str(voice_path)).duration)
+            except Exception:
+                pass
+        return len(text.split()) / (_WORDS_PER_SECOND * max(0.5, tts_speed))
+
+    def _caption_presets(self) -> list[dict[str, Any]]:
+        if not bool(self.config.get("captions.rotate_styles", True)):
+            return []
+        raw = self.config.get("captions.style_presets", None) or []
+        return [dict(p) for p in raw if isinstance(p, dict)]
+
+    def _variety_state(self) -> VarietyState:
+        return VarietyState(
+            Path(self.config.get("general.cache_dir", "./.cache")) / "variety_state.json",
+            hook_styles=list(self.config.get("transformation.hook_styles", None) or []) or None,
+        )
+
+    def _next_caption_preset_index(self, variety: VarietyState, streamer: str) -> int | None:
+        presets = self._caption_presets()
+        if not presets:
+            return None
+        try:
+            return variety.next_caption_preset(len(presets), streamer=streamer)
+        except Exception as exc:
+            logger.debug("Caption preset rotation failed: %s", exc)
+            return None
+
+    def _resolve_caption_preset(
+        self, streamer: str, preset_index: int | None
+    ) -> tuple[dict[str, Any] | None, int | None]:
+        """Preset dict for the clip. When the caller did not rotate (MCP path) pick + persist one."""
+        presets = self._caption_presets()
+        if not presets:
+            return None, None
+        try:
+            idx = preset_index
+            if idx is None:
+                variety = self._variety_state()
+                idx = variety.next_caption_preset(len(presets), streamer=streamer)
+                variety.record_caption_preset(streamer, int(idx))
+            idx = int(idx) % len(presets)
+            return presets[idx], idx
+        except Exception as exc:
+            logger.debug("Caption preset resolution failed: %s", exc)
+            return None, None
 
     _CHAT_TIME_KEYS = ("offset_seconds", "timestamp", "time", "offset")
 

@@ -589,7 +589,13 @@ async def _render_single_highlight(
             **extra_kwargs,
         )
 
-    if config.get("output.write_post_file", True):
+    if getattr(clip_result, "quarantined", False):
+        logger.warning(
+            "Clip quarantined (%s); skipping post file: %s",
+            getattr(clip_result, "quarantine_reason", ""),
+            clip_result.video_path,
+        )
+    elif config.get("output.write_post_file", True):
         try:
             from ..output.post_writer import write_post_file
         except ImportError:
@@ -1472,7 +1478,7 @@ async def render_clip(
             )
 
             fresh_state = cache.load_state(clean_url)
-            if fresh_state is not None:
+            if fresh_state is not None and not getattr(clip_result, "quarantined", False):
                 fresh_state.clips = _merge_clip_results(fresh_state.clips, [clip_result])
                 cache.save_state(fresh_state)
 
@@ -1481,6 +1487,8 @@ async def render_clip(
                 "url": clean_url,
                 "mode": resolved_mode,
                 "bounds_adjustment": bounds_adjustment,
+                "quarantined": bool(getattr(clip_result, "quarantined", False)),
+                "quarantine_reason": getattr(clip_result, "quarantine_reason", ""),
                 "clip": clip_result.to_dict(),
             }
         )
@@ -1525,6 +1533,7 @@ async def render_all_selected(
             base_index = len(existing_clips)
 
             skipped_count = 0
+            quarantined_clips: list[ClipResult] = []
             rendered_modes: list[str] = []
             try:
                 for idx, highlight in enumerate(selected_highlights, start=1):
@@ -1543,6 +1552,9 @@ async def render_all_selected(
                         min_clip_index=base_index + idx,
                         language=_state_narration_language(config, state),
                     )
+                    if getattr(clip_result, "quarantined", False):
+                        quarantined_clips.append(clip_result)
+                        continue
                     rendered.append(clip_result)
                     rendered_modes.append(clip_mode)
                     # Persist incremental clip progress so mid-batch failures never orphan rendered files
@@ -1580,6 +1592,8 @@ async def render_all_selected(
                 "mode": base_mode,
                 "rendered_count": len(rendered),
                 "skipped_count": skipped_count,
+                "quarantined_count": len(quarantined_clips),
+                "quarantined": [c.to_dict() for c in quarantined_clips],
                 "status": state.status.name.lower(),
                 "clips": [
                     {**c.to_dict(), "mode": m}

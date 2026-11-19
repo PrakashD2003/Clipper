@@ -42,11 +42,14 @@ def plan_item_windows(
 
 
 def build_countdown_filtergraph(
-    narration_windows: list[tuple[float, float]], total: float
+    narration_windows: list[tuple[float, float]],
+    total: float,
+    target_lufs: float | None = None,
 ) -> str:
     """FFmpeg filtergraph: stream bed (input 0) ducked under each narration (inputs 1..N).
 
     Narration inputs are normalised to 48 kHz stereo and delayed to their window start.
+    When `target_lufs` is given the mixed track gets the same final loudnorm as single clips.
     """
     duck = "+".join(f"between(t,{s:.3f},{e:.3f})" for s, e in narration_windows) or "0"
     parts = [
@@ -60,9 +63,10 @@ def build_countdown_filtergraph(
             f"[{i}:a]aresample=48000,aformat=channel_layouts=stereo,adelay={ms}|{ms}[n{i}]"
         )
         labels.append(f"[n{i}]")
+    norm = f",loudnorm=I={target_lufs:g}:TP=-1.5:LRA=11,aresample=48000" if target_lufs is not None else ""
     parts.append(
         f"{''.join(labels)}amix=inputs={len(labels)}:duration=first:normalize=0,"
-        f"atrim=0:{total:.3f}[aout]"
+        f"atrim=0:{total:.3f}{norm}[aout]"
     )
     return ";".join(parts)
 
@@ -111,11 +115,13 @@ def build_top3_compilation(
     *,
     item_seconds: float | None = None,
     narrator: Any = None,
+    info: dict[str, Any] | None = None,
 ) -> Path:
     """Render a countdown Short (#3 -> #1) from three downloaded segments.
 
     `item_segments`, `peak_offsets`, `facecams` and `countdown_lines` are given in play order
-    (#3 first). Total length is capped at 57 s.
+    (#3 first). Total length is capped at 57 s. When `info` is given it is filled with what
+    actually happened: `mix_ran`, `narration_expected`, `spoken_seconds`, `final_duration`.
     """
     from moviepy import VideoFileClip, concatenate_videoclips
 
@@ -185,6 +191,8 @@ def build_top3_compilation(
             cursor += float(getattr(clip, "duration", 0.0) or 0.0)
 
         current = raw_mp4
+        spoken_seconds = 0.0
+        mix_ran = False
         card_windows: list[tuple[float, float]] = []
         wavs: list[Path] = []
         if narrator is not None:
@@ -196,6 +204,7 @@ def build_top3_compilation(
                     continue
                 dur = narrator._probe_audio_duration(wav) or 2.5
                 wavs.append(Path(wav))
+                spoken_seconds += float(dur)
                 card_windows.append((start + 0.2, min(total, start + 0.2 + float(dur))))
         if wavs and has_audio:
             mixed = work / "top3_mixed.mp4"
@@ -204,7 +213,11 @@ def build_top3_compilation(
                 cmd += ["-i", str(w)]
             cmd += [
                 "-filter_complex",
-                build_countdown_filtergraph(card_windows, total),
+                build_countdown_filtergraph(
+                    card_windows,
+                    total,
+                    target_lufs=float(config.get("transformation.target_lufs", -14) or -14),
+                ),
                 "-map", "0:v", "-map", "[aout]",
                 "-c:v", "copy", "-c:a", str(config.get("video.audio_codec", "aac") or "aac"),
                 str(mixed),
@@ -212,8 +225,18 @@ def build_top3_compilation(
             try:
                 subprocess.run(cmd, check=True, capture_output=True)
                 current = mixed
+                mix_ran = True
             except subprocess.CalledProcessError as exc:
                 logger.warning("Countdown mix failed (%s); continuing without voice.", exc)
+        if not mix_ran and has_audio and narrator is not None:
+            normalize = getattr(narrator, "normalize_audio", None)
+            if callable(normalize):
+                try:
+                    normed = normalize(current, work / "top3_norm.mp4")
+                    if Path(normed).is_file():
+                        current = Path(normed)
+                except Exception as exc:
+                    logger.warning("Top-3 loudness normalization failed (%s); continuing.", exc)
 
         codec = str(config.get("video.codec", "libx264") or "libx264")
         crf = int(config.get("video.crf", 23) or 23)
@@ -231,6 +254,13 @@ def build_top3_compilation(
             )
         else:
             shutil.copyfile(current, out)
+        if info is not None:
+            info["mix_ran"] = mix_ran
+            info["narration_expected"] = bool(
+                narrator is not None and any(str(l).strip() for l in countdown_lines)
+            )
+            info["spoken_seconds"] = round(spoken_seconds, 3) if mix_ran else 0.0
+            info["final_duration"] = round(total, 3)
         return out
     finally:
         shutil.rmtree(work, ignore_errors=True)

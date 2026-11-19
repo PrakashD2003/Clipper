@@ -150,7 +150,7 @@ class TestCopyrightRiskDetection:
         assert conf == 0.0
 
     def test_detect_continuous_speech_no_gaps_returns_clean(self, tmp_path: Path) -> None:
-        """When speech covers the clip without gaps >= 0.4s, return CLEAN without reading file."""
+        """When speech covers the clip without gaps >= 0.4s, nothing was tested: UNKNOWN, not CLEAN."""
         detector = CopyrightRiskDetector()
         chord = _generate_sine_chord(duration=5.0)
         wav_path = _create_wav_file(tmp_path / "speech_masked.wav", chord)
@@ -163,16 +163,16 @@ class TestCopyrightRiskDetection:
             WordTimestamp(text="four", start=4.3, end=5.0),
         ]
         risk, conf = detector.detect(wav_path, clip_start=0.0, clip_end=5.0, word_timestamps=words)
-        assert risk == "CLEAN"
+        assert risk == "UNKNOWN"
         assert conf == 0.0
 
-    def test_detect_short_clip_returns_clean(self, tmp_path: Path) -> None:
+    def test_detect_short_clip_returns_unknown(self, tmp_path: Path) -> None:
         detector = CopyrightRiskDetector()
         chord = _generate_sine_chord(duration=1.0)
         wav_path = _create_wav_file(tmp_path / "short.wav", chord)
 
         risk, conf = detector.detect(wav_path, clip_start=0.0, clip_end=0.3)
-        assert risk == "CLEAN"
+        assert risk == "UNKNOWN"
         assert conf == 0.0
 
     def test_detect_disabled_via_config_returns_clean(self, tmp_path: Path) -> None:

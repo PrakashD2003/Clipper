@@ -106,5 +106,6 @@ def test_E11_post_file_contents(tmp_path: Path) -> None:
     assert "Nobody noticed this" in text
     assert "Original stream by Fleet: https://youtube.com/watch?v=abc" in text
     assert "#GTA6 #Shorts" in text
-    assert "Tick YouTube's 'Altered or synthetic content' disclosure (AI voice)" in text
+    assert "AI voiceover: YouTube requires the 'Altered or synthetic content' label" in text
+    assert "Tick YouTube's" not in text
     assert "Post at most 2–3 Shorts per day" in text
