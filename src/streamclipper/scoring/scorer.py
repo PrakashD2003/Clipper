@@ -1,8 +1,11 @@
 """Abstract Scorer interface with signal fusion, transcript chunking, and YPP metadata validation."""
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+import hashlib
+import json
 import logging
 import math
+import os
 from pathlib import Path
 from typing import Any
 
@@ -79,11 +82,25 @@ class Scorer(ABC):
         chunks = self._chunk_transcript(transcript)
 
         raw_highlights: list[Highlight] = []
-        for chunk in chunks:
+        ckpt_path = self._checkpoint_path(chunks)
+        done: dict[str, list[dict[str, Any]]] = self._load_checkpoint(ckpt_path)
+        for idx, chunk in enumerate(chunks):
+            if str(idx) in done:
+                try:
+                    raw_highlights.extend(Highlight.from_dict(d) for d in done[str(idx)])
+                    continue
+                except Exception as exc:
+                    logger.warning("Ignoring unreadable scoring checkpoint entry %d: %s", idx, exc)
+                    done.pop(str(idx), None)
+            if not chunk.text.strip():
+                continue
             chunk_loudness = self._find_overlapping(loudness_spikes, chunk)
             chunk_chat = self._find_overlapping(chat_spikes, chunk)
             highlights = self._score_chunk(chunk, chunk_loudness, chunk_chat)
             raw_highlights.extend(highlights)
+            done[str(idx)] = [h.to_dict() for h in highlights]
+            self._save_checkpoint(ckpt_path, done)
+        self._delete_checkpoint(ckpt_path)
 
         valid_highlights: list[Highlight] = []
         for h in raw_highlights:
@@ -123,13 +140,11 @@ class Scorer(ABC):
             h.final_score = self._compute_weighted_score(h, loudness_spikes, chat_spikes)
             valid_highlights.append(h)
 
-        deduped = self._deduplicate(valid_highlights)
-
         limit = self.max_clips if max_clips is None else max(0, int(max_clips))
-        eligible = [h for h in deduped if h.final_score >= self.min_score]
+        eligible = [h for h in valid_highlights if h.final_score >= self.min_score]
 
-        # Copyright-risk penalty must run BEFORE ranking/truncation so music-heavy
-        # moments can actually be displaced by clean candidates (or fall below min_score).
+        # Copyright-risk penalty runs on all candidates BEFORE dedupe so a music-heavy
+        # moment cannot shadow a clean overlapping candidate during deduplication.
         if eligible and audio_path is not None and Path(audio_path).is_file():
             try:
                 from ..analysis.copyright_risk import CopyrightRiskDetector
@@ -138,8 +153,17 @@ class Scorer(ABC):
                 if detector.enabled:
                     penalty = float(self.config.get("analysis.music_penalty_factor", 0.80))
                     for h in eligible:
-                        h.word_timestamps = self._extract_words_for_range(transcript, h.start, h.end)
-                        risk, conf = detector.detect_highlight(audio_path, h)
+                        try:
+                            h.word_timestamps = self._extract_words_for_range(transcript, h.start, h.end)
+                            risk, conf = detector.detect_highlight(audio_path, h)
+                        except Exception as exc:
+                            logger.warning(
+                                "Copyright risk detection failed for highlight [%.1f, %.1f]: %s",
+                                h.start, h.end, exc,
+                            )
+                            h.music_risk = "UNKNOWN"
+                            h.music_confidence = 0.0
+                            continue
                         h.music_risk = risk
                         h.music_confidence = conf
                         if risk == "HIGH_MUSIC_DETECTED":
@@ -148,7 +172,8 @@ class Scorer(ABC):
             except Exception as exc:
                 logger.debug("Copyright risk detection skipped during scoring: %s", exc)
 
-        selected = sorted(eligible, key=lambda h: h.final_score, reverse=True)[:limit]
+        deduped = self._deduplicate(eligible)
+        selected = sorted(deduped, key=lambda h: h.final_score, reverse=True)[:limit]
 
         for h in selected:
             h.word_timestamps = self._extract_words_for_range(transcript, h.start, h.end)
@@ -159,6 +184,53 @@ class Scorer(ABC):
             h.chat_burst = self._extract_chat_burst(h, chat_spikes)
 
         return selected
+
+    # ------------------------------------------------------------------
+    # Per-chunk scoring checkpoint
+    # ------------------------------------------------------------------
+
+    def _checkpoint_path(self, chunks: list[TranscriptChunk]) -> Path | None:
+        """Return the scoring checkpoint path for this chunk set (None when no chunks)."""
+        if not chunks:
+            return None
+        model = str(getattr(self, "model", None) or self.config.get("llm.model", ""))
+        key = f"{model}|{len(chunks)}|{chunks[0].text}|{chunks[-1].text}"
+        digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+        cache_dir = Path(str(self.config.get("general.cache_dir", "./.cache")))
+        return cache_dir / f"scoring_ckpt_{digest}.json"
+
+    @staticmethod
+    def _load_checkpoint(path: Path | None) -> dict[str, list[dict[str, Any]]]:
+        if path is None or not path.is_file():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            chunks = data.get("chunks") if isinstance(data, dict) else None
+            return dict(chunks) if isinstance(chunks, dict) else {}
+        except Exception as exc:
+            logger.warning("Ignoring unreadable scoring checkpoint %s: %s", path, exc)
+            return {}
+
+    @staticmethod
+    def _save_checkpoint(path: Path | None, done: dict[str, list[dict[str, Any]]]) -> None:
+        if path is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps({"chunks": done}), encoding="utf-8")
+            os.replace(tmp, path)
+        except Exception as exc:
+            logger.warning("Could not write scoring checkpoint %s: %s", path, exc)
+
+    @staticmethod
+    def _delete_checkpoint(path: Path | None) -> None:
+        if path is None:
+            return
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("Could not delete scoring checkpoint %s: %s", path, exc)
 
     # ------------------------------------------------------------------
     # Abstract method — subclass must implement
@@ -297,11 +369,20 @@ class Scorer(ABC):
         receive a quiet-moment floor (``0.85 * highlight.score``) so hilarious or
         visual-detail moments without loud yelling can still pass selection while
         ranking below signal-backed picks of the same LLM score.
+
+        Renormalization is stream-wide by design (guardrail 9): a modality is
+        dropped only when it has no spikes anywhere in the stream, never per highlight.
         """
         loudness_overlap = self._signal_overlap_score(highlight, loudness_spikes)
         chat_overlap = self._signal_overlap_score(highlight, chat_spikes)
         highlight.loudness_score = loudness_overlap
         highlight.chat_score = chat_overlap
+
+        if (loudness_spikes and loudness_overlap == 0.0) or (chat_spikes and chat_overlap == 0.0):
+            logger.debug(
+                "Highlight [%.1f, %.1f] overlaps no loudness/chat spikes (loudness=%.2f, chat=%.2f)",
+                highlight.start, highlight.end, loudness_overlap, chat_overlap,
+            )
 
         raw_llm_score = float(highlight.score) if math.isfinite(float(highlight.score)) else 0.0
         llm_score = min(10.0, max(0.0, raw_llm_score))
@@ -476,12 +557,33 @@ class Scorer(ABC):
             if isinstance(sample, list):
                 messages.extend(sample)
 
-        # Deduplicate by non-empty message text and return at most 5
-        seen: set[str] = set()
-        unique: list[dict[str, Any]] = []
+        def _offset(msg: dict[str, Any]) -> float | None:
+            for key in ("offset_seconds", "time", "offset"):
+                val = msg.get(key)
+                if val is None or isinstance(val, bool):
+                    continue
+                try:
+                    f = float(val)
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(f):
+                    return f
+            return None
+
+        in_range: list[tuple[float, dict[str, Any]]] = []
         for msg in messages:
             if not isinstance(msg, dict):
                 continue
+            off = _offset(msg)
+            if off is not None and not (h_start <= off <= h_end):
+                continue
+            in_range.append((off if off is not None else float("inf"), msg))
+        in_range.sort(key=lambda item: item[0])  # stable; offset-less messages last
+
+        # Deduplicate by non-empty message text and return at most 5
+        seen: set[str] = set()
+        unique: list[dict[str, Any]] = []
+        for _, msg in in_range:
             raw_text = msg.get("message")
             if raw_text is None:
                 raw_text = msg.get("text")

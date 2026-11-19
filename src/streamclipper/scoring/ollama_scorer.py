@@ -8,6 +8,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+import httpx
 import ollama
 
 from ..config import Config, VALID_TRANSFORMATION_MODES
@@ -40,6 +41,17 @@ _CODE_FENCE_RE = re.compile(
 
 class OllamaConnectionError(RuntimeError):
     """Raised when Ollama is unreachable or the configured model is not available."""
+
+
+class OllamaTimeoutError(OllamaConnectionError):
+    """Raised when an Ollama request times out (the server is reachable but slow)."""
+
+
+def _is_timeout(exc: BaseException) -> bool:
+    """Return True for read/request timeouts (not connection refused or 404)."""
+    if isinstance(exc, (httpx.TimeoutException, TimeoutError)):
+        return True
+    return "timed out" in str(exc).lower()
 
 
 def _as_str(value: Any, default: str = "") -> str:
@@ -185,6 +197,12 @@ class OllamaScorer(Scorer):
         )
         self.temperature: float = float(config.get("llm.temperature", 0.3))
         self.timeout: float = float(config.get("llm.timeout_seconds", 120))
+        provider = _as_str(config.get("llm.provider", "ollama"), "ollama").lower()
+        if provider != "ollama":
+            logger.warning(
+                "llm.provider is %r but OllamaScorer only supports 'ollama'; using Ollama anyway.",
+                provider,
+            )
         self.client = ollama.Client(host=self.base_url, timeout=self.timeout)
         self._load_prompts()
 
@@ -227,6 +245,10 @@ class OllamaScorer(Scorer):
                     response = self.client.generate(**fallback_kwargs)
                     return _extract_response_text(response)
                 except Exception as retry_exc:
+                    if _is_timeout(retry_exc):
+                        raise OllamaTimeoutError(
+                            f"Ollama request timed out for model '{self.model}': {retry_exc}"
+                        ) from retry_exc
                     raise OllamaConnectionError(
                         f"Cannot connect to Ollama at {self.base_url} for model '{self.model}': "
                         f"{retry_exc}. Ensure Ollama is running (`ollama serve`) and run "
@@ -251,6 +273,10 @@ class OllamaScorer(Scorer):
                     status = getattr(retry_exc, "status_code", None)
                     detail = str(retry_exc)
                 except Exception as retry_exc:
+                    if _is_timeout(retry_exc):
+                        raise OllamaTimeoutError(
+                            f"Ollama request timed out for model '{self.model}': {retry_exc}"
+                        ) from retry_exc
                     raise OllamaConnectionError(
                         f"Cannot connect to Ollama at {self.base_url} for model '{self.model}': "
                         f"{retry_exc}. Ensure Ollama is running (`ollama serve`) and run "
@@ -268,6 +294,10 @@ class OllamaScorer(Scorer):
                 f"pulled (`ollama pull {self.model}`)."
             ) from exc
         except Exception as exc:
+            if _is_timeout(exc):
+                raise OllamaTimeoutError(
+                    f"Ollama request timed out after {self.timeout}s for model '{self.model}': {exc}"
+                ) from exc
             raise OllamaConnectionError(
                 f"Cannot connect to Ollama at {self.base_url} for model '{self.model}': "
                 f"{exc}. Ensure Ollama is running (`ollama serve`) and run "
@@ -372,7 +402,23 @@ class OllamaScorer(Scorer):
                     '`{"highlights": [...]}`) with no extra commentary.'
                 )
 
-            raw_text = self._call_generate(prompt, json_format=True)
+            raw_text = ""
+            for timeout_try in (1, 2):
+                try:
+                    raw_text = self._call_generate(prompt, json_format=True)
+                    break
+                except OllamaTimeoutError as exc:
+                    if timeout_try == 1:
+                        logger.warning(
+                            "Ollama timed out on chunk [%.1f, %.1f]; retrying once: %s",
+                            chunk.start, chunk.end, exc,
+                        )
+                        continue
+                    logger.warning(
+                        "Ollama timed out twice on chunk [%.1f, %.1f]; skipping chunk: %s",
+                        chunk.start, chunk.end, exc,
+                    )
+                    return []
             try:
                 return self._parse_response(raw_text, chunk_offset=chunk.start)
             except (json.JSONDecodeError, ValueError) as exc:
@@ -436,10 +482,10 @@ class OllamaScorer(Scorer):
             if start is None or end is None or end <= start:
                 continue
 
-            # If model emitted chunk-relative offsets (starts before chunk_offset and ends
-            # within chunk_duration) for a non-zero chunk, shift to absolute stream time.
+            # If the whole range lies before chunk_offset it is clearly chunk-relative;
+            # shift to absolute stream time. Otherwise treat it as already absolute.
             applied_offset = 0.0
-            if chunk_offset > 0.0 and start < chunk_offset and end <= chunk_duration:
+            if chunk_offset > 0.0 and end < chunk_offset:
                 applied_offset = chunk_offset
                 start += applied_offset
                 end += applied_offset
@@ -462,7 +508,7 @@ class OllamaScorer(Scorer):
                     if b_start is None or b_end is None or b_end <= b_start:
                         sub_clips = []
                         break
-                    if applied_offset > 0.0 and b_end <= chunk_duration:
+                    if applied_offset > 0.0 and b_end < chunk_offset:
                         b_start += applied_offset
                         b_end += applied_offset
                     sub_clips.append(
@@ -517,6 +563,10 @@ class OllamaScorer(Scorer):
             hook_title=_as_str(highlight.title),
             description=_as_str(highlight.reason),
             quote=_as_str(highlight.best_quote),
+            narration_style=_as_str(
+                self.config.get("transformation.narration_style", "adaptive"), "adaptive"
+            )
+            or "adaptive",
         )
         existing_intro = _as_str(highlight.narration_intro)
         existing_outro = _as_str(highlight.narration_outro)
