@@ -1,6 +1,7 @@
 """Constant-memory streamed loudness spike detection using librosa and soundfile."""
 from __future__ import annotations
 
+import logging
 import math
 from pathlib import Path
 
@@ -11,6 +12,8 @@ from scipy.signal import find_peaks
 
 from ..config import Config
 from ..models import SignalType, TimeRange
+
+logger = logging.getLogger(__name__)
 
 
 class LoudnessDetector:
@@ -39,7 +42,9 @@ class LoudnessDetector:
             raise FileNotFoundError(f"Audio file not found: {path}")
 
         rms_db, hop_duration = self._compute_rms_db(path)
-        spikes = self._find_spikes(rms_db, hop_duration)
+        spikes = self._find_spikes(
+            rms_db, hop_duration, audio_duration=float(sf.info(str(path)).duration)
+        )
         return self._merge_nearby(spikes)
 
     def _compute_rms_db(self, audio_path: Path) -> tuple[np.ndarray, float]:
@@ -83,14 +88,27 @@ class LoudnessDetector:
         rms_db = librosa.amplitude_to_db(rms, ref=np.max)
         return rms_db, float(self.window_seconds)
 
-    def _find_spikes(self, rms_db: np.ndarray, hop_duration: float) -> list[TimeRange]:
+    def _find_spikes(
+        self,
+        rms_db: np.ndarray,
+        hop_duration: float,
+        audio_duration: float | None = None,
+    ) -> list[TimeRange]:
         """Find peaks above mean + threshold_std * std_dev with 0-10 scores and metadata['peak_time']."""
         if rms_db.size < 2:
+            logger.info(
+                "Loudness spike detection skipped: audio too short (%d RMS frame(s), need >= 2).",
+                rms_db.size,
+            )
             return []
 
         mean_db = float(np.mean(rms_db))
         std_db = float(np.std(rms_db))
         if std_db < 1e-6:
+            logger.info(
+                "Loudness spike detection skipped: audio is flat (RMS dB std %.2e < 1e-6).",
+                std_db,
+            )
             return []
 
         threshold = mean_db + self.threshold_std * std_db
@@ -124,7 +142,12 @@ class LoudnessDetector:
 
             start = max(0.0, (left_idx - 1) * hop_duration)
             end = min(total_duration, (right_idx + 2) * hop_duration)
-            peak_time = float(idx * hop_duration)
+            # RMS frames are 2 * hop long (center=False): peak_time is the frame centre.
+            peak_time = float(idx * hop_duration + hop_duration)
+            peak_time = min(
+                peak_time,
+                audio_duration if audio_duration is not None else total_duration,
+            )
 
             spikes.append(
                 TimeRange(
