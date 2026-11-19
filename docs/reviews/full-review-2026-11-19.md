@@ -145,3 +145,96 @@ Sequencing notes:
 
 **Totals:** Critical 0 · High 2 · Medium 16 · Low 24 · Architecture 10 (1 new) · Feature gaps 12.
 **Verification:** 2/2 high findings CONFIRMED; 6 further items CONFIRMED by the lead (M1, M13, L16, L23, A5, A3/A4 cross-refs). **REJECTED: 0.** Excluded: 2 (1 already-fixed, 1 non-defect).
+
+---
+
+## Fix log — branch `fix/full-review-2026-11-19`
+
+Scope (user-approved): every finding, every architecture item, every feature gap, plus the two excluded items (X1 = dedupe-before-penalty from the footer note, X2 = short/flat-audio non-defect). REJECTED = 0, so there was nothing there to fix.
+
+Commits (one per batch, each from its own worktree, merged with `--no-ff`): H1 `374b08a` (lead) · E `75867eb` · B `ff043c3` · D `3ac5eaa` · F `f6706e1` · A2 `405a3ce` · A `a39b1cb` · C `55584d0` · integration `587905f` (lead) · docs (the commit that adds this log).
+
+| ID | Status | Commit | Test added |
+| :--- | :--- | :--- | :--- |
+| H1 | fixed | 374b08a (+ ff043c3 per-highlight try) | test_scorer::TestMusicPenaltyAffectsSelection::test_detector_receives_word_timestamps_before_detection; test_mcp_server::test_submit_highlights_detector_receives_word_timestamps |
+| H2 | fixed | a39b1cb | test_pipeline::test_h2_existing_clip_is_not_overwritten |
+| M1 | fixed | ff043c3 | test_scorer::test_M1_chat_burst_filters_range_sorts_dedupes_caps |
+| M2 | fixed | ff043c3 | test_scorer::test_M2_chunk_offset_shift_only_when_end_before_offset |
+| M3 | fixed | ff043c3 | test_scorer::test_M3_timeout_retries_once_then_returns_empty, test_M3_connection_error_still_raises |
+| M4 | fixed | 3ac5eaa, a39b1cb, 55584d0 | test_chat::test_M4_scrape_raises_chat_scrape_error_on_ytdlp_failure, test_M4_scrape_without_live_chat_file_returns_empty; test_pipeline::test_m4_chat_scrape_failure_propagates_and_is_not_marked_complete, test_m4_empty_chat_writes_header_only_csv_and_is_not_rescraped; test_mcp_server::test_M4_consumer_chat_scrape_error_keeps_state_retryable_and_empty_cached |
+| M5 | fixed | f6706e1 | test_cache_cli::test_M5_truncated_state_returns_none_and_quarantines |
+| M6 | fixed | a39b1cb + 587905f (cache persistence) | test_pipeline::test_m6_larger_max_clips_reruns_scoring; test_cache_cli::test_M6_requested_max_clips_round_trips_through_cache |
+| M7 | fixed | 55584d0 | test_mcp_server::test_M7_G9_second_render_all_selected_renders_nothing_new |
+| M8 | fixed | 55584d0 | test_mcp_server::test_M8_omitted_mode_uses_config_transformation_mode |
+| M9 | fixed | 55584d0 | test_mcp_server::test_M9_submit_and_render_clip_reject_out_of_bounds_duration |
+| M10 | fixed | ff043c3, 55584d0 | test_scorer::test_M10_scoring_detection_error_marks_unknown_no_penalty; test_mcp_server::test_M10_mcp_detector_runs_in_thread_and_failure_sets_unknown |
+| M11 | fixed | 405a3ce (narrator raises), a39b1cb (exporter catches) | test_assembly_review_fixes::test_M11_failing_ffmpeg_raises_runtime_error; test_assembly::test_m11_mix_failure_keeps_unnarrated_video_and_clears_windows |
+| M12 | fixed | 405a3ce | test_assembly_review_fixes::test_M12_explicit_kokoro_falls_back_to_edge_tts |
+| M13 | fixed | a39b1cb | test_assembly::test_m13_narration_card_alone_generates_and_burns_ass |
+| M14 | fixed | 75867eb | test_loudness::test_M14_peak_time_is_frame_centre_clamped_to_duration |
+| M15 | fixed | 75867eb | test_transcriber::test_M15_align_failure_falls_back_to_faster_whisper, test_M15_align_failure_without_faster_whisper_returns_unaligned |
+| M16 | fixed | 3ac5eaa (+ 587905f pipeline callers pass `video_id`; MCP relies on the new offline id parse) | test_download::test_M16_cached_segment_returned_without_network |
+| L1 | fixed | 3ac5eaa | test_download::test_L1_fractional_starts_map_to_distinct_files_and_missing_sidecar_redownloads |
+| L2 | fixed | 3ac5eaa | test_download::test_L2_classifier_bot_check_and_429_first_and_specific_phrases |
+| L3 | fixed | 3ac5eaa | test_download::test_L3_live_and_upcoming_streams_rejected |
+| L4 | fixed | 3ac5eaa | test_chat::test_L4_bad_action_does_not_drop_rest_and_super_chat_kept |
+| L5 | fixed | 3ac5eaa | test_discovery::test_L5_G6_filters_live_status_age_and_title |
+| L6 | fixed | 3ac5eaa | test_chat::test_L6_sample_window_end_exclusive_except_final_bin |
+| L7 | fixed (documented + debug log; numbers kept per guardrail 9) | ff043c3 | test_scorer::test_L7_debug_log_when_highlight_overlaps_no_spikes |
+| L8 | fixed | 405a3ce | test_assembly_review_fixes::test_L8_words_inside_breakdown_window_dropped |
+| L9 | fixed | 405a3ce, a39b1cb | test_assembly_review_fixes::test_L9_captions_stderr_logged_and_retry_only_nvenc; test_assembly::test_l9_ffmpeg_stderr_tail_logged_on_failure |
+| L10 | fixed | 405a3ce | test_assembly_review_fixes::test_L10_kpipeline_cached_and_release_clears, test_L10_prepare_narration_tracks_releases |
+| L11 | fixed | 405a3ce (composer), 587905f (pipeline remaps from actual durations) | test_assembly_review_fixes::test_L11_invalid_trim_warns_and_records_beat_durations (pipeline remap: no dedicated test) |
+| L12 | fixed | a39b1cb | test_pipeline::test_l12_assembly_lock_depends_on_tts_engine |
+| L13 | fixed | a39b1cb | test_pipeline::test_l13_close_failure_is_logged_at_debug |
+| L14 | fixed | f6706e1 (+ 587905f updated the old `auto` exit-0 assertion) | test_cache_cli::test_L14_auto_exits_nonzero_on_failure_and_clip_wraps_valueerror |
+| L15 | fixed | f6706e1 (+ new tests/conftest.py cache_clear) | test_config::test_L15_detect_hardware_profile_is_memoized |
+| L16 | fixed | f6706e1 | test_config::test_L16_hardware_detection_failure_logs_warning |
+| L17 | fixed | 55584d0 | test_mcp_server::test_L17_cleanup_temp_with_url_acquires_url_lock |
+| L18 | fixed | 55584d0 | test_mcp_server::test_L18_failed_state_recovered_before_stage_logic_in_analyze_signals |
+| L19 | fixed | 55584d0 | test_mcp_server::test_L19_render_all_selected_reports_resolved_mode_per_clip |
+| L20 | fixed | 55584d0 | test_mcp_server::test_L20_chat_cache_filename_uses_sanitized_video_id_like_cli |
+| L21 | fixed | a39b1cb, 587905f | none (fakes widened to the real signatures; exercised by the existing pipeline tests) |
+| L22 | fixed | a39b1cb | test_pipeline::test_l22_ignored_beats_logged |
+| L23 | fixed | ff043c3 (thresholds, provider, narration_style), 405a3ce + 587905f (replay badge) | test_copyright_risk::test_L23_threshold_config_keys; test_scorer::test_L23_provider_warning_and_narration_style_in_prompt; test_assembly_review_fixes::test_L23_replay_badge_text_from_config, test_L23_instant_replay_badge_uses_composer_config |
+| L24 | fixed (logging only, no control-flow change) | 405a3ce | none |
+| A1 | fixed via M1 | ff043c3 | see M1 |
+| A2 | fixed via M14 | 75867eb | see M14 |
+| A3 | fixed via H1 | 374b08a | see H1 |
+| A4 | fixed via H2 | a39b1cb | see H2 (MCP keeps its own `_next_available_clip_index`; both now probe for a free index) |
+| A5 | fixed | f6706e1 | test_cache_cli::test_A5_cache_key_canonicalizes_youtube_urls_and_loads_legacy |
+| A6 | fixed via M6 + G9 + L18 + M4 | see rows | see rows |
+| A7 | fixed via M8 | 55584d0 | see M8 |
+| A8 | fixed via M11 + M13 | see rows | see rows |
+| A9 | fixed (L10 + L12 + opt-in cross-process `gpu.lock`, default off) | a39b1cb | test_pipeline::test_a9_cross_process_gpu_lock_creates_and_releases_file |
+| A10 | fixed via L1 + L11 | see rows | see rows |
+| G1 | fixed | 75867eb | test_transcriber::test_G1b_faster_whisper_passes_vad_filter (+ M15 tests) |
+| G2 | fixed | ff043c3 | test_copyright_risk::test_G2_all_gaps_failing_returns_unknown |
+| G3 | fixed | ff043c3 (+ 587905f `list_all` skip) | test_scorer::test_G3_checkpoint_skips_completed_chunks_on_rerun; test_cache_cli::test_G3_scoring_checkpoint_files_are_not_listed_as_states |
+| G4 | fixed | ff043c3 | test_scorer::test_G4_empty_chunk_text_not_sent_to_scorer |
+| G5 | fixed (retries are a constant 3 because the download functions take no config; the `download.retries` key exists but is not read) | 3ac5eaa | test_download::test_G5b_audio_options_include_retries; test_chat::test_G5b_chat_options_include_retries |
+| G6 | fixed | 3ac5eaa | test_discovery::test_L5_G6_filters_live_status_age_and_title |
+| G7 | fixed | 405a3ce + 587905f (exporter passes clip_duration) | test_assembly_review_fixes::test_G7_text_truncated_to_budget_at_sentence_boundary |
+| G8 | partial: profile-face cascade added; multi-position sampling already existed (up to 50 evenly spaced frames), so it was unchanged | 405a3ce | test_assembly_review_fixes::test_G8_profile_cascade_used_and_capture_released |
+| G9 | fixed | a39b1cb (CLI), 55584d0 (MCP `force`) | test_pipeline::test_g9_resume_does_not_rerender_finished_clips; test_mcp_server::test_M7_G9_second_render_all_selected_renders_nothing_new |
+| G10 | fixed (`analysis.skip_high_music`, default false) | a39b1cb | test_pipeline::test_g10_skip_high_music_skips_flagged_highlight, test_g10_default_keeps_flagged_highlight |
+| G11 | fixed | 55584d0 | test_mcp_server::test_G11_submit_highlights_dedupes_overlaps_and_caps_to_max_clips |
+| G12 | fixed | f6706e1 (identity test), docs commit (guide `--mode` lists include `auto`/`breakdown`) | test_config::test_G12_default_config_copies_are_identical |
+| X1 | fixed (penalty before dedupe) | ff043c3 | test_scorer::test_X1_dedupe_runs_after_copyright_penalty |
+| X2 | fixed (info log, no behaviour change) | 75867eb | test_loudness::test_X2_skip_logged_for_short_and_flat_audio |
+
+**Per-merge verification.** The workers ran in parallel and exhausted the paging file (`WinError 1455`), so their own full runs were unreliable. After all merges, each merge commit was re-tested sequentially in a clean detached worktree with `PYTHONPATH=<worktree>/src` (import path verified):
+
+| Commit | Result |
+| :--- | :--- |
+| 374b08a H1 | 632 passed |
+| f92ca8f +E | 637 passed |
+| e11ffe2 +B | 649 passed |
+| f026415 +D | 660 passed |
+| 0926e6c +F | 1 failed, 665 passed: `test_auto_command_discovers_and_invokes_parallel_pipeline` asserted the old exit 0 that L14 deliberately changes (the test file belongs to batch A, so F could not edit it) |
+| e9d8ccf +A2 | same 1 failure, 676 passed |
+| f75cccf +A | same 1 failure, 691 passed |
+| ea31837 +C | same 1 failure, 701 passed |
+| 587905f integration | 705 passed |
+
+Counts: 66 IDs (2 H + 16 M + 24 L + 10 A + 12 G + 2 X). Fixed 65 · partial 1 (G8) · skipped 0 · failed 0. Rejected in review: 0. Not merged into `main` and not pushed.
