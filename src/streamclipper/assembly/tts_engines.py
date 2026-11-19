@@ -182,9 +182,20 @@ class ElevenLabsTTS:
 
     name = "elevenlabs"
 
-    def __init__(self, voice_id: str = "", model_id: str = "eleven_multilingual_v2") -> None:
+    DEFAULT_MODEL = "eleven_v4"
+
+    def __init__(
+        self,
+        voice_id: str = "",
+        model_id: str = DEFAULT_MODEL,
+        voice_settings: dict[str, Any] | None = None,
+        output_format: str = "mp3_44100_128",
+    ) -> None:
         self.voice_id = (voice_id or "").strip()
-        self.model_id = model_id or "eleven_multilingual_v2"
+        self.model_id = model_id or self.DEFAULT_MODEL
+        # None/empty = let ElevenLabs use the settings saved on the voice itself.
+        self.voice_settings = dict(voice_settings) if voice_settings else None
+        self.output_format = (output_format or "").strip()
 
     def available(self) -> bool:
         return bool(os.environ.get("ELEVENLABS_API_KEY", "").strip() and self.voice_id)
@@ -197,16 +208,16 @@ class ElevenLabsTTS:
 
         temp_mp3 = out_wav.with_name(f"{out_wav.stem}_elevenlabs.mp3")
         url = f"https://api.elevenlabs.io/v1/text-to-speech/{self.voice_id}"
+        if self.output_format:
+            url += f"?output_format={self.output_format}"
         headers = {
             "xi-api-key": api_key,
             "Content-Type": "application/json",
             "Accept": "audio/mpeg",
         }
-        payload = {
-            "text": text,
-            "model_id": self.model_id,
-            "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
-        }
+        payload: dict[str, Any] = {"text": text, "model_id": self.model_id}
+        if self.voice_settings:
+            payload["voice_settings"] = self.voice_settings
         try:
             req = urllib.request.Request(
                 url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST"

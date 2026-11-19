@@ -72,13 +72,20 @@ class TransformativeNarrator:
         self.elevenlabs_voice_id: str = str(
             config.get("transformation.elevenlabs_voice_id", "") or ""
         )
+        raw_vs = config.get("transformation.elevenlabs_voice_settings", {}) or {}
+        self.elevenlabs_voice_settings: dict[str, Any] = (
+            dict(raw_vs) if isinstance(raw_vs, dict) else {}
+        )
+        self.elevenlabs_output_format: str = str(
+            config.get("transformation.elevenlabs_output_format", "mp3_44100_128") or ""
+        )
         # Separate Hindi/Hinglish voice; falls back to the main voice when unset.
         self.elevenlabs_hinglish_voice_id: str = str(
             config.get("transformation.elevenlabs_hinglish_voice_id", "") or ""
         )
         self.elevenlabs_model_id: str = str(
-            config.get("transformation.elevenlabs_model_id", "eleven_multilingual_v2")
-            or "eleven_multilingual_v2"
+            config.get("transformation.elevenlabs_model_id", "eleven_v4")
+            or "eleven_v4"
         )
         raw_duck = config.get("transformation.duck_stream_volume", 0.18)
         self.duck_volume: float = float(0.18 if raw_duck is None else raw_duck)
@@ -275,7 +282,12 @@ class TransformativeNarrator:
         self, text: str, output_wav: Path, language: str | None = None
     ) -> Path | None:
         """Synthesize with ElevenLabs when ELEVENLABS_API_KEY & voice_id are set."""
-        eng = ElevenLabsTTS(self._elevenlabs_voice_for(language), self.elevenlabs_model_id)
+        eng = ElevenLabsTTS(
+            self._elevenlabs_voice_for(language),
+            self.elevenlabs_model_id,
+            voice_settings=self.elevenlabs_voice_settings,
+            output_format=self.elevenlabs_output_format,
+        )
         return eng.synthesize(text, output_wav)
 
     def _synthesize_chatterbox(self, text: str, output_wav: Path) -> Path | None:
