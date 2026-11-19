@@ -9,6 +9,8 @@ from typing import Any
 import pandas as pd
 import yt_dlp
 
+from ._ytdlp_opts import apply_ytdlp_auth_opts
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_RETRIES = 3
@@ -82,6 +84,7 @@ class ChatScraper:
             "fragment_retries": _DEFAULT_RETRIES,
             "extractor_retries": _DEFAULT_RETRIES,
         }
+        apply_ytdlp_auth_opts(ydl_opts)
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
