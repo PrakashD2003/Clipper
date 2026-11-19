@@ -32,6 +32,7 @@ Score each potential clip moment on these axes:
 - Opens with "uh so yeah" or "anyway as I was saying"
 - Generic gameplay with no reaction
 - Technical discussions, settings menus, loading screens
+- Pre-game intro talk, countdown screens ("starting soon"), cutscenes, and loading screens, UNLESS the streamer's on-cam reaction to it is the content; in that case set `moment_type` to `reaction`
 - Streamer talking to chat about donations/subscriptions
 
 ## Input Data
@@ -54,7 +55,7 @@ Return a JSON array of highlight objects. Return an EMPTY array `[]` if nothing 
     "start": <seconds from stream start>,
     "end": <seconds from stream start>,
     "score": <integer 1-10>,
-    "moment_type": "<one of: funny | fail | graphics_detail | hype | clutch | chat_chaos | lore_secret | analysis>",
+    "moment_type": "<one of: funny | fail | graphics_detail | hype | clutch | chat_chaos | lore_secret | analysis | reaction>",
     "title": "<hook title, max 8 words, present tense>",
     "reason": "<1 sentence explaining why this works as a clip>",
     "best_quote": "<the most memorable spoken line in this moment>",

@@ -1,5 +1,12 @@
 Write a HOOK TITLE for a gaming stream clip. This text appears ON the video itself for 4 seconds.
 
+HOOK STYLE: {hook_style}
+- question: phrase it as a curiosity-driving question
+- hot_take: a bold, confident opinion about the moment
+- countdown: tease a ranked/numbered moment (e.g. "#1 ...")
+- nobody_noticed: point out a detail most viewers missed
+- If the style is empty or unknown, pick whichever fits best.
+
 RULES:
 1. Maximum 8 words
 2. Present tense ("Tim can't believe..." not "Tim couldn't believe...")
