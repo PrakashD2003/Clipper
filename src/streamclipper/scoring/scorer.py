@@ -132,7 +132,10 @@ class Scorer(ABC):
         self.adjust_clip_bounds = bool(config.get("analysis.adjust_clip_bounds", True))
         self.weights = config.get(
             "analysis.weights",
-            {"loudness": 0.25, "chat_velocity": 0.25, "llm_score": 0.50},
+            {"loudness": 0.20, "chat_velocity": 0.20, "heatmap": 0.20, "llm_score": 0.40},
+        )
+        self.heatmap_quiet_boost_min_heat = float(
+            config.get("analysis.heatmap.quiet_boost_min_heat", 0.7)
         )
 
     # ------------------------------------------------------------------
@@ -146,8 +149,13 @@ class Scorer(ABC):
         chat_spikes: list[TimeRange],
         chunk_minutes: int | None = None,
         only_with_signals: bool = True,
+        *,
+        heatmap_spikes: list[TimeRange] | None = None,
     ) -> list[tuple[TranscriptChunk, list[TimeRange], list[TimeRange]]]:
         """Chunk transcript and pair each chunk with overlapping loudness/chat spikes.
+
+        A chunk overlapping a ``heatmap_spikes`` peak also counts as "having signals" so
+        quiet-but-rewatched moments (exploration, graphics) are not filtered out.
 
         Shared by ``Scorer.score_and_select()`` and the MCP server's
         ``get_transcript_chunks`` tool.
@@ -157,7 +165,12 @@ class Scorer(ABC):
         for chunk in chunks:
             chunk_loudness = self._find_overlapping(loudness_spikes, chunk)
             chunk_chat = self._find_overlapping(chat_spikes, chunk)
-            if only_with_signals and not chunk_loudness and not chunk_chat:
+            if (
+                only_with_signals
+                and not chunk_loudness
+                and not chunk_chat
+                and not (heatmap_spikes and self._find_overlapping(heatmap_spikes, chunk))
+            ):
                 continue
             candidates.append((chunk, chunk_loudness, chunk_chat))
         return candidates
@@ -169,6 +182,8 @@ class Scorer(ABC):
         chat_spikes: list[TimeRange],
         max_clips: int | None = None,
         audio_path: Path | str | None = None,
+        *,
+        heatmap_spikes: list[TimeRange] | None = None,
     ) -> list[Highlight]:
         """Full scoring pipeline: chunk -> score -> filter duration -> fuse -> dedupe -> rank -> select."""
         chunks = self._chunk_transcript(transcript)
@@ -235,7 +250,12 @@ class Scorer(ABC):
             elif self.fit_highlight_bounds(h, loudness_spikes).rejected:
                 continue
 
-            h.final_score = self._compute_weighted_score(h, loudness_spikes, chat_spikes)
+            if heatmap_spikes:
+                h.final_score = self._compute_weighted_score(
+                    h, loudness_spikes, chat_spikes, heatmap_spikes=heatmap_spikes
+                )
+            else:
+                h.final_score = self._compute_weighted_score(h, loudness_spikes, chat_spikes)
             valid_highlights.append(h)
 
         limit = self.max_clips if max_clips is None else max(0, int(max_clips))
@@ -488,8 +508,15 @@ class Scorer(ABC):
         highlight: Highlight,
         loudness_spikes: list[TimeRange],
         chat_spikes: list[TimeRange],
+        *,
+        heatmap_spikes: list[TimeRange] | None = None,
     ) -> float:
         """Fuse LLM score with available signal modalities using dynamically renormalized weights.
+
+        The YouTube "Most replayed" heatmap is a fourth modality: its overlap score is the
+        max heat (0..10) of heatmap peaks overlapping the highlight. A highlight on a strong
+        heatmap peak (heat >= ``analysis.heatmap.quiet_boost_min_heat``) with LLM score >= 7
+        gets the same ``0.85 * score`` quiet-moment floor as top-tier AI picks.
 
         When a signal modality is unavailable for the stream (e.g. VOD has no live
         chat replay so ``chat_spikes`` is empty), its weight is redistributed
@@ -506,6 +533,7 @@ class Scorer(ABC):
         chat_overlap = self._signal_overlap_score(highlight, chat_spikes)
         highlight.loudness_score = loudness_overlap
         highlight.chat_score = chat_overlap
+        heat_overlap = self._heatmap_overlap_score(highlight, heatmap_spikes or [])
 
         if (loudness_spikes and loudness_overlap == 0.0) or (chat_spikes and chat_overlap == 0.0):
             logger.debug(
@@ -519,21 +547,47 @@ class Scorer(ABC):
         w_llm = float(self.weights.get("llm_score", 0.50))
         w_loud = float(self.weights.get("loudness", 0.25)) if loudness_spikes else 0.0
         w_chat = float(self.weights.get("chat_velocity", 0.25)) if chat_spikes else 0.0
-        weight_sum = w_llm + w_loud + w_chat
+        w_heat = float(self.weights.get("heatmap", 0.0)) if heatmap_spikes else 0.0
+        weight_sum = w_llm + w_loud + w_chat + w_heat
 
         if weight_sum > 0.0:
             weighted = (
                 (w_llm / weight_sum) * llm_score
                 + (w_loud / weight_sum) * loudness_overlap
                 + (w_chat / weight_sum) * chat_overlap
+                + (w_heat / weight_sum) * heat_overlap
             )
         else:
             weighted = 0.0
 
         if w_llm > 0.0 and llm_score >= 8.5:
             weighted = max(weighted, min(10.0, llm_score * 0.85))
+        elif (
+            w_llm > 0.0
+            and w_heat > 0.0
+            and llm_score >= 7.0
+            and heat_overlap >= self.heatmap_quiet_boost_min_heat * 10.0
+        ):
+            # Quiet but heavily rewatched moment (exploration / graphics): do not drop it
+            # just because loudness and chat are flat.
+            weighted = max(weighted, min(10.0, llm_score * 0.85))
 
         return min(10.0, max(0.0, weighted))
+
+    @staticmethod
+    def _heatmap_overlap_score(highlight: Highlight, spikes: list[TimeRange]) -> float:
+        """Max heat (0.0-10.0) of heatmap peaks overlapping the highlight.
+
+        Heatmap bins are coarse (minutes), so any overlap counts fully (regional boost)
+        rather than being scaled by the overlapped fraction.
+        """
+        best = 0.0
+        for spike in spikes:
+            if spike.end <= highlight.start or spike.start >= highlight.end:
+                continue
+            if math.isfinite(spike.score) and spike.score > best:
+                best = spike.score
+        return min(best, 10.0)
 
     # ------------------------------------------------------------------
     # Deduplication
