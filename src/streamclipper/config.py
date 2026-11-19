@@ -1,10 +1,14 @@
 """Configuration loading with defaults, validation, merging, and dynamic hardware auto-tuning."""
 from dataclasses import dataclass
+import functools
+import logging
 import math
 from pathlib import Path
 from typing import Any
 import subprocess
 import yaml
+
+logger = logging.getLogger(__name__)
 
 _REPO_DEFAULT_CONFIG_PATH = Path(__file__).parent.parent.parent / "config.default.yaml"
 _PACKAGE_DEFAULT_CONFIG_PATH = Path(__file__).parent / "config.default.yaml"
@@ -51,6 +55,7 @@ def _detect_nvenc_support() -> bool:
         return False
 
 
+@functools.lru_cache(maxsize=None)
 def detect_hardware_profile(check_nvenc: bool = True) -> HardwareProfile:
     """Inspect CUDA GPU properties and FFmpeg encoders to build a HardwareProfile."""
     try:
@@ -131,8 +136,8 @@ def detect_hardware_profile(check_nvenc: bool = True) -> HardwareProfile:
                 llm_model="qwen3:4b",
                 video_codec="libx264",
             )
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Hardware detection failed (%s); falling back to cpu_only", exc)
 
     return HardwareProfile(
         tier="cpu_only",

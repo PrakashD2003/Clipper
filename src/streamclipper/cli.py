@@ -132,7 +132,10 @@ def clip(
     if force:
         call_kwargs["force"] = True
 
-    clips = asyncio.run(pipeline.process_stream(**call_kwargs))
+    try:
+        clips = asyncio.run(pipeline.process_stream(**call_kwargs))
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
 
     if not clips:
         console.print("[yellow]No clips were generated for this stream.[/]")
@@ -266,6 +269,8 @@ def auto(
         f"[bold green]✅ Finished auto-run:[/] {total_clips} clip(s) generated across "
         f"{len(streams) - failures}/{len(streams)} stream(s)."
     )
+    if failures:
+        ctx.exit(1)
 
 
 @cli.command()

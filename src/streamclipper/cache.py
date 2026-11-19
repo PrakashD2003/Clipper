@@ -1,11 +1,13 @@
 """Step-level caching for pipeline resume capability."""
 import hashlib
 import json
+import logging
 import os
 from datetime import datetime
 from pathlib import Path
 
 from .config import Config
+from .download.audio import _extract_youtube_id_from_url
 from .models import (
     ClipResult,
     Highlight,
@@ -15,6 +17,24 @@ from .models import (
     TimeRange,
     TranscriptionResult,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write text to ``path`` atomically via a same-directory temp file and os.replace."""
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
+def _quarantine(path: Path) -> None:
+    """Rename a corrupt cache file to ``<name>.corrupt`` (best effort)."""
+    try:
+        os.replace(path, path.with_name(path.name + ".corrupt"))
+    except OSError as exc:
+        logger.warning("Could not quarantine corrupt cache file %s: %s", path, exc)
 
 
 class StepCache:
@@ -26,6 +46,12 @@ class StepCache:
 
     def get_cache_key(self, url: str) -> str:
         """Generate a stable cache key from a URL."""
+        clean = url.strip()
+        video_id = _extract_youtube_id_from_url(clean)
+        material = f"yt:{video_id}" if video_id else clean
+        return hashlib.sha256(material.encode()).hexdigest()[:16]
+
+    def _legacy_cache_key(self, url: str) -> str:
         return hashlib.sha256(url.encode()).hexdigest()[:16]
 
     def get_cache_path(self, url: str) -> Path:
@@ -52,47 +78,61 @@ class StepCache:
         }
         if state.transcript is not None:
             transcript_path = self.cache_dir / f"{key}_transcript.json"
-            with open(transcript_path, "w", encoding="utf-8") as f:
-                f.write(state.transcript.to_json())
+            _atomic_write_text(transcript_path, state.transcript.to_json())
 
-        with open(cache_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
+        _atomic_write_text(cache_path, json.dumps(data, indent=2))
 
     def load_state(self, url: str) -> PipelineState | None:
         """Load cached pipeline state (including transcript and spikes) if it exists."""
         key = self.get_cache_key(url)
         cache_path = self.get_cache_path(url)
         if not cache_path.exists():
+            legacy_key = self._legacy_cache_key(url)
+            legacy_path = self.cache_dir / f"{legacy_key}.json"
+            if legacy_key == key or not legacy_path.exists():
+                return None
+            cache_path = legacy_path
+            key = legacy_key
+
+        try:
+            with open(cache_path, encoding="utf-8") as f:
+                data = json.load(f)
+
+            state = PipelineState(
+                stream_info=StreamInfo.from_dict(data["stream_info"]),
+                status=PipelineStatus(int(data["status"])),
+                loudness_spikes=[
+                    TimeRange.from_dict(s) for s in (data.get("loudness_spikes") or [])
+                ],
+                chat_spikes=[
+                    TimeRange.from_dict(s) for s in (data.get("chat_spikes") or [])
+                ],
+                highlights=[
+                    Highlight.from_dict(h) for h in (data.get("highlights") or [])
+                ],
+                selected_highlights=[
+                    Highlight.from_dict(h) for h in (data.get("selected_highlights") or [])
+                ],
+                clips=[ClipResult.from_dict(c) for c in (data.get("clips") or [])],
+                analysis_complete=bool(data.get("analysis_complete", False)),
+            )
+            if data.get("audio_path"):
+                state.audio_path = Path(data["audio_path"])
+        except (json.JSONDecodeError, KeyError, ValueError, TypeError) as exc:
+            logger.warning("Corrupt cache state %s (%s); quarantining", cache_path, exc)
+            _quarantine(cache_path)
             return None
-
-        with open(cache_path, encoding="utf-8") as f:
-            data = json.load(f)
-
-        state = PipelineState(
-            stream_info=StreamInfo.from_dict(data["stream_info"]),
-            status=PipelineStatus(int(data["status"])),
-            loudness_spikes=[
-                TimeRange.from_dict(s) for s in (data.get("loudness_spikes") or [])
-            ],
-            chat_spikes=[
-                TimeRange.from_dict(s) for s in (data.get("chat_spikes") or [])
-            ],
-            highlights=[
-                Highlight.from_dict(h) for h in (data.get("highlights") or [])
-            ],
-            selected_highlights=[
-                Highlight.from_dict(h) for h in (data.get("selected_highlights") or [])
-            ],
-            clips=[ClipResult.from_dict(c) for c in (data.get("clips") or [])],
-            analysis_complete=bool(data.get("analysis_complete", False)),
-        )
-        if data.get("audio_path"):
-            state.audio_path = Path(data["audio_path"])
 
         transcript_path = self.cache_dir / f"{key}_transcript.json"
         if data.get("has_transcript") and transcript_path.exists():
-            with open(transcript_path, encoding="utf-8") as tf:
-                state.transcript = TranscriptionResult.from_dict(json.load(tf))
+            try:
+                with open(transcript_path, encoding="utf-8") as tf:
+                    state.transcript = TranscriptionResult.from_dict(json.load(tf))
+            except (json.JSONDecodeError, KeyError, ValueError, TypeError) as exc:
+                logger.warning(
+                    "Corrupt cache transcript %s (%s); quarantining", transcript_path, exc
+                )
+                _quarantine(transcript_path)
 
         return state
 
@@ -127,7 +167,8 @@ class StepCache:
                         analysis_complete=bool(data.get("analysis_complete", False)),
                     )
                 )
-            except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+            except (json.JSONDecodeError, KeyError, ValueError, TypeError) as exc:
+                logger.warning("Skipping corrupt cache file %s: %s", cache_file, exc)
                 continue
         return states
 
