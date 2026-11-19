@@ -103,3 +103,13 @@ def test_C2_worker_is_standalone_cli() -> None:
         [sys.executable, str(src), "--help"], capture_output=True, text=True, timeout=60
     )
     assert res.returncode == 0 and "--ref" in res.stdout
+
+
+def test_elevenlabs_voice_settings_override_is_optional() -> None:
+    from streamclipper.assembly.tts_engines import ElevenLabsTTS
+
+    default = ElevenLabsTTS("v")
+    assert default.model_id == "eleven_v4" and default.voice_settings is None
+    custom = ElevenLabsTTS("v", "eleven_v4_turbo", voice_settings={"stability": 0.4}, output_format="")
+    assert custom.model_id == "eleven_v4_turbo"
+    assert custom.voice_settings == {"stability": 0.4} and custom.output_format == ""

@@ -159,7 +159,7 @@ def test_L4_elevenlabs_uses_per_language_voice(tmp_path, monkeypatch):
     used: list[str] = []
 
     class _FakeEleven:
-        def __init__(self, voice_id: str = "", model_id: str = "") -> None:
+        def __init__(self, voice_id: str = "", model_id: str = "", **_kw) -> None:
             self.voice_id = voice_id
 
         def available(self) -> bool:

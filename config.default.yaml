@@ -168,7 +168,9 @@ transformation:
   edge_tts_voice: "en-US-AndrewMultilingualNeural" # Edge-TTS voice ID (used when engine is edge-tts or auto fallback)
   elevenlabs_voice_id: ""              # ElevenLabs voice for English narration (uses ELEVENLABS_API_KEY from env or .env)
   elevenlabs_hinglish_voice_id: ""     # ElevenLabs voice for Hinglish narration ("" = use elevenlabs_voice_id)
-  elevenlabs_model_id: "eleven_multilingual_v2"
+  elevenlabs_model_id: "eleven_v4"     # Use the model your ElevenLabs voices were designed with (eleven_v4, eleven_v4_turbo, eleven_v3, eleven_multilingual_v2)
+  elevenlabs_voice_settings: {}        # {} = use the settings saved on the voice in ElevenLabs; or e.g. {stability: 0.4, similarity_boost: 0.8, style: 0.3, use_speaker_boost: true}
+  elevenlabs_output_format: "mp3_44100_128"
   tts_engines: [chatterbox, kokoro, edge-tts]  # Fallback chain, tried in order; ElevenLabs is auto-prepended when ELEVENLABS_API_KEY (env or .env) and elevenlabs_voice_id are set
   narration_language: "auto"            # auto | english | hinglish (auto = Hinglish when the transcript is Hindi/Urdu)
   streamer_languages: {}                # per-streamer override, case-insensitive, e.g. {CarryisLive: hinglish}

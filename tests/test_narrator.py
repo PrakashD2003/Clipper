@@ -129,7 +129,7 @@ class TestTransformativeNarratorConfig:
         assert narrator.voice == "am_puck"
         assert narrator.edge_tts_voice == "en-US-AndrewMultilingualNeural"
         assert narrator.elevenlabs_voice_id == ""
-        assert narrator.elevenlabs_model_id == "eleven_multilingual_v2"
+        assert narrator.elevenlabs_model_id == "eleven_v4"
         assert pytest.approx(narrator.duck_volume, 0.01) == 0.18
 
     def test_init_custom_overrides(self, custom_config: Config) -> None:
@@ -371,6 +371,9 @@ transformation:
             body = json.loads(req.data.decode("utf-8"))
             assert body["text"] == "ElevenLabs voiceover test"
             assert body["model_id"] == "eleven_multilingual_v2"
+            # No override: ElevenLabs uses the settings saved on the voice.
+            assert "voice_settings" not in body
+            assert "output_format=mp3_44100_128" in req.full_url
 
     def test_unknown_engine_falls_back_to_auto(self, base_config: Config, tmp_path: Path) -> None:
         narrator = TransformativeNarrator(base_config)
