@@ -617,3 +617,112 @@ class TestCLI:
         ok_res = runner.invoke(cli, ["--config", str(cfg_file), "--verbose", "status"])
         assert ok_res.exit_code == 0
         assert logging.getLogger("streamclipper").level == logging.DEBUG
+
+
+# ---------------------------------------------------------------------------
+# Review regression tests (A5, M5, L14)
+# ---------------------------------------------------------------------------
+
+
+def test_A5_cache_key_canonicalizes_youtube_urls_and_loads_legacy(tmp_path: Path) -> None:
+    import hashlib
+
+    cache = StepCache(_make_config(tmp_path))
+    vid = "dQw4w9WgXcQ"
+    spellings = [
+        f"https://youtu.be/{vid}",
+        f"https://www.youtube.com/watch?v={vid}",
+        f"https://www.youtube.com/watch?v={vid}&t=42s",
+        f"https://www.youtube.com/shorts/{vid}",
+        f"https://www.youtube.com/live/{vid}",
+    ]
+    keys = {cache.get_cache_key(u) for u in spellings}
+    assert keys == {hashlib.sha256(f"yt:{vid}".encode()).hexdigest()[:16]}
+    assert cache.get_cache_key(" https://example.com/x ") == hashlib.sha256(
+        b"https://example.com/x"
+    ).hexdigest()[:16]
+
+    # Legacy file keyed by sha256(raw url) still loads.
+    url = spellings[1]
+    state = _make_full_pipeline_state(url=url, include_transcript=False)
+    cache.save_state(state)
+    canonical = cache.get_cache_path(url)
+    legacy = cache.cache_dir / f"{hashlib.sha256(url.encode()).hexdigest()[:16]}.json"
+    canonical.rename(legacy)
+    loaded = cache.load_state(url)
+    assert loaded is not None
+    assert loaded.stream_info.url == url
+    cache.save_state(loaded)
+    assert canonical.exists()
+
+
+def test_M5_truncated_state_returns_none_and_quarantines(tmp_path: Path) -> None:
+    cache = StepCache(_make_config(tmp_path))
+    url = "https://youtube.com/watch?v=gta6_test"
+    cache.save_state(_make_full_pipeline_state(url=url, include_transcript=False))
+    path = cache.get_cache_path(url)
+    path.write_text(path.read_text(encoding="utf-8")[:30], encoding="utf-8")
+
+    assert cache.load_state(url) is None
+    assert not path.exists()
+    assert path.with_name(path.name + ".corrupt").exists()
+    assert not list(cache.cache_dir.glob("*.tmp"))
+
+
+def test_L14_auto_exits_nonzero_on_failure_and_clip_wraps_valueerror(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(
+        yaml.safe_dump({"general": {"cache_dir": str(tmp_path / ".cache")}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cli_mod, "console", Console(width=160, force_terminal=False))
+    _install_fake_torch(monkeypatch, cuda_available=False)
+
+    class _StubDiscovery:
+        def __init__(self, config: Config) -> None:
+            pass
+
+        def discover(self, game: str | None = None) -> list[StreamInfo]:
+            return [
+                StreamInfo(
+                    url="https://youtube.com/watch?v=aaaaaaaaaaa",
+                    title="A",
+                    platform=Platform.YOUTUBE,
+                    streamer="S",
+                    game="GTA 6",
+                    duration_seconds=100,
+                    video_id="aaaaaaaaaaa",
+                )
+            ]
+
+    class _StubPipeline:
+        def __init__(self, config: Config) -> None:
+            pass
+
+        async def process_streams_parallel(self, urls, **kwargs):
+            return [RuntimeError("boom") for _ in urls]
+
+        async def process_stream(self, **kwargs):
+            raise ValueError("bad mode")
+
+    import streamclipper.discovery.youtube as yt_mod
+
+    monkeypatch.setattr(yt_mod, "YouTubeDiscovery", _StubDiscovery)
+    # Stub the module so the test never imports torch/pandas via the real pipeline.
+    monkeypatch.setitem(
+        sys.modules, "streamclipper.pipeline", SimpleNamespace(Pipeline=_StubPipeline)
+    )
+
+    runner = CliRunner()
+    res = runner.invoke(cli, ["--config", str(cfg_file), "auto"])
+    assert res.exit_code == 1
+    assert "Finished auto-run" in res.output
+
+    res = runner.invoke(
+        cli, ["--config", str(cfg_file), "clip", "https://youtube.com/watch?v=aaaaaaaaaaa"]
+    )
+    assert res.exit_code == 1
+    assert "Error: bad mode" in res.output
+    assert "Traceback" not in res.output

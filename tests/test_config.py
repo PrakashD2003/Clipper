@@ -722,3 +722,48 @@ class TestDataModels:
         assert ps.status is PipelineStatus.PENDING
         assert ps.loudness_spikes == []
         assert ps.clips == []
+
+
+def test_L15_detect_hardware_profile_is_memoized(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_fake_torch(monkeypatch, cuda_available=False)
+    first = detect_hardware_profile()
+    # Changing the environment has no effect until the cache is cleared.
+    _install_fake_torch(
+        monkeypatch,
+        cuda_available=True,
+        name="NVIDIA GeForce RTX 4070",
+        total_memory=12_000_000_000,
+        major=8,
+        minor=9,
+    )
+    assert detect_hardware_profile() is first
+    detect_hardware_profile.cache_clear()
+    assert detect_hardware_profile().tier != "cpu_only"
+
+
+def test_L16_hardware_detection_failure_logs_warning(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    def _boom(idx: int = 0):
+        raise RuntimeError("cuda exploded")
+
+    fake_cuda = SimpleNamespace(is_available=lambda: True, get_device_properties=_boom)
+    fake_torch = types.ModuleType("torch")
+    fake_torch.cuda = fake_cuda  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    with caplog.at_level("WARNING", logger="streamclipper.config"):
+        hw = detect_hardware_profile()
+    assert hw.tier == "cpu_only"
+    assert "cuda exploded" in caplog.text
+
+
+def test_G12_default_config_copies_are_identical() -> None:
+    repo_root = Path(config_mod.__file__).resolve().parents[2]
+    root_copy = repo_root / "config.default.yaml"
+    pkg_copy = Path(config_mod.__file__).resolve().parent / "config.default.yaml"
+
+    def _norm(p: Path) -> str:
+        return p.read_bytes().decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+
+    assert _norm(root_copy) == _norm(pkg_copy)
