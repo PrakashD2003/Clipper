@@ -138,6 +138,7 @@ class Scorer(ABC):
                 if detector.enabled:
                     penalty = float(self.config.get("analysis.music_penalty_factor", 0.80))
                     for h in eligible:
+                        h.word_timestamps = self._extract_words_for_range(transcript, h.start, h.end)
                         risk, conf = detector.detect_highlight(audio_path, h)
                         h.music_risk = risk
                         h.music_confidence = conf

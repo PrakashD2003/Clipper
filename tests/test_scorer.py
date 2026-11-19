@@ -1862,3 +1862,30 @@ class TestMusicPenaltyAffectsSelection:
             selected = scorer.score_and_select(long_transcript, [], [], audio_path=audio)
 
         assert [h.title for h in selected] == ["Clean"]
+
+    def test_detector_receives_word_timestamps_before_detection(
+        self, config: Config, long_transcript: TranscriptionResult, tmp_path: Path
+    ) -> None:
+        """H1: word_timestamps must be populated before detect_highlight runs."""
+        h = _make_highlight(60.0, 100.0, 9.0, title="Speech")
+        expected = Scorer._extract_words_for_range(long_transcript, 60.0, 100.0)
+        assert expected, "fixture must contain words in the highlight range"
+        scorer = _StubScorer(config, canned=[h])
+        audio = tmp_path / "a.wav"
+        audio.write_bytes(b"RIFF")
+        seen: list[int] = []
+
+        def fake_detect(self, audio_path, hl):
+            seen.append(len(hl.word_timestamps))
+            return ("CLEAN", 0.0)
+
+        with (
+            patch(
+                "streamclipper.analysis.copyright_risk.CopyrightRiskDetector.detect_highlight",
+                fake_detect,
+            ),
+            patch.object(scorer, "_compute_weighted_score", side_effect=lambda h, *_: h.score),
+        ):
+            scorer.score_and_select(long_transcript, [], [], audio_path=audio)
+
+        assert seen == [len(expected)]

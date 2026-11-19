@@ -532,6 +532,43 @@ async def test_submit_highlights_invalid_json_returns_error(
     assert "Invalid highlights JSON" in data["error"]
 
 
+@pytest.mark.asyncio
+async def test_submit_highlights_detector_receives_word_timestamps(
+    mcp_env: tuple[Config, StepCache, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """H1: copyright detector must see the highlight's words, not an empty list."""
+    _, cache, tmp_path = mcp_env
+    url = "https://www.youtube.com/watch?v=cr123456789"
+    audio = tmp_path / "cr.wav"
+    audio.write_bytes(b"RIFF")
+    state = PipelineState(
+        stream_info=StreamInfo(
+            url=url, title="t", platform=Platform.YOUTUBE, streamer="s", game="g",
+            duration_seconds=3600, video_id="cr123456789",
+        ),
+        status=PipelineStatus.SCORING,
+        transcript=_make_sample_transcript(),
+        audio_path=audio,
+        analysis_complete=True,
+    )
+    cache.save_state(state)
+    seen: list[int] = []
+
+    def fake_detect(self: Any, audio_path: Any, hl: Any) -> tuple[str, float]:
+        seen.append(len(hl.word_timestamps))
+        return ("CLEAN", 0.0)
+
+    from streamclipper.analysis import copyright_risk
+
+    monkeypatch.setattr(copyright_risk.CopyrightRiskDetector, "detect_highlight", fake_detect)
+    payload = json.dumps([{"start": 95.0, "end": 125.0, "score": 9.0, "title": "Water"}])
+    data = _extract_json(
+        await mcp.call_tool("submit_highlights", {"url": url, "highlights": payload})
+    )
+    assert data["accepted_count"] == 1
+    assert seen == [6]
+
+
 # ---------------------------------------------------------------------------
 # 5. render_clip & render_all_selected (YPP modes + offline without Ollama)
 # ---------------------------------------------------------------------------

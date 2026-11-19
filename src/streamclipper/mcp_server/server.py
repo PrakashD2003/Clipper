@@ -1062,6 +1062,7 @@ async def submit_highlights(url: str, highlights: str) -> str:
 
                         detector = CopyrightRiskDetector(config)
                         if detector.enabled:
+                            highlight.word_timestamps = scorer._extract_words_for_range(state.transcript, highlight.start, highlight.end) if state.transcript is not None else []
                             risk, conf = detector.detect_highlight(state.audio_path, highlight)
                             highlight.music_risk = risk
                             highlight.music_confidence = conf
