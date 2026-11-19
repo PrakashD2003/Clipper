@@ -98,14 +98,14 @@ def _acquire_file_lock(lock_dir: Path, timeout: float | None = 600.0) -> Any:
     target_dir.mkdir(parents=True, exist_ok=True)
     lock_path = target_dir / "gpu.lock"
 
-    if not lock_path.is_file() or lock_path.stat().st_size == 0:
-        try:
+    try:
+        if not lock_path.is_file() or lock_path.stat().st_size == 0:
             with open(lock_path, "a+b") as init_fh:
                 if init_fh.tell() == 0:
                     init_fh.write(b"0")
                     init_fh.flush()
-        except OSError:
-            pass
+    except OSError:
+        pass
 
     fh = open(lock_path, "a+b")
     start_time = time.monotonic()
@@ -127,7 +127,16 @@ def _acquire_file_lock(lock_dir: Path, timeout: float | None = 600.0) -> Any:
         else:
             import fcntl
 
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            while True:
+                try:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError:
+                    if timeout is not None and (time.monotonic() - start_time) > timeout:
+                        raise TimeoutError(
+                            f"Timed out after {timeout:.1f}s waiting for GPU cross-process lock at {lock_path}"
+                        )
+                    time.sleep(0.1)
     except BaseException:
         fh.close()
         raise
@@ -146,10 +155,13 @@ def _release_file_lock(fh: Any) -> None:
             import fcntl
 
             fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         logger.debug("Ignoring error releasing GPU file lock: %s", exc)
     finally:
-        fh.close()
+        try:
+            fh.close()
+        except (OSError, ValueError):
+            pass
 
 
 class _AsyncNull:

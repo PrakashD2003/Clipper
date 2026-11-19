@@ -1418,16 +1418,23 @@ async def test_gpu_guard_acquires_cross_process_file_lock_when_enabled(
 
         def _try_second_lock() -> None:
             nonlocal acquired_simultaneously
-            import msvcrt
             import os
             try:
                 fh = open(lock_file, "a+b")
                 try:
                     if os.name == "nt":
+                        import msvcrt
+
                         fh.seek(0)
                         msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
                         acquired_simultaneously = True
                         msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+                    else:
+                        import fcntl
+
+                        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        acquired_simultaneously = True
+                        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
                 finally:
                     fh.close()
             except OSError:
