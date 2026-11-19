@@ -204,11 +204,13 @@ def _install_fake_faster_whisper(
             audio_path: str,
             language: str | None = None,
             word_timestamps: bool = False,
+            vad_filter: bool = False,
         ) -> tuple[Any, Any]:
             calls["transcribe"] = {
                 "audio_path": audio_path,
                 "language": language,
                 "word_timestamps": word_timestamps,
+                "vad_filter": vad_filter,
             }
             if events is not None:
                 events.append("fw_transcribe")
@@ -505,6 +507,7 @@ class TestTranscriberFallbackAndErrors:
             "audio_path": str(dummy_wav),
             "language": None,
             "word_timestamps": True,
+            "vad_filter": True,
         }
         assert result.language == "en"
         assert result.full_text == "Clutch escape!"
@@ -636,3 +639,50 @@ class TestTranscriptCaching:
         result = Transcriber(cfg).transcribe(audio_file)
         assert captured_lang == [None]
         assert result.language == "en"
+
+
+def test_M15_align_failure_falls_back_to_faster_whisper(
+    monkeypatch: pytest.MonkeyPatch, dummy_wav: Path
+) -> None:
+    events: list[str] = []
+    _install_fake_torch(monkeypatch, events=events)
+    _install_fake_whisperx(monkeypatch, events=events)
+
+    def _boom(**kwargs: Any) -> Any:
+        raise ValueError("No default align-model for language: xx")
+
+    sys.modules["whisperx"].load_align_model = _boom  # type: ignore[attr-defined]
+    fw_calls = _install_fake_faster_whisper(monkeypatch, events=events)
+
+    result = Transcriber(Config(hardware_profile=_make_cpu_profile())).transcribe(dummy_wav)
+
+    assert "fw_transcribe" in events
+    assert result.segments[0].words
+    assert fw_calls["transcribe"]["word_timestamps"] is True
+
+
+def test_M15_align_failure_without_faster_whisper_returns_unaligned(
+    monkeypatch: pytest.MonkeyPatch, dummy_wav: Path
+) -> None:
+    _install_fake_torch(monkeypatch)
+    _install_fake_whisperx(monkeypatch)
+
+    def _boom(**kwargs: Any) -> Any:
+        raise ValueError("no aligner")
+
+    sys.modules["whisperx"].load_align_model = _boom  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "faster_whisper", None)
+
+    result = Transcriber(Config(hardware_profile=_make_cpu_profile())).transcribe(dummy_wav)
+
+    assert result.full_text == "No way bro!"
+    assert result.segments[0].words == []
+
+
+def test_G1b_faster_whisper_passes_vad_filter(
+    monkeypatch: pytest.MonkeyPatch, dummy_wav: Path
+) -> None:
+    _install_fake_torch(monkeypatch)
+    fw_calls = _install_fake_faster_whisper(monkeypatch)
+    Transcriber(Config(hardware_profile=_make_cpu_profile()))._transcribe_faster_whisper(dummy_wav)
+    assert fw_calls["transcribe"]["vad_filter"] is True

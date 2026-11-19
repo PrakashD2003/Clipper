@@ -356,6 +356,29 @@ class TestLoudnessMergeAndEdgeCases:
 
         assert len(spikes) == 2
         assert spikes[0].start == 0.0
-        assert spikes[0].metadata["peak_time"] == 0.0
+        assert spikes[0].metadata["peak_time"] == 2.0  # centre of frame 0 (hop 2.0s)
         assert spikes[0].score == 10.0
         assert 5.0 <= spikes[1].score < 10.0
+
+
+def test_M14_peak_time_is_frame_centre_clamped_to_duration(tmp_path: Path):
+    detector = LoudnessDetector(_make_config(tmp_path))
+    rms_db = np.full(10, -60.0, dtype=np.float32)
+    rms_db[4] = 0.0
+    spikes = detector._find_spikes(rms_db, 2.0, audio_duration=100.0)
+    assert spikes[0].metadata["peak_time"] == 10.0  # frame start 8.0 + 2.0
+
+    clamped = detector._find_spikes(rms_db, 2.0, audio_duration=9.0)
+    assert clamped[0].metadata["peak_time"] == 9.0
+
+
+def test_X2_skip_logged_for_short_and_flat_audio(tmp_path: Path, caplog):
+    import logging
+
+    detector = LoudnessDetector(_make_config(tmp_path))
+    with caplog.at_level(logging.INFO, logger="streamclipper.analysis.loudness"):
+        assert detector._find_spikes(np.array([-10.0], dtype=np.float32), 2.0) == []
+        assert "too short" in caplog.text
+        caplog.clear()
+        assert detector._find_spikes(np.full(8, -20.0, dtype=np.float32), 2.0) == []
+        assert "flat" in caplog.text

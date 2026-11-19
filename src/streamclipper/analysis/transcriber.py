@@ -122,18 +122,36 @@ class Transcriber:
             asr_cleaned = True
 
             # Stage 2: Align ASR segments for word-level timestamps
-            model_a, metadata = whisperx.load_align_model(
-                language_code=detected_lang,
-                device=self.device,
-            )
-            aligned = whisperx.align(
-                result.get("segments", []),
-                model_a,
-                metadata,
-                audio,
-                self.device,
-                return_char_alignments=False,
-            )
+            try:
+                model_a, metadata = whisperx.load_align_model(
+                    language_code=detected_lang,
+                    device=self.device,
+                )
+                aligned = whisperx.align(
+                    result.get("segments", []),
+                    model_a,
+                    metadata,
+                    audio,
+                    self.device,
+                    return_char_alignments=False,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "WhisperX alignment failed for language %r (%s); keeping ASR output.",
+                    detected_lang,
+                    exc,
+                )
+                model_a = None
+                audio = None
+                _clear_cuda_cache()
+                try:
+                    import faster_whisper  # noqa: F401
+                except ImportError:
+                    return self._convert_aligned_segments(
+                        result.get("segments", []),
+                        detected_lang,
+                    )
+                return self._transcribe_faster_whisper(audio_path)
 
             # Stage 3: Free alignment model and audio buffer so Ollama has full VRAM in Phase 3
             del model_a, audio
@@ -234,6 +252,7 @@ class Transcriber:
                 str(audio_path),
                 language=fw_language,
                 word_timestamps=True,
+                vad_filter=True,
             )
             info_lang = getattr(info, "language", None)
             if info_lang:
