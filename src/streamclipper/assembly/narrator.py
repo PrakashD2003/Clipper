@@ -78,6 +78,11 @@ class TransformativeNarrator:
         self.duck_volume: float = float(0.18 if raw_duck is None else raw_duck)
         self._kokoro = KokoroTTS(self.voice, self.tts_speed)
 
+    @property
+    def _kpipelines(self) -> dict[str, Any]:
+        """Cached Kokoro pipelines (owned by the Kokoro engine)."""
+        return self._kokoro._pipelines
+
     def release(self) -> None:
         """Drop cached Kokoro pipelines and free GPU memory when available."""
         self._kokoro.clear()
@@ -139,7 +144,10 @@ class TransformativeNarrator:
             res = self._run_engine(name, clean_text, output_wav)
             if res is not None and res.is_file() and res.stat().st_size > 0:
                 return res
-            logger.info("TTS engine %s produced no audio; trying next", name)
+            if name == "kokoro":
+                logger.warning("Kokoro produced no audio (espeak-ng missing?); falling back to edge-tts")
+            else:
+                logger.info("TTS engine %s produced no audio; trying next", name)
         logger.debug("No TTS engine succeeded")
         return None
 
@@ -171,6 +179,7 @@ class TransformativeNarrator:
         if os.name == "nt" and not _is_espeak_available():
             logger.debug("espeak-ng not found on Windows; skipping Kokoro synthesis")
             return None
+        self._kokoro.espeak_check = lambda: _is_espeak_available()
         self._kokoro.voice = self.voice
         self._kokoro.speed = self.tts_speed
         return self._kokoro.synthesize(text, output_wav)

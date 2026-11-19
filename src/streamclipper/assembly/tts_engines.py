@@ -70,9 +70,13 @@ class KokoroTTS:
         self.voice = voice
         self.speed = float(speed)
         self._pipelines: dict[str, Any] = {}
+        self.espeak_check: Any = None  # optional override callable() -> bool
+
+    def _espeak_ok(self) -> bool:
+        return bool((self.espeak_check or _is_espeak_available)())
 
     def available(self) -> bool:
-        if os.name == "nt" and not _is_espeak_available():
+        if os.name == "nt" and not self._espeak_ok():
             return False
         try:
             import importlib.util
@@ -85,7 +89,7 @@ class KokoroTTS:
         self._pipelines.clear()
 
     def synthesize(self, text: str, out_wav: Path) -> Path | None:
-        if os.name == "nt" and not _is_espeak_available():
+        if os.name == "nt" and not self._espeak_ok():
             logger.debug("espeak-ng not found on Windows; skipping Kokoro")
             return None
         try:
