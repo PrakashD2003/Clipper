@@ -827,14 +827,40 @@ class Pipeline:
                 meta_kwargs["language"] = narration_language
 
             async with self._gpu_guard():
-                metadata = await asyncio.to_thread(
-                    scorer.generate_metadata,
-                    highlight,
-                    streamer_name,
-                    game_name,
-                    state.stream_info.url,
-                    **meta_kwargs,
-                )
+                try:
+                    metadata = await asyncio.to_thread(
+                        scorer.generate_metadata,
+                        highlight,
+                        streamer_name,
+                        game_name,
+                        state.stream_info.url,
+                        **meta_kwargs,
+                    )
+                except Exception as exc:
+                    logger.warning("LLM metadata generation failed (%s); using offline metadata from highlight.", exc)
+                    game_clean = re.sub(r"\W+", "", game_name) or "GTA6"
+                    streamer_clean = re.sub(r"\W+", "", streamer_name) or "Gaming"
+                    metadata = ClipMetadata(
+                        hook_title=highlight.title or "Stream Highlight",
+                        caption=f"{highlight.title or 'Stream Highlight'}\n{highlight.reason or ''}\nStreamer: {streamer_name} | Game: {game_name}",
+                        hashtags=[game_clean, f"{game_clean}Clips", streamer_clean, "Shorts", "Gaming"],
+                        streamer=streamer_name,
+                        game=game_name,
+                        source_url=state.stream_info.url,
+                        clip_start=highlight.start,
+                        clip_end=highlight.end,
+                        highlight_score=highlight.final_score or highlight.score,
+                        moment_type=highlight.moment_type,
+                        narration_intro=highlight.narration_intro,
+                        narration_outro=highlight.narration_outro,
+                        context_badge=highlight.context_badge,
+                        transformation_mode=clip_mode,
+                        breakdown_commentary=highlight.breakdown_commentary,
+                        breakdown_callout=highlight.breakdown_callout,
+                        music_risk=highlight.music_risk,
+                        music_confidence=highlight.music_confidence,
+                        narration_language=narration_language,
+                    )
                 metadata.transformation_mode = clip_mode
                 metadata.narration_language = narration_language
                 if clip_mode == "raw":
