@@ -8,10 +8,11 @@ from typing import Any
 import numpy as np
 from moviepy import CompositeVideoClip, ImageClip, VideoFileClip, concatenate_videoclips
 from moviepy.audio.AudioClip import AudioArrayClip
-from PIL import Image
+from PIL import Image, ImageFilter
 
 from ..config import Config
 from ..models import FacecamRegion, WordTimestamp
+from .layout import Box, LayoutGeometry, compute_layout
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +167,16 @@ class VideoComposer:
         self.zoom_duration = float(
             config.get("transformation.zoom_duration_seconds", 3.5)
         )
+        raw_fit = str(config.get("video.game_fit", "full") or "full").strip().lower()
+        self.game_fit = raw_fit if raw_fit in {"full", "balanced"} else "full"
+
+    def _resolve_layout(
+        self, layout_kind: str | None, facecam: FacecamRegion | None
+    ) -> LayoutGeometry:
+        kind = layout_kind or ("stacked" if facecam is not None else "blur_fill")
+        if facecam is None and kind in {"stacked", "reaction"}:
+            kind = "blur_fill"  # nothing to put in the facecam box
+        return compute_layout(kind, self.game_fit, self.width, self.height)
 
     def compose(
         self,
@@ -174,8 +185,13 @@ class VideoComposer:
         peak_offset: float | None = None,
         trim_range: tuple[float, float] | None = None,
         face_center_x: float | None = None,
+        layout_kind: str | None = None,
     ) -> CompositeVideoClip:
-        """Create a 9:16 vertical CompositeVideoClip using MoviePy v2 methods, optionally trimming download buffer."""
+        """Create a 9:16 vertical CompositeVideoClip using MoviePy v2 methods, optionally trimming download buffer.
+
+        ``layout_kind`` is "stacked" | "blur_fill" | "reaction"; None picks stacked with a facecam
+        else blur_fill. ``face_center_x`` is unused (kept for API compatibility).
+        """
         opened_by_us = isinstance(video_path, (str, Path))
         clip = VideoFileClip(str(video_path)) if opened_by_us else video_path
         all_sources = [clip]
@@ -195,14 +211,10 @@ class VideoComposer:
                     applied_trim_start = t_start
                     if effective_peak_offset is not None:
                         effective_peak_offset = max(0.0, effective_peak_offset - t_start)
-            if facecam is not None:
-                result = self._compose_with_facecam(
-                    clip, facecam, peak_offset=effective_peak_offset
-                )
-            else:
-                result = self._compose_gameplay_only(clip, face_center_x=face_center_x)
-                if effective_peak_offset is not None and self.punch_in_zoom > 1.0:
-                    result = self.apply_spike_zoom(result, effective_peak_offset)
+            layout = self._resolve_layout(layout_kind, facecam)
+            result = self._compose_layout(clip, facecam, layout)
+            if effective_peak_offset is not None and self.punch_in_zoom > 1.0:
+                result = self.apply_spike_zoom(result, effective_peak_offset)
         except Exception:
             if opened_by_us:
                 for c in all_sources:
@@ -275,54 +287,95 @@ class VideoComposer:
             ny1 = max(0, ny2 - new_h)
         return clip.cropped(x1=x1, y1=ny1, x2=x2, y2=ny2)
 
+    def _game_layer(self, clip: Any, box: Box) -> Any:
+        """Scale the source frame into ``box``: whole 16:9 frame (full) or 4:3 centre crop (balanced)."""
+        src = clip
+        if self.game_fit == "balanced":
+            target_ratio = box.w / box.h
+            if clip.w / clip.h > target_ratio:
+                crop_w = min(clip.w, int(round(clip.h * target_ratio)))
+                x1 = (clip.w - crop_w) // 2
+                src = clip.cropped(x1=x1, y1=0, x2=x1 + crop_w, y2=clip.h)
+            else:
+                crop_h = min(clip.h, int(round(clip.w / target_ratio)))
+                y1 = (clip.h - crop_h) // 2
+                src = clip.cropped(x1=0, y1=y1, x2=clip.w, y2=y1 + crop_h)
+        return src.resized((box.w, box.h)).with_position((box.x, box.y))
+
+    def _blur_background(self, clip: Any) -> Any:
+        """Game frame scaled to cover the canvas, Gaussian-blurred and darkened (~0.5)."""
+        target_ratio = self.width / self.height
+        if clip.w / clip.h > target_ratio:
+            crop_w = max(1, min(clip.w, int(round(clip.h * target_ratio))))
+            x1 = (clip.w - crop_w) // 2
+            cover = clip.cropped(x1=x1, y1=0, x2=x1 + crop_w, y2=clip.h)
+        else:
+            crop_h = max(1, min(clip.h, int(round(clip.w / target_ratio))))
+            y1 = (clip.h - crop_h) // 2
+            cover = clip.cropped(x1=0, y1=y1, x2=clip.w, y2=y1 + crop_h)
+
+        # Blur at quarter resolution (cheap), then upscale to the full canvas.
+        small = cover.resized((max(1, self.width // 4), max(1, self.height // 4)))
+
+        def _blur_dark(frame: np.ndarray) -> np.ndarray:
+            img = Image.fromarray(np.asarray(frame, dtype=np.uint8)).filter(
+                ImageFilter.GaussianBlur(radius=8)
+            )
+            return (np.asarray(img, dtype=np.float32) * 0.5).astype(np.uint8)
+
+        return (
+            small.image_transform(_blur_dark)
+            .resized((self.width, self.height))
+            .with_position((0, 0))
+        )
+
+    def _compose_layout(
+        self,
+        clip: Any,
+        facecam: FacecamRegion | None,
+        layout: LayoutGeometry,
+        peak_offset: float | None = None,
+    ) -> CompositeVideoClip:
+        """Compose one clip into ``layout`` (stacked / reaction / blur_fill) on a black canvas."""
+        layers: list[Any] = []
+        if layout.kind == "blur_fill" or layout.facecam_box is None:
+            layers.append(self._blur_background(clip))
+        if layout.facecam_box is not None and facecam is not None:
+            fb = layout.facecam_box
+            face_clip = (
+                self._crop_to_aspect(
+                    clip,
+                    facecam.x,
+                    facecam.y,
+                    facecam.x + facecam.w,
+                    facecam.y + facecam.h,
+                    target_ratio=fb.w / fb.h,
+                    expand_width=True,
+                )
+                .resized((fb.w, fb.h))
+                .with_position((fb.x, fb.y))
+            )
+            layers.append(face_clip)
+        layers.append(self._game_layer(clip, layout.game_box))
+
+        comp = CompositeVideoClip(layers, size=(self.width, self.height))
+        if clip.audio is not None:
+            comp = comp.with_audio(clip.audio)
+        comp._layout = layout
+        if peak_offset is not None and self.punch_in_zoom > 1.0:
+            comp = self.apply_spike_zoom(comp, peak_offset)
+        return comp
+
     def _compose_with_facecam(
         self,
         clip: Any,
         facecam: FacecamRegion,
         peak_offset: float | None = None,
     ) -> CompositeVideoClip:
-        """Layout A: aspect-correct facecam on top (35%), gameplay below (65%)."""
-        face_h = int(self.height * 0.35)
-        game_h = self.height - face_h
-
-        face_clip = (
-            self._crop_to_aspect(
-                clip,
-                facecam.x,
-                facecam.y,
-                facecam.x + facecam.w,
-                facecam.y + facecam.h,
-                target_ratio=self.width / face_h,
-                expand_width=True,
-            )
-            .resized((self.width, face_h))
-            .with_position(("center", 0))
+        """Stacked layout: facecam on top, full game below (kept as a thin wrapper)."""
+        return self._compose_layout(
+            clip, facecam, self._resolve_layout("stacked", facecam), peak_offset=peak_offset
         )
-
-        target_ratio = self.width / game_h
-        if clip.w / clip.h >= target_ratio:
-            crop_w = min(clip.w, int(clip.h * target_ratio))
-            x1 = (clip.w - crop_w) // 2
-            game_cropped = clip.cropped(x1=x1, y1=0, x2=x1 + crop_w, y2=clip.h)
-        else:
-            crop_h = min(clip.h, int(clip.w / target_ratio))
-            y1 = (clip.h - crop_h) // 2
-            game_cropped = clip.cropped(x1=0, y1=y1, x2=clip.w, y2=y1 + crop_h)
-
-        game_clip = game_cropped.resized((self.width, game_h))
-        # Lock 35%/65% split line: apply spike zoom inside gameplay clip (bottom 65%)
-        # so facecam (top 35%) is never cropped and the split line stays locked at face_h!
-        if peak_offset is not None and self.punch_in_zoom > 1.0:
-            game_clip = self.apply_spike_zoom(game_clip, peak_offset)
-
-        game_clip = game_clip.with_position(("center", face_h))
-
-        comp = CompositeVideoClip(
-            [game_clip, face_clip], size=(self.width, self.height)
-        )
-        if clip.audio is not None:
-            comp = comp.with_audio(clip.audio)
-        return comp
 
     @staticmethod
     def _detect_face_center_x(clip: Any) -> float | None:
@@ -366,38 +419,8 @@ class VideoComposer:
     def _compose_gameplay_only(
         self, clip: Any, face_center_x: float | None = None
     ) -> CompositeVideoClip:
-        """Layout B: face-aware crop gameplay to 9:16."""
-        target_ratio = self.width / self.height
-        if clip.w / clip.h >= target_ratio:
-            crop_w = min(clip.w, int(clip.h * target_ratio))
-            default_x1 = (clip.w - crop_w) // 2
-            x1 = default_x1
-            try:
-                face_cx = (
-                    float(face_center_x)
-                    if face_center_x is not None
-                    else self._detect_face_center_x(clip)
-                )
-                if face_cx is not None:
-                    x1 = max(0, min(clip.w - crop_w, int(face_cx - crop_w // 2)))
-            except Exception as e:
-                logger.debug("Face-aware Layout B crop detection skipped: %s", e)
-                x1 = default_x1
-
-            cropped = clip.cropped(x1=x1, y1=0, x2=x1 + crop_w, y2=clip.h)
-        else:
-            crop_h = min(clip.h, int(clip.w / target_ratio))
-            y1 = (clip.h - crop_h) // 2
-            cropped = clip.cropped(x1=0, y1=y1, x2=clip.w, y2=y1 + crop_h)
-
-        resized = (
-            cropped.resized((self.width, self.height))
-            .with_position(("center", "center"))
-        )
-        comp = CompositeVideoClip([resized], size=(self.width, self.height))
-        if clip.audio is not None:
-            comp = comp.with_audio(clip.audio)
-        return comp
+        """blur_fill layout (``face_center_x`` is unused; kept for API compatibility)."""
+        return self._compose_layout(clip, None, self._resolve_layout("blur_fill", None))
 
     def compose_story_beats(
         self,
@@ -406,6 +429,7 @@ class VideoComposer:
         beat_trim_ranges: list[tuple[float, float]] | None = None,
         peak_offset: float | None = None,
         face_center_x: float | None = None,
+        layout_kind: str | None = None,
     ) -> CompositeVideoClip:
         """Trim any download buffer padding per beat, compose each beat into 9:16,
         stitch via concatenate_videoclips(..., method='compose'), optionally apply spike zoom,
@@ -424,8 +448,10 @@ class VideoComposer:
                 facecam,
                 peak_offset=peak_offset,
                 face_center_x=face_center_x,
+                layout_kind=layout_kind,
             )
 
+        layout = self._resolve_layout(layout_kind, facecam)
         all_source_clips: list[Any] = []
         opened_clips: list[Any] = []
         beat_clips: list[CompositeVideoClip] = []
@@ -460,35 +486,14 @@ class VideoComposer:
                     trimmed = raw_clip
 
                 trimmed_dur = float(trimmed.duration) if getattr(trimmed, "duration", None) else 0.0
-                beat_peak: float | None = None
-                if peak_offset is not None and facecam is not None:
-                    is_in_this_beat = (
-                        (cum_beat_offset <= peak_offset <= (cum_beat_offset + trimmed_dur))
-                        if i == len(segment_paths) - 1
-                        else (cum_beat_offset <= peak_offset < (cum_beat_offset + trimmed_dur))
-                    )
-                    if is_in_this_beat:
-                        beat_peak = peak_offset - cum_beat_offset
-
-                if facecam is None and face_center_x is None:
-                    # Detect once on the first beat and reuse for every beat so the
-                    # 9:16 crop window stays horizontally stable across jump cuts.
-                    # When no face is found, lock to the frame center instead of re-detecting.
-                    face_center_x = self._detect_face_center_x(trimmed)
-                    if face_center_x is None:
-                        face_center_x = float(getattr(trimmed, "w", 0) or 0) / 2.0 or None
-
-                composed_beat = (
-                    self._compose_with_facecam(trimmed, facecam, peak_offset=beat_peak)
-                    if facecam is not None
-                    else self._compose_gameplay_only(trimmed, face_center_x=face_center_x)
-                )
+                composed_beat = self._compose_layout(trimmed, facecam, layout)
                 beat_clips.append(composed_beat)
                 beat_durations.append(trimmed_dur)
                 cum_beat_offset += trimmed_dur
 
             result = concatenate_videoclips(beat_clips, method="compose")
-            if peak_offset is not None and self.punch_in_zoom > 1.0 and facecam is None:
+            result._layout = layout
+            if peak_offset is not None and self.punch_in_zoom > 1.0:
                 result = self.apply_spike_zoom(result, peak_offset)
         except Exception:
             for opened in opened_clips:
@@ -517,22 +522,43 @@ class VideoComposer:
         if z_end <= z_start or z_start >= clip.duration:
             return clip
 
+        layout = getattr(clip, "_layout", None)
         w = getattr(clip, "w", self.width) or self.width
         h = getattr(clip, "h", self.height) or self.height
-        crop_w = max(1, int(w / self.punch_in_zoom))
-        crop_h = max(1, int(h / self.punch_in_zoom))
-        x1 = (w - crop_w) // 2
-        y1 = (h - crop_h) // 2
+        if layout is not None:
+            gb = layout.game_box
+            zw, zh = gb.w, gb.h
+        else:
+            zw, zh = w, h
+        crop_w = max(1, int(zw / self.punch_in_zoom))
+        crop_h = max(1, int(zh / self.punch_in_zoom))
+        x1 = (zw - crop_w) // 2
+        y1 = (zh - crop_h) // 2
 
         slices: list[Any] = []
         if z_start > 0.0:
             slices.append(clip.subclipped(0.0, z_start))
 
-        zoomed_slice = (
-            clip.subclipped(z_start, z_end)
-            .cropped(x1=x1, y1=y1, x2=x1 + crop_w, y2=y1 + crop_h)
-            .resized((w, h))
-        )
+        if layout is not None:
+            # Zoom inside game_box only; facecam, hooks band and caption band stay locked.
+            gb = layout.game_box
+            base = clip.subclipped(z_start, z_end)
+            inner = (
+                base.cropped(x1=gb.x, y1=gb.y, x2=gb.x + gb.w, y2=gb.y + gb.h)
+                .cropped(x1=x1, y1=y1, x2=x1 + crop_w, y2=y1 + crop_h)
+                .resized((gb.w, gb.h))
+                .with_position((gb.x, gb.y))
+            )
+            zoomed_slice = CompositeVideoClip([base, inner], size=(w, h))
+            if base.audio is not None:
+                zoomed_slice = zoomed_slice.with_audio(base.audio)
+            zoomed_slice._layout = layout
+        else:
+            zoomed_slice = (
+                clip.subclipped(z_start, z_end)
+                .cropped(x1=x1, y1=y1, x2=x1 + crop_w, y2=y1 + crop_h)
+                .resized((w, h))
+            )
         slices.append(zoomed_slice)
 
         if z_end < clip.duration:
@@ -546,6 +572,8 @@ class VideoComposer:
             result._source_clip = clip._source_clip
         if hasattr(clip, "_source_clips"):
             result._source_clips = clip._source_clips
+        if layout is not None:
+            result._layout = layout
 
         return result
 
@@ -637,7 +665,13 @@ def compose_instant_replay(
     if badge_clip is None:
         from .hooks import create_replay_badge
 
-        badge = create_replay_badge(width=w, height=h, duration=replay_slow.duration, config=config)
+        badge = create_replay_badge(
+            width=w,
+            height=h,
+            duration=replay_slow.duration,
+            config=config,
+            layout=getattr(main_clip, "_layout", None),
+        )
     else:
         badge = badge_clip
         if hasattr(badge, "with_duration"):
@@ -668,6 +702,9 @@ def compose_instant_replay(
 
     combined._source_clip = sources[0]
     combined._source_clips = sources
+    if getattr(main_clip, "_layout", None) is not None:
+        combined._layout = main_clip._layout
+        replay_comp._layout = main_clip._layout
 
     return combined, replay_start_time
 
@@ -755,5 +792,7 @@ def compose_freeze_breakdown(
     else:
         combined._source_clip = main_clip
         combined._source_clips = [main_clip]
+    if getattr(main_clip, "_layout", None) is not None:
+        combined._layout = main_clip._layout
 
     return combined
