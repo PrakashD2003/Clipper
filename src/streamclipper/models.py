@@ -321,6 +321,7 @@ class PipelineState(SerializableModel):
     clips: list[ClipResult] = field(default_factory=list)
     cache_dir: Optional[Path] = None
     analysis_complete: bool = False
+    requested_max_clips: Optional[int] = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "PipelineState":
@@ -350,4 +351,9 @@ class PipelineState(SerializableModel):
             clips=[ClipResult.from_dict(c) for c in (data.get("clips") or [])],
             cache_dir=Path(data["cache_dir"]) if data.get("cache_dir") else None,
             analysis_complete=bool(data.get("analysis_complete", False)),
+            requested_max_clips=(
+                int(data["requested_max_clips"])
+                if data.get("requested_max_clips") is not None
+                else None
+            ),
         )
