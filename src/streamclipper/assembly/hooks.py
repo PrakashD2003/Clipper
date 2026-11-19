@@ -324,6 +324,32 @@ def create_replay_badge(
     return clip
 
 
+def render_streamer_tag(
+    text: str,
+    font_size: int = 26,
+    font_name: str | None = None,
+    max_width: int | None = None,
+) -> np.ndarray:
+    """Small semi-transparent pill with the streamer credit ("@name") as an RGBA array."""
+    text = strip_unrenderable(text)
+    font = _load_font(font_name, font_size)
+    pad_x, pad_y = 20, 8
+    tmp = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+    b = tmp.textbbox((0, 0), text, font=font)
+    tw, th = b[2] - b[0], b[3] - b[1]
+    if max_width is not None and tw + 2 * pad_x > max_width:
+        keep = max(4, int(len(text) * max_width / (tw + 2 * pad_x)) - 1)
+        text = text[:keep].rstrip()
+        b = tmp.textbbox((0, 0), text, font=font)
+        tw, th = b[2] - b[0], b[3] - b[1]
+    w, h = tw + 2 * pad_x, th + 2 * pad_y
+    img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    draw.rounded_rectangle([(0, 0), (w - 1, h - 1)], radius=h // 2, fill=(0, 0, 0, 120))
+    draw.text((pad_x - b[0], pad_y - b[1]), text, font=font, fill=(255, 255, 255, 235))
+    return np.array(img, dtype=np.uint8)
+
+
 class HookTitleOverlay:
     """Renders hook title banner and adaptive context badge overlays using MoviePy v2."""
 
@@ -338,6 +364,8 @@ class HookTitleOverlay:
         self.stroke_color: str = config.get("hook_title.stroke_color", "black")
         self.stroke_width: int = int(config.get("hook_title.stroke_width", 3))
         self.position: str = config.get("hook_title.position", "top")
+        self.persistent_title: bool = bool(config.get("hooks.persistent_title", True))
+        self.streamer_tag: bool = bool(config.get("hooks.streamer_tag", True))
 
     def add_hook(
         self,
@@ -345,13 +373,28 @@ class HookTitleOverlay:
         hook_title: str,
         context_badge: str = "",
         layout: LayoutGeometry | None = None,
+        *,
+        streamer: str = "",
     ) -> CompositeVideoClip:
-        """Add hook title banner and optional adaptive context_badge pill to the video."""
+        """Add hook title banner and optional adaptive context_badge pill to the video.
+
+        On the blur_fill layout the title stays on screen for the whole clip when
+        ``hooks.persistent_title`` is set, and a small "@streamer" credit pill is placed at the
+        bottom of the hook band when ``hooks.streamer_tag`` is set and ``streamer`` is given.
+        """
         clean_hook = (hook_title or "").strip()
         clean_badge = (context_badge or "").strip()
 
         should_render_hook = self.enabled and bool(clean_hook)
         should_render_badge = bool(clean_badge)
+        is_blur = layout is not None and layout.kind == "blur_fill"
+        clean_streamer = (streamer or "").strip().lstrip("@")
+        should_render_tag = bool(
+            is_blur
+            and self.streamer_tag
+            and clean_streamer
+            and (should_render_hook or should_render_badge)
+        )
 
         if not should_render_hook and not should_render_badge:
             return video_clip
@@ -364,12 +407,24 @@ class HookTitleOverlay:
             overlay_duration = min(self.duration, float(video_duration))
         else:
             overlay_duration = self.duration
+        if is_blur and self.persistent_title and video_duration is not None:
+            overlay_duration = float(video_duration)
         overlay_duration = max(0.0, overlay_duration)
         if overlay_duration <= 0.0:
             return video_clip
 
         layers: list[Any] = [video_clip]
         hook_banner_h = 0
+        tag_arr = None
+        tag_reserved = 0
+        if should_render_tag:
+            tag_arr = render_streamer_tag(
+                f"@{clean_streamer}",
+                font_size=max(18, int(self.font_size * 0.5)),
+                font_name=self.font_name,
+                max_width=int(video_w * 0.6),
+            )
+            tag_reserved = tag_arr.shape[0] + 16  # tag height + gap above it
 
         if should_render_hook:
             max_w = int(video_w * 0.90)
@@ -387,7 +442,7 @@ class HookTitleOverlay:
             hook_clip = ImageClip(hook_arr).with_duration(overlay_duration)
             if layout is not None:
                 hb = layout.hook_band
-                hook_y = hb.y + max(0, (hb.h - hook_banner_h) // 2)
+                hook_y = hb.y + max(0, (hb.h - tag_reserved - hook_banner_h) // 2)
                 hook_clip = hook_clip.with_position(("center", hook_y))
             elif self.position == "center":
                 hook_clip = hook_clip.with_position(("center", "center"))
@@ -420,12 +475,12 @@ class HookTitleOverlay:
                 if should_render_hook:
                     # Hook + badge stack centred as one block inside hook_band.
                     block_h = hook_banner_h + 12 + badge_arr.shape[0]
-                    top = hb.y + max(0, (hb.h - block_h) // 2)
+                    top = hb.y + max(0, (hb.h - tag_reserved - block_h) // 2)
                     hook_y = top
                     badge_y = top + hook_banner_h + 12
                     layers[1] = layers[1].with_position(("center", hook_y))
                 else:
-                    badge_y = hb.y + max(0, (hb.h - badge_arr.shape[0]) // 2)
+                    badge_y = hb.y + max(0, (hb.h - tag_reserved - badge_arr.shape[0]) // 2)
             elif should_render_hook and self.position != "center":
                 badge_y = 120 + hook_banner_h + 16
             elif should_render_hook and self.position == "center":
@@ -445,6 +500,16 @@ class HookTitleOverlay:
                         logger.debug("Failed to apply CrossFadeIn to badge clip: %s", e)
 
             layers.append(badge_clip)
+
+        if tag_arr is not None and layout is not None:
+            hb = layout.hook_band
+            tag_y = hb.y + hb.h - tag_arr.shape[0] - 6
+            tag_clip = (
+                ImageClip(tag_arr)
+                .with_duration(overlay_duration)
+                .with_position(("center", tag_y))
+            )
+            layers.append(tag_clip)
 
         result = CompositeVideoClip(layers, size=video_size)
         if getattr(video_clip, "audio", None) is not None:

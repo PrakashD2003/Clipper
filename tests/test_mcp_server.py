@@ -139,6 +139,43 @@ def _make_sample_transcript() -> TranscriptionResult:
     return TranscriptionResult(segments=segments, full_text=full_text, language="en")
 
 
+_REAL_CALL_TOOL = mcp.call_tool
+
+
+@pytest.fixture(autouse=True)
+def _lenient_call_tool(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Legacy tests predate the mandatory-narration / transcript guards: fill those in.
+
+    Tests of the guards themselves call ``_REAL_CALL_TOOL`` directly.
+    """
+
+    async def _call(name: str, arguments: dict[str, Any] | None = None, *a: Any, **kw: Any) -> Any:
+        args = dict(arguments or {})
+        if name == "submit_highlights":
+            args.setdefault("allow_without_transcript", True)
+            try:
+                parsed = json.loads(mcp_server._clean_llm_text(args.get("highlights", "")))
+            except (TypeError, ValueError):
+                parsed = None
+            items: list[Any] = []
+            if isinstance(parsed, list):
+                items = parsed
+            elif isinstance(parsed, dict):
+                items = parsed.get("highlights") or parsed.get("clips") or [parsed]
+            if items:
+                for it in items:
+                    if isinstance(it, dict):
+                        it.setdefault("narration_intro", "Opening line for the clip.")
+                        it.setdefault("narration_outro", "Closing line for the clip.")
+                args["highlights"] = json.dumps(parsed)
+        elif name == "render_clip" and args.get("mode") != "raw":
+            args.setdefault("narration_intro", "Opening line for the clip.")
+            args.setdefault("narration_outro", "Closing line for the clip.")
+        return await _REAL_CALL_TOOL(name, args, *a, **kw)
+
+    monkeypatch.setattr(mcp, "call_tool", _call)
+
+
 @pytest.fixture
 def mcp_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Config, StepCache, Path]:
     """Patch MCP server config loader to use isolated temp/cache/output dirs."""
@@ -3233,3 +3270,131 @@ async def test_L5_transcript_chunks_hinglish_instruction(
     )
     assert data["narration_language"] == "hinglish"
     assert "ROMAN" in data["narration_language_instruction"]
+
+
+# ---------------------------------------------------------------------------
+# Quality-fix guards: transcript / narration / skip-intro / breakdown suitability
+# ---------------------------------------------------------------------------
+
+
+def _save_plain_state(cache: StepCache, url: str, *, with_transcript: bool) -> None:
+    cache.save_state(
+        PipelineState(
+            stream_info=StreamInfo(
+                url=url, title="t", platform=Platform.YOUTUBE, streamer="CarryisLive",
+                game="GTA 6", duration_seconds=7200, video_id="qg123456789",
+            ),
+            status=PipelineStatus.SCORING,
+            transcript=_make_sample_transcript() if with_transcript else None,
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_Q3_submit_requires_transcript_unless_allowed(
+    mcp_env: tuple[Config, StepCache, Path],
+) -> None:
+    _, cache, _ = mcp_env
+    url = "https://www.youtube.com/watch?v=qg123456789"
+    _save_plain_state(cache, url, with_transcript=False)
+    payload = json.dumps(
+        [{"start": 10.0, "end": 40.0, "narration_intro": "a", "narration_outro": "b"}]
+    )
+    res = await _REAL_CALL_TOOL("submit_highlights", {"url": url, "highlights": payload})
+    err = json.loads(res.content[0].text)["error"]
+    assert "transcribe_audio" in err and "allow_without_transcript" in err
+    ok = _extract_json(
+        await _REAL_CALL_TOOL(
+            "submit_highlights",
+            {"url": url, "highlights": payload, "allow_without_transcript": True},
+        )
+    )
+    assert ok["accepted_count"] == 1 and ok["warnings"]
+
+
+@pytest.mark.asyncio
+async def test_Q2_Q3_submit_rejects_missing_narration_and_pre_skip_intro(
+    mcp_env: tuple[Config, StepCache, Path],
+) -> None:
+    config, cache, _ = mcp_env
+    config._data["analysis"]["skip_intro_minutes"] = 5
+    url = "https://www.youtube.com/watch?v=qg123456789"
+    _save_plain_state(cache, url, with_transcript=True)
+    payload = json.dumps(
+        [
+            {"start": 288.0, "end": 330.0, "narration_intro": "a", "narration_outro": "b"},
+            {"start": 600.0, "end": 640.0, "title": "no voice"},
+            {"start": 900.0, "end": 940.0, "narration_intro": "a", "narration_outro": "b"},
+            {"start": 1200.0, "end": 1240.0, "mode": "raw"},
+        ]
+    )
+    data = _extract_json(
+        await _REAL_CALL_TOOL("submit_highlights", {"url": url, "highlights": payload})
+    )
+    assert data["accepted_count"] == 2 and data["rejected_count"] == 2
+    reasons = {r["start"]: r["reason"] for r in data["rejected"]}
+    assert "skip_intro_minutes" in reasons[288.0]
+    assert "narration_intro and narration_outro" in reasons[600.0]
+    assert "english" in reasons[600.0]
+
+
+@pytest.mark.asyncio
+async def test_Q2_render_clip_requires_narration_for_non_raw(
+    mcp_env: tuple[Config, StepCache, Path],
+) -> None:
+    args = {
+        "url": "https://www.youtube.com/watch?v=qg123456789",
+        "start": 600.0,
+        "end": 640.0,
+        "hook_title": "T",
+    }
+    res = await _REAL_CALL_TOOL("render_clip", args)
+    err = json.loads(res.content[0].text)["error"]
+    assert "narration_intro and narration_outro" in err
+
+
+@pytest.mark.asyncio
+async def test_Q3_instructions_and_docs_forbid_manual_assembly() -> None:
+    assert "Never assemble clips yourself" in mcp_server.SERVER_INSTRUCTIONS
+    tools = {t.name: t for t in await mcp.list_tools()}
+    for name in ("render_clip", "render_all_selected"):
+        assert "NEVER assemble clips yourself" in (tools[name].description or "")
+    assert "allow_without_transcript" in tools["submit_highlights"].input_schema["properties"]
+
+
+@pytest.mark.asyncio
+async def test_Q1_explicit_breakdown_downgraded_for_reaction_moment(
+    mcp_env: tuple[Config, StepCache, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from streamclipper.pipeline import Pipeline
+
+    config, _, tmp_path = mcp_env
+    seen: list[str] = []
+    monkeypatch.setattr(mcp_server, "download_segment", lambda *a, **k: tmp_path / "seg.mp4")
+
+    def fake_assemble(
+        self: Any, highlight: Any, metadata: Any, segs: Any, idx: Any, mode: str, *a: Any, **k: Any
+    ) -> ClipResult:
+        seen.append(mode)
+        return ClipResult(
+            video_path=tmp_path / "c.mp4",
+            metadata_path=None,
+            metadata=metadata,
+            duration_seconds=10.0,
+        )
+
+    monkeypatch.setattr(Pipeline, "_assemble_highlight", fake_assemble)
+    config._data.setdefault("output", {})["write_post_file"] = False
+    notes: list[dict[str, Any]] = []
+    h = Highlight(
+        start=600.0, end=640.0, score=8.0, title="T", reason="r",
+        moment_type="hype", breakdown_commentary="x", peak_time=620.0,
+    )
+    _, mode = await mcp_server._render_single_highlight(
+        pipeline=Pipeline(config), config=config, url="https://youtu.be/qg123456789",
+        highlight=h, streamer_name="S", game_name="g", clip_index=1,
+        base_mode="breakdown", notes=notes,
+    )
+    assert mode == "narrative" and seen == ["narrative"]
+    assert notes and notes[0]["mode_adjusted"] == "breakdown -> narrative"
+    assert "hype" in notes[0]["reason"]

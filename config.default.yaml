@@ -85,6 +85,7 @@ video:
   codec: "auto"             # auto (h264_nvenc if CUDA+NVENC else libx264) | h264_nvenc | libx264
   audio_codec: "aac"
   game_fit: "full"          # full (16:9 game area) | balanced (4:3 centre crop, taller game area)
+  blur_fill_game_scale: 1.15  # blur_fill layout: game width as a multiple of frame width (centre-cropped horizontally; 1.0-1.3). Higher = taller game, more cropped sides
   crf: 23                   # quality (libx264 -crf / h264_nvenc -cq, lower = better, 18-28 range)
 
 captions:
@@ -113,6 +114,10 @@ hook_title:
   stroke_width: 3
   position: "top"            # top | center
   fade_in: true
+
+hooks:
+  persistent_title: true     # blur_fill layout: keep the hook title (and badge) on screen for the whole clip (false = hook_title.duration_seconds)
+  streamer_tag: true         # blur_fill layout: small "@streamer" credit pill at the bottom of the hook band
 
 metadata:
   hashtag_count: 15
@@ -182,6 +187,7 @@ transformation:
   enable_top3: true                    # Allow top-3 compilation clips (mode: top3)
   top3_item_seconds: 14
   format_rotation: [narrative, story, breakdown]
+  breakdown_moment_types: [clutch, fail, graphics_detail, analysis]  # ONLY these moment types may use breakdown (instant replay); needs breakdown_commentary + a peak inside the clip. Reactions (hype/funny/chat_chaos/lore_secret) get narrative/story
   hook_styles: [question, hot_take, countdown, nobody_noticed]
   duck_stream_volume: 0.18             # Duck original stream audio to 18% during narrator voiceover
   punch_in_zoom: 1.20                  # 1.20x center zoom around peak_time (1.0 = disabled)

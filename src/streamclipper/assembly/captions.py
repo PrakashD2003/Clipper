@@ -248,6 +248,7 @@ class AssCaptionBurner:
         secondary_style_color = "&H00" + self.highlight_bgr[2:-1]
         hormozi_margin_v = self.margin_v
         ticker_align, ticker_margin_v = 9, 260
+        caption_center: tuple[int, int] | None = None
         callout_style = "Hormozi"
         callout_style_line = ""
         if layout is not None:
@@ -256,6 +257,11 @@ class AssCaptionBurner:
             cb = layout.caption_band
             hormozi_margin_v = max(0, self.height - int(cb.y + 0.62 * cb.h))
             ticker_margin_v = int(cb.y + 0.70 * cb.h)
+            if layout.kind == "blur_fill":
+                # Word captions / narration cards centre vertically in the caption band.
+                caption_center = (self.width // 2, int(cb.y + 0.5 * cb.h))
+                hormozi_margin_v = max(0, self.height - int(cb.y + 0.5 * cb.h))
+                ticker_margin_v = int(cb.y + 0.74 * cb.h)
             callout_style = "Callout"
             callout_style_line = (
                 f"Style: Callout,{self.font},{max(1, int(self.font_size * 0.8))},"
@@ -461,6 +467,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                     f"Dialogue: 1,{msg_start},{msg_end},ChatTicker,,0,0,0,,{author}: {text}"
                 )
                 emitted += 1
+
+        if caption_center is not None:
+            marker = ",Hormozi,,0,0,0,,"
+            pos = "{\\an5\\pos(%d,%d)}" % caption_center
+            events = [e.replace(marker, marker + pos, 1) if marker in e else e for e in events]
 
         body = "\n".join(events) + "\n" if events else ""
         target_path.write_text(header + body, encoding="utf-8")

@@ -92,6 +92,8 @@ class Exporter:
         return {
             "mix_ran": False,
             "narration_expected": False,
+            "intro_expected": False,
+            "breakdown_expected": False,
             "intro_seconds": 0.0,
             "outro_seconds": 0.0,
             "callout_seconds": 0.0,
@@ -262,6 +264,20 @@ class Exporter:
             callout_dur: float | None = None
             self.last_export_info["narration_expected"] = bool(
                 effective_mode != "raw" and has_narration_input
+            )
+            self.last_export_info["intro_expected"] = bool(
+                effective_mode != "raw"
+                and (
+                    (narration_intro and str(narration_intro).strip())
+                    or voice_intro_path is not None
+                )
+            )
+            self.last_export_info["breakdown_expected"] = bool(
+                effective_mode == "breakdown"
+                and (
+                    (breakdown_commentary and str(breakdown_commentary).strip())
+                    or voice_breakdown_path is not None
+                )
             )
 
             if effective_mode != "raw" and has_narration_input:

@@ -169,6 +169,10 @@ class VideoComposer:
         )
         raw_fit = str(config.get("video.game_fit", "full") or "full").strip().lower()
         self.game_fit = raw_fit if raw_fit in {"full", "balanced"} else "full"
+        try:
+            self.blur_fill_game_scale = float(config.get("video.blur_fill_game_scale", 1.15))
+        except (TypeError, ValueError):
+            self.blur_fill_game_scale = 1.15
 
     def _resolve_layout(
         self, layout_kind: str | None, facecam: FacecamRegion | None
@@ -176,7 +180,13 @@ class VideoComposer:
         kind = layout_kind or ("stacked" if facecam is not None else "blur_fill")
         if facecam is None and kind in {"stacked", "reaction"}:
             kind = "blur_fill"  # nothing to put in the facecam box
-        return compute_layout(kind, self.game_fit, self.width, self.height)
+        return compute_layout(
+            kind,
+            self.game_fit,
+            self.width,
+            self.height,
+            blur_game_scale=self.blur_fill_game_scale,
+        )
 
     def compose(
         self,
@@ -287,9 +297,19 @@ class VideoComposer:
             ny1 = max(0, ny2 - new_h)
         return clip.cropped(x1=x1, y1=ny1, x2=x2, y2=ny2)
 
-    def _game_layer(self, clip: Any, box: Box) -> Any:
-        """Scale the source frame into ``box``: whole 16:9 frame (full) or 4:3 centre crop (balanced)."""
+    def _game_layer(self, clip: Any, box: Box, centre_crop: bool = False) -> Any:
+        """Scale the source frame into ``box``: whole 16:9 frame (full) or 4:3 centre crop (balanced).
+
+        ``centre_crop`` (blur_fill) centre-crops a frame wider than the box horizontally instead
+        of squashing it, so a box narrower than 16:9 loses only a little from each side.
+        """
         src = clip
+        if self.game_fit != "balanced" and centre_crop:
+            target_ratio = box.w / box.h
+            if clip.w / clip.h > target_ratio + 0.01:
+                crop_w = max(1, min(clip.w, int(round(clip.h * target_ratio))))
+                x1 = (clip.w - crop_w) // 2
+                src = clip.cropped(x1=x1, y1=0, x2=x1 + crop_w, y2=clip.h)
         if self.game_fit == "balanced":
             target_ratio = box.w / box.h
             if clip.w / clip.h > target_ratio:
@@ -356,7 +376,9 @@ class VideoComposer:
                 .with_position((fb.x, fb.y))
             )
             layers.append(face_clip)
-        layers.append(self._game_layer(clip, layout.game_box))
+        layers.append(
+            self._game_layer(clip, layout.game_box, centre_crop=layout.kind == "blur_fill")
+        )
 
         comp = CompositeVideoClip(layers, size=(self.width, self.height))
         if clip.audio is not None:

@@ -46,6 +46,40 @@ BANNED_PHRASES: tuple[str, ...] = (
     "most viral",
 )
 
+def grounded_fallback_intro(
+    highlight: Highlight, streamer: str = "", game: str = ""
+) -> str:
+    """Short intro voiceover built only from the highlight's own title/quote/reason.
+
+    Used when the narrative writer (Ollama pass 2) is unavailable or returns nothing, so a
+    non-raw clip never opens without a voiceover. Parts containing a banned generic phrase
+    are dropped.
+    """
+    def _clean(text: Any, limit: int) -> str:
+        t = " ".join(_as_str(text).split())
+        if not t:
+            return ""
+        if any(p in t.lower() for p in BANNED_PHRASES):
+            return ""
+        if len(t) > limit:
+            t = t[:limit].rsplit(" ", 1)[0].rstrip(",;:- ")
+        return t.rstrip(".!? ")
+
+    title = _clean(highlight.title, 80)
+    reason = _clean(_as_str(highlight.reason).split(". ")[0], 140)
+    quote = _clean(highlight.best_quote, 90)
+    parts: list[str] = []
+    if title:
+        parts.append(title)
+    if quote:
+        parts.append(f'{streamer or "The streamer"} says "{quote}"')
+    elif reason:
+        parts.append(reason)
+    if not parts:
+        parts.append(f"A moment from {streamer + chr(39) + 's' if streamer else 'this'} {game or 'stream'} stream")
+    return ". ".join(parts) + "."
+
+
 _THINK_TAG_RE = re.compile(r"<think>.*?</think>", flags=re.DOTALL | re.IGNORECASE)
 _CODE_FENCE_RE = re.compile(
     r"^\s*```(?:json)?\s*\n?(.*?)\n?\s*```\s*$",

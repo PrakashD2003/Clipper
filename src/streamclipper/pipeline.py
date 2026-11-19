@@ -277,7 +277,36 @@ class Pipeline:
             )
         return configured
 
-    _AUTO_BREAKDOWN_MOMENT_TYPES = frozenset({"analysis", "graphics_detail", "lore_secret"})
+    _DEFAULT_BREAKDOWN_MOMENT_TYPES = ("clutch", "fail", "graphics_detail", "analysis")
+
+    def _breakdown_ineligible_reason(self, highlight: Highlight) -> str:
+        """Empty string when instant-replay breakdown fits *highlight*, else the reason it does not.
+
+        Eligible only when ALL hold: moment_type is in `transformation.breakdown_moment_types`,
+        `breakdown_commentary` is non-empty, and `peak_time` lies inside the clip.
+        """
+        allowed = [
+            str(t).strip().lower()
+            for t in (
+                self.config.get(
+                    "transformation.breakdown_moment_types",
+                    list(self._DEFAULT_BREAKDOWN_MOMENT_TYPES),
+                )
+                or []
+            )
+        ]
+        mtype = str(highlight.moment_type or "").strip().lower()
+        if mtype not in allowed:
+            return (
+                f"moment_type {mtype!r} is not in transformation.breakdown_moment_types "
+                f"({', '.join(allowed)}); there is nothing to break down"
+            )
+        if not str(highlight.breakdown_commentary or "").strip():
+            return "breakdown_commentary is empty"
+        peak = float(highlight.peak_time or 0.0)
+        if not (float(highlight.start) <= peak <= float(highlight.end)):
+            return f"peak_time {peak:.1f}s is not inside the clip ({highlight.start:.1f}-{highlight.end:.1f}s)"
+        return ""
 
     def _resolve_highlight_mode(
         self, base_mode: str, highlight: Highlight
@@ -291,8 +320,6 @@ class Pipeline:
             return "raw", []
         if base_mode == "narrative":
             return "narrative", []
-        if base_mode == "breakdown":
-            return "breakdown", []
 
         max_clip_seconds = float(self.config.get("analysis.max_clip_seconds", 90))
         valid_beats = Scorer._validate_sub_clips(
@@ -301,22 +328,24 @@ class Pipeline:
             highlight.end,
             max_duration=max_clip_seconds,
         )
+        if base_mode == "breakdown":
+            why = self._breakdown_ineligible_reason(highlight)
+            if not why:
+                return "breakdown", []
+            logger.info("Breakdown not suitable for this highlight (%s); using narrative/story.", why)
+            if len(valid_beats) >= 2:
+                return "story", valid_beats
+            return "narrative", []
         if base_mode == "auto":
             # Mode is resolved BEFORE Pass 2 (generate_metadata) writes narration, so only
             # signals present at this point may drive the choice:
-            #   1. explicit breakdown commentary (Pass 1 / MCP host) -> breakdown
+            #   1. breakdown-eligible highlight (allowed moment_type + commentary + peak inside) -> breakdown
             #   2. validated multi-beat sub_clips -> story (never discard valid beats)
-            #   3. detail/analysis moment types -> breakdown (funny `fail` keeps witty narrative)
-            #   4. otherwise -> narrative
-            if highlight.breakdown_commentary:
+            #   3. otherwise -> narrative
+            if not self._breakdown_ineligible_reason(highlight):
                 return "breakdown", []
             if len(valid_beats) >= 2:
                 return "story", valid_beats
-            if (
-                highlight.moment_type in self._AUTO_BREAKDOWN_MOMENT_TYPES
-                and not (highlight.narration_intro and highlight.narration_outro)
-            ):
-                return "breakdown", []
             return "narrative", []
         if base_mode == "story":
             return "story", valid_beats
@@ -737,7 +766,9 @@ class Pipeline:
                 available = [
                     f
                     for f in ("story", "narrative", "breakdown")
-                    if f in rotation and (f != "story" or len(valid_beats) >= 2)
+                    if f in rotation
+                    and (f != "story" or len(valid_beats) >= 2)
+                    and (f != "breakdown" or not self._breakdown_ineligible_reason(highlight))
                 ]
                 if available:
                     chosen = variety.next_format(available)
@@ -810,6 +841,17 @@ class Pipeline:
                     metadata.narration_intro = ""
                     metadata.narration_outro = ""
                     metadata.context_badge = ""
+                else:
+                    self._ensure_intro_narration(
+                        metadata,
+                        highlight,
+                        scorer,
+                        streamer_name,
+                        game_name,
+                        hook_style=hook_style,
+                        language=narration_language,
+                        has_custom_voice=voice_intro_path is not None,
+                    )
 
             queued = bool(
                 daily_cap > 0 and variety.clips_today(streamer_name) >= daily_cap
@@ -1559,6 +1601,8 @@ class Pipeline:
             }
             if layout is not None:
                 hook_kwargs["layout"] = layout
+                if getattr(layout, "kind", "") == "blur_fill" and metadata.streamer:
+                    hook_kwargs["streamer"] = metadata.streamer
             composed = HookTitleOverlay(self.config).add_hook(
                 composed, metadata.hook_title, **hook_kwargs
             )
@@ -1631,7 +1675,7 @@ class Pipeline:
             transcript_text=highlight.transcript_chunk,
         )
         info = dict(getattr(exporter, "last_export_info", None) or {})
-        reason = self._narration_gate_reason(info)
+        reason = self._narration_gate_reason(info, mode=mode)
         if reason:
             return self._quarantine_clip(result, reason)
         extra: dict[str, Any] = {}
@@ -1654,8 +1698,44 @@ class Pipeline:
     # Narration gate, measured commentary, caption presets
     # ------------------------------------------------------------------
 
-    def _narration_gate_reason(self, info: dict[str, Any]) -> str:
-        """Non-empty reason when a non-raw clip was expected to be narrated but the mix never ran."""
+    def _ensure_intro_narration(
+        self,
+        metadata: ClipMetadata,
+        highlight: Highlight,
+        scorer: Any,
+        streamer: str,
+        game: str,
+        *,
+        hook_style: str | None = None,
+        language: str = "english",
+        has_custom_voice: bool = False,
+    ) -> None:
+        """Guarantee a non-raw clip has intro text: narrative writer first, grounded fallback second."""
+        if str(metadata.narration_intro or "").strip() or has_custom_voice:
+            return
+        writer = getattr(scorer, "generate_narrative", None)
+        if callable(writer):
+            try:
+                intro, outro, badge = writer(
+                    highlight, streamer, game, hook_style=hook_style, language=language
+                )
+                metadata.narration_intro = str(intro or "").strip()
+                metadata.narration_outro = metadata.narration_outro or str(outro or "").strip()
+                metadata.context_badge = metadata.context_badge or str(badge or "").strip()
+            except Exception as exc:
+                logger.warning("Narrative writer unavailable for intro backfill: %s", exc)
+        if not str(metadata.narration_intro or "").strip():
+            from .scoring.ollama_scorer import grounded_fallback_intro
+
+            metadata.narration_intro = grounded_fallback_intro(highlight, streamer, game)
+            logger.warning("Using grounded fallback intro voiceover for %r.", highlight.title)
+
+    def _narration_gate_reason(self, info: dict[str, Any], *, mode: str | None = None) -> str:
+        """Non-empty reason when a non-raw clip was expected to be narrated but was not.
+
+        Quarantines when no mix ran, when an expected intro track was not mixed, and (breakdown
+        mode) when the breakdown voiceover was not expected or not mixed.
+        """
         if not bool(self.config.get("output.require_narration", True)):
             return ""
         if info.get("narration_expected") and not info.get("mix_ran"):
@@ -1663,6 +1743,15 @@ class Pipeline:
                 "narration mix did not run (TTS failed or produced no audio); "
                 "clip would ship without voiceover"
             )
+        if info.get("mix_ran") and info.get("intro_expected") and not float(
+            info.get("intro_seconds") or 0.0
+        ) > 0.0:
+            return "intro voiceover was expected but not mixed; clip would open without narration"
+        if mode == "breakdown":
+            if not info.get("breakdown_expected"):
+                return "breakdown mode without breakdown commentary/voice; replay would be silent"
+            if not float(info.get("breakdown_seconds") or 0.0) > 0.0:
+                return "breakdown voiceover was expected but not mixed"
         return ""
 
     def _quarantine_clip(self, result: ClipResult, reason: str) -> ClipResult:

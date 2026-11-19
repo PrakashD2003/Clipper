@@ -46,6 +46,7 @@ def _make_highlight(
     sub_clips: list[dict[str, Any]] | None = None,
     breakdown_commentary: str = "",
     music_risk: str = "CLEAN",
+    peak_time: float = 0.0,
 ) -> Highlight:
     return Highlight(
         start=100.0,
@@ -57,6 +58,7 @@ def _make_highlight(
         sub_clips=sub_clips or [],
         breakdown_commentary=breakdown_commentary,
         music_risk=music_risk,
+        peak_time=peak_time,
     )
 
 
@@ -65,11 +67,30 @@ class TestPipelineBreakdownModeResolution:
 
     def test_auto_resolves_breakdown_for_moment_types(self, tmp_path: Path) -> None:
         pipeline = Pipeline(_make_config(tmp_path))
-        for m_type in ("analysis", "graphics_detail", "lore_secret"):
-            h = _make_highlight(moment_type=m_type)
+        for m_type in ("analysis", "graphics_detail", "clutch", "fail"):
+            h = _make_highlight(
+                moment_type=m_type, breakdown_commentary="Look at the angle.", peak_time=120.0
+            )
             mode, beats = pipeline._resolve_highlight_mode("auto", h)
             assert mode == "breakdown"
             assert beats == []
+        # Reactions never get an instant replay, even with commentary and a peak.
+        for m_type in ("hype", "funny", "chat_chaos", "lore_secret"):
+            h = _make_highlight(
+                moment_type=m_type, breakdown_commentary="Look at the angle.", peak_time=120.0
+            )
+            assert pipeline._resolve_highlight_mode("auto", h)[0] == "narrative"
+
+    def test_breakdown_needs_commentary_and_peak_inside_clip(self, tmp_path: Path) -> None:
+        pipeline = Pipeline(_make_config(tmp_path))
+        no_commentary = _make_highlight(moment_type="analysis", peak_time=120.0)
+        assert pipeline._resolve_highlight_mode("auto", no_commentary)[0] == "narrative"
+        assert "commentary" in pipeline._breakdown_ineligible_reason(no_commentary)
+        outside = _make_highlight(
+            moment_type="analysis", breakdown_commentary="x", peak_time=500.0
+        )
+        assert pipeline._resolve_highlight_mode("auto", outside)[0] == "narrative"
+        assert "peak_time" in pipeline._breakdown_ineligible_reason(outside)
 
     def test_auto_keeps_funny_fail_on_narrative(self, tmp_path: Path) -> None:
         pipeline = Pipeline(_make_config(tmp_path))
@@ -92,10 +113,11 @@ class TestPipelineBreakdownModeResolution:
 
     def test_auto_resolves_breakdown_when_commentary_present(self, tmp_path: Path) -> None:
         pipeline = Pipeline(_make_config(tmp_path))
-        # Even if moment_type is hype or clutch, explicit breakdown commentary triggers breakdown
+        # An allowed moment_type with commentary and a peak inside the clip triggers breakdown
         h = _make_highlight(
-            moment_type="hype",
+            moment_type="clutch",
             breakdown_commentary="Watch how the ragdoll physics glitches into the palm tree.",
+            peak_time=120.0,
         )
         mode, beats = pipeline._resolve_highlight_mode("auto", h)
         assert mode == "breakdown"
@@ -135,10 +157,25 @@ class TestPipelineBreakdownModeResolution:
 
     def test_explicit_breakdown_mode_returns_breakdown(self, tmp_path: Path) -> None:
         pipeline = Pipeline(_make_config(tmp_path))
-        h = _make_highlight(moment_type="hype")
+        h = _make_highlight(
+            moment_type="graphics_detail", breakdown_commentary="Check the reflections.",
+            peak_time=120.0,
+        )
         mode, beats = pipeline._resolve_highlight_mode("breakdown", h)
         assert mode == "breakdown"
         assert beats == []
+
+    def test_explicit_breakdown_downgrades_for_reaction_moments(self, tmp_path: Path) -> None:
+        pipeline = Pipeline(_make_config(tmp_path))
+        h = _make_highlight(moment_type="hype", breakdown_commentary="x", peak_time=120.0)
+        assert pipeline._resolve_highlight_mode("breakdown", h)[0] == "narrative"
+        beats_data = [
+            {"start": 100.0, "end": 115.0, "label": "Setup"},
+            {"start": 130.0, "end": 145.0, "label": "Payoff"},
+        ]
+        h2 = _make_highlight(moment_type="hype", sub_clips=beats_data)
+        mode, beats = pipeline._resolve_highlight_mode("breakdown", h2)
+        assert mode == "story" and len(beats) == 2
 
     def test_raw_mode_logs_ypp_demonetization_warning(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
