@@ -70,6 +70,10 @@ class TransformativeNarrator:
         self.elevenlabs_voice_id: str = str(
             config.get("transformation.elevenlabs_voice_id", "") or ""
         )
+        # Separate Hindi/Hinglish voice; falls back to the main voice when unset.
+        self.elevenlabs_hinglish_voice_id: str = str(
+            config.get("transformation.elevenlabs_hinglish_voice_id", "") or ""
+        )
         self.elevenlabs_model_id: str = str(
             config.get("transformation.elevenlabs_model_id", "eleven_multilingual_v2")
             or "eleven_multilingual_v2"
@@ -104,8 +108,16 @@ class TransformativeNarrator:
         except Exception as exc:
             logger.debug("torch.cuda.empty_cache unavailable: %s", exc)
 
-    def _elevenlabs_available(self) -> bool:
-        return ElevenLabsTTS(self.elevenlabs_voice_id, self.elevenlabs_model_id).available()
+    def _elevenlabs_voice_for(self, language: str | None = None) -> str:
+        lang = str(language or self.language or "english").strip().lower()
+        if lang == "hinglish" and self.elevenlabs_hinglish_voice_id.strip():
+            return self.elevenlabs_hinglish_voice_id
+        return self.elevenlabs_voice_id
+
+    def _elevenlabs_available(self, language: str | None = None) -> bool:
+        return ElevenLabsTTS(
+            self._elevenlabs_voice_for(language), self.elevenlabs_model_id
+        ).available()
 
     def _hinglish_chain(self) -> list[str]:
         """Hinglish chain: only multilingual-capable engines (never English-only ones)."""
@@ -116,7 +128,7 @@ class TransformativeNarrator:
             n = str(name).lower().strip().replace("_", "-")
             if n not in ("elevenlabs", "edge-tts") or n in chain:
                 continue
-            if n == "elevenlabs" and not self._elevenlabs_available():
+            if n == "elevenlabs" and not self._elevenlabs_available("hinglish"):
                 continue
             chain.append(n)
         return chain or ["edge-tts"]
@@ -130,7 +142,7 @@ class TransformativeNarrator:
         if (
             (self.engine or "auto").lower().strip() == "auto"
             and "elevenlabs" not in chain
-            and self._elevenlabs_available()
+            and self._elevenlabs_available("english")
         ):
             chain.insert(0, "elevenlabs")
         return chain
@@ -169,6 +181,8 @@ class TransformativeNarrator:
                 return self._synthesize_edge_tts(text, output_wav, language="hinglish")
             return self._synthesize_edge_tts(text, output_wav)
         if name == "elevenlabs":
+            if str(language or self.language).strip().lower() == "hinglish":
+                return self._synthesize_elevenlabs(text, output_wav, language="hinglish")
             return self._synthesize_elevenlabs(text, output_wav)
         return None
 
@@ -245,9 +259,11 @@ class TransformativeNarrator:
         eng = EdgeTTS(voice, self.edge_tts_rate)
         return eng.synthesize(text, output_wav)
 
-    def _synthesize_elevenlabs(self, text: str, output_wav: Path) -> Path | None:
+    def _synthesize_elevenlabs(
+        self, text: str, output_wav: Path, language: str | None = None
+    ) -> Path | None:
         """Synthesize with ElevenLabs when ELEVENLABS_API_KEY & voice_id are set."""
-        eng = ElevenLabsTTS(self.elevenlabs_voice_id, self.elevenlabs_model_id)
+        eng = ElevenLabsTTS(self._elevenlabs_voice_for(language), self.elevenlabs_model_id)
         return eng.synthesize(text, output_wav)
 
     def _synthesize_chatterbox(self, text: str, output_wav: Path) -> Path | None:

@@ -152,3 +152,37 @@ def test_L4_hinglish_never_runs_kokoro_or_chatterbox(tmp_path, monkeypatch):
     n._run_engine = fake_run  # type: ignore[method-assign]
     assert n.synthesize_speech("namaste", tmp_path / "x.wav", language="hinglish") is None
     assert ran == ["edge-tts"]
+
+
+def test_L4_elevenlabs_uses_per_language_voice(tmp_path, monkeypatch):
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "k")
+    used: list[str] = []
+
+    class _FakeEleven:
+        def __init__(self, voice_id: str = "", model_id: str = "") -> None:
+            self.voice_id = voice_id
+
+        def available(self) -> bool:
+            return bool(self.voice_id)
+
+        def synthesize(self, text, out_wav):
+            used.append(self.voice_id)
+            return None
+
+    monkeypatch.setattr(narrator_mod, "ElevenLabsTTS", _FakeEleven)
+    n = _narrator(
+        tmp_path,
+        '  elevenlabs_voice_id: "en_voice"\n  elevenlabs_hinglish_voice_id: "hi_voice"\n',
+    )
+    n._run_engine("elevenlabs", "hello", tmp_path / "a.wav", language="english")
+    n._run_engine("elevenlabs", "bhai", tmp_path / "b.wav", language="hinglish")
+    assert used == ["en_voice", "hi_voice"]
+
+    # Hinglish voice alone is enough for the Hinglish chain; English falls back to other engines.
+    n2 = _narrator(tmp_path, '  elevenlabs_hinglish_voice_id: "hi_voice"\n')
+    assert n2._engine_chain("hinglish")[0] == "elevenlabs"
+    assert "elevenlabs" not in n2._engine_chain("english")
+
+    # Unset Hinglish voice falls back to the main voice.
+    n3 = _narrator(tmp_path, '  elevenlabs_voice_id: "en_voice"\n')
+    assert n3._elevenlabs_voice_for("hinglish") == "en_voice"
