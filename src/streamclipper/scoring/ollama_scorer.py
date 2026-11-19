@@ -12,6 +12,7 @@ import httpx
 import ollama
 
 from ..config import Config, VALID_TRANSFORMATION_MODES
+from ..language import language_instruction
 from ..models import ClipMetadata, Highlight, TimeRange
 from .scorer import Scorer, TranscriptChunk
 
@@ -586,6 +587,7 @@ class OllamaScorer(Scorer):
         *,
         hook_style: str | None = None,
         avoid_phrases: list[str] | None = None,
+        language: str = "english",
     ) -> tuple[str, str, str]:
         """Backfill (narration_intro, narration_outro, context_badge) via narrative_writer.txt.
 
@@ -618,6 +620,7 @@ class OllamaScorer(Scorer):
             chat_samples="\n".join(chat_lines[:5]) or "(none)",
             avoid_phrases=", ".join(f'"{p}"' for p in (avoid_phrases or [])) or "(none)",
             hook_style=_as_str(hook_style) or "any",
+            language_instruction=language_instruction(language),
         )
         existing_intro = _as_str(highlight.narration_intro)
         existing_outro = _as_str(highlight.narration_outro)
@@ -692,6 +695,7 @@ class OllamaScorer(Scorer):
         streamer: str,
         game: str,
         hook_style: str | None = None,
+        language: str = "english",
     ) -> str:
         """Generate a short hook title using hook_generator.txt."""
         prompt = self.hook_prompt.format(
@@ -700,6 +704,7 @@ class OllamaScorer(Scorer):
             description=_as_str(highlight.reason),
             quote=_as_str(highlight.best_quote),
             hook_style=_as_str(hook_style) or "any",
+            language_instruction=language_instruction(language),
         )
         raw_text = self._call_generate(prompt, json_format=False)
         cleaned = _clean_llm_text(raw_text)
@@ -813,9 +818,12 @@ class OllamaScorer(Scorer):
         mode: str | None = None,
         hook_style: str | None = None,
         avoid_phrases: list[str] | None = None,
+        language: str = "english",
     ) -> ClipMetadata:
         """Generate hook title, narrative fields, callout, caption, and hashtags for a highlight."""
-        hook_title = self._generate_hook_title(highlight, streamer, game, hook_style)
+        hook_title = self._generate_hook_title(
+            highlight, streamer, game, hook_style, language=language
+        )
 
         if mode is not None and str(mode).strip():
             requested_mode = str(mode).strip().lower()
@@ -867,6 +875,7 @@ class OllamaScorer(Scorer):
                     game,
                     hook_style=hook_style,
                     avoid_phrases=avoid_phrases,
+                    language=language,
                 )
                 narration_intro = narration_intro or gen_intro
                 narration_outro = narration_outro or gen_outro
@@ -899,6 +908,7 @@ class OllamaScorer(Scorer):
             narration_outro=narration_outro,
             context_badge=context_badge,
             transformation_mode=transformation_mode,
+            narration_language=str(language or "english"),
             breakdown_commentary=breakdown_commentary,
             breakdown_callout=breakdown_callout,
             music_risk=highlight.music_risk,

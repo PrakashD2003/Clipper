@@ -18,6 +18,52 @@ DEFAULT_CONFIG_PATH = (
     else _PACKAGE_DEFAULT_CONFIG_PATH
 )
 USER_CONFIG_PATH = Path("config.yaml")
+_REPO_ENV_PATH = Path(__file__).parent.parent.parent / ".env"
+
+
+def load_env_files(paths: list[Path] | None = None) -> list[str]:
+    """Load KEY=VALUE pairs from .env files into os.environ without overriding real env vars.
+
+    Defaults to the repo-root ``.env`` and ``./.env`` (the working directory varies by
+    launcher, e.g. an IDE-hosted MCP server). Returns the keys that were set. Values are
+    never logged.
+    """
+    import os
+
+    if paths is None and os.environ.get("STREAMCLIPPER_NO_DOTENV"):
+        return []
+    candidates = paths if paths is not None else [_REPO_ENV_PATH, Path(".env")]
+    loaded: list[str] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        try:
+            resolved = Path(candidate).resolve()
+        except OSError:
+            continue
+        if resolved in seen or not resolved.is_file():
+            continue
+        seen.add(resolved)
+        try:
+            lines = resolved.read_text(encoding="utf-8-sig").splitlines()
+        except OSError:
+            continue
+        for raw in lines:
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            if line.startswith("export "):
+                line = line[len("export "):].lstrip()
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+                value = value[1:-1]
+            elif " #" in value:
+                value = value.split(" #", 1)[0].rstrip()
+            if key and key not in os.environ:
+                os.environ[key] = value
+                loaded.append(key)
+    return loaded
 
 VALID_WEIGHT_KEYS = frozenset({"loudness", "chat_velocity", "llm_score"})
 VALID_GAME_FITS = frozenset({"full", "balanced"})
@@ -201,6 +247,7 @@ class Config:
         user_config_path: Path | None = None,
         hardware_profile: HardwareProfile | None = None,
     ):
+        load_env_files()
         with open(DEFAULT_CONFIG_PATH, encoding="utf-8") as f:
             self._data = yaml.safe_load(f)
 

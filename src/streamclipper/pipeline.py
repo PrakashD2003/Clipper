@@ -19,6 +19,7 @@ from .analysis.loudness import LoudnessDetector
 from .analysis.transcriber import Transcriber
 from .cache import StepCache
 from .config import Config, VALID_TRANSFORMATION_MODES
+from .language import resolve_narration_language
 from .download.audio import download_audio
 from .download.chat import ChatScraper
 from .download.video import download_multiple_segments, download_segment
@@ -675,7 +676,7 @@ class Pipeline:
                 p.kind == inspect.Parameter.VAR_KEYWORD
                 for p in meta_sig.parameters.values()
             )
-            for kw_name in ("mode", "hook_style", "avoid_phrases"):
+            for kw_name in ("mode", "hook_style", "avoid_phrases", "language"):
                 if kw_name in meta_sig.parameters or has_var_kw:
                     supported_meta_kwargs.add(kw_name)
         except (TypeError, ValueError):
@@ -705,6 +706,11 @@ class Pipeline:
             self.config.get("discovery.default_game", "GTA 6")
         )
 
+        narration_language = resolve_narration_language(
+            self.config,
+            state.stream_info.streamer,
+            state.transcript.language if state.transcript else None,
+        )
         skip_high_music = bool(self.config.get("analysis.skip_high_music", False))
         buffer_seconds = 3.0
         for idx, highlight in enumerate(state.selected_highlights, start=1):
@@ -785,6 +791,8 @@ class Pipeline:
                 meta_kwargs["hook_style"] = hook_style
             if "avoid_phrases" in supported_meta_kwargs:
                 meta_kwargs["avoid_phrases"] = variety.recent_outros(20)
+            if "language" in supported_meta_kwargs:
+                meta_kwargs["language"] = narration_language
 
             async with self._gpu_guard():
                 metadata = await asyncio.to_thread(
@@ -796,6 +804,7 @@ class Pipeline:
                     **meta_kwargs,
                 )
                 metadata.transformation_mode = clip_mode
+                metadata.narration_language = narration_language
                 if clip_mode == "raw":
                     metadata.narration_intro = ""
                     metadata.narration_outro = ""
@@ -936,6 +945,11 @@ class Pipeline:
             ),
         )
         narrator = TransformativeNarrator(self.config)
+        narrator.language = resolve_narration_language(
+            self.config,
+            state.stream_info.streamer,
+            state.transcript.language if state.transcript else None,
+        )
         guard = self._gpu_guard() if self._narration_may_use_gpu("narrative") else _AsyncNull()
         try:
             async with guard:
@@ -1438,6 +1452,8 @@ class Pipeline:
                 "voice_outro_path": voice_outro_path,
                 "mode": mode,
             }
+            if getattr(metadata, "narration_language", ""):
+                export_kwargs["language"] = metadata.narration_language
             if layout is not None:
                 export_kwargs["layout"] = layout
             if callout_text:

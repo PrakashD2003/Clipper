@@ -267,6 +267,7 @@ class ClipMetadata(SerializableModel):
     music_risk: str = "CLEAN"
     music_confidence: float = 0.0
     callout: str = ""
+    narration_language: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ClipMetadata":
@@ -292,6 +293,7 @@ class ClipMetadata(SerializableModel):
                 data.get("music_confidence") if data.get("music_confidence") is not None else 0.0
             ),
             callout=data.get("callout") or "",
+            narration_language=data.get("narration_language", "") or "",
         )
 
 

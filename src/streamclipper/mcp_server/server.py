@@ -18,6 +18,7 @@ from ..analysis.loudness import LoudnessDetector
 from ..analysis.transcriber import Transcriber
 from ..cache import StepCache
 from ..config import Config
+from ..language import language_instruction, resolve_narration_language
 from ..discovery.youtube import YouTubeDiscovery
 from ..download.audio import _extract_youtube_id_from_url, download_audio
 from ..download.chat import ChatScraper
@@ -141,6 +142,18 @@ def _get_cache(config: Config) -> StepCache:
 def _json_ok(payload: dict[str, Any]) -> str:
     """Serialize a tool result dict to a formatted JSON string."""
     return json.dumps(payload, indent=2)
+
+
+def _state_narration_language(config: Config, state: Any) -> str:
+    """Resolve english/hinglish from a cached PipelineState (streamer + transcript language)."""
+    if state is None:
+        return resolve_narration_language(config, None, None)
+    transcript = getattr(state, "transcript", None)
+    return resolve_narration_language(
+        config,
+        getattr(state.stream_info, "streamer", None),
+        getattr(transcript, "language", None) if transcript is not None else None,
+    )
 
 
 def _json_error(message: str) -> str:
@@ -486,6 +499,7 @@ async def _render_single_highlight(
     min_clip_index: int = 1,
     voice_breakdown_path: Path | None = None,
     layout: str = "",
+    language: str = "english",
 ) -> tuple[ClipResult, str]:
     """Download segment(s), build offline ClipMetadata, and assemble one highlight."""
     clip_mode, valid_beats = pipeline._resolve_highlight_mode(base_mode, highlight)
@@ -543,6 +557,7 @@ async def _render_single_highlight(
         breakdown_callout="" if clip_mode == "raw" else _as_str(highlight.breakdown_callout),
         music_risk=highlight.music_risk,
         music_confidence=highlight.music_confidence,
+        narration_language=language,
     )
     # `callout` lands on ClipMetadata in Batch D; set it as an attribute so this works pre/post merge.
     metadata.callout = "" if clip_mode == "raw" else _as_str(getattr(highlight, "callout", ""))
@@ -973,6 +988,7 @@ async def get_transcript_chunks(
             return _json_error(
                 "Transcript is not available in cache. Run transcribe_audio first."
             )
+        narration_lang = _state_narration_language(config, state)
 
         scorer = _MCPScorer(config)
         all_chunks = scorer._chunk_transcript(
@@ -1007,7 +1023,10 @@ async def get_transcript_chunks(
             "returned_chunks": len(chunks_payload),
             "filtered_out_chunks": max(0, len(all_chunks) - len(chunks_payload)),
             "chunks": chunks_payload,
+            "narration_language": narration_lang,
         }
+        if narration_lang == "hinglish":
+            payload["narration_language_instruction"] = language_instruction(narration_lang)
         if (
             only_with_signals
             and not state.analysis_complete
@@ -1234,17 +1253,25 @@ async def submit_highlights(url: str, highlights: str) -> str:
                     state.status = PipelineStatus.PENDING
             cache.save_state(state)
 
-        return _json_ok(
-            {
-                "url": clean_url,
-                "accepted_count": len(accepted),
-                "rejected_count": rejected_count,
-                "rejected": rejected_reasons,
-                "dropped_count": dropped_count,
-                "status": state.status.name.lower(),
-                "highlights": [h.to_dict() for h in accepted],
-            }
-        )
+        submit_lang = _state_narration_language(config, state)
+        submit_payload: dict[str, Any] = {
+            "url": clean_url,
+            "accepted_count": len(accepted),
+            "rejected_count": rejected_count,
+            "rejected": rejected_reasons,
+            "dropped_count": dropped_count,
+            "status": state.status.name.lower(),
+            "highlights": [h.to_dict() for h in accepted],
+            "narration_language": submit_lang,
+        }
+        if submit_lang == "hinglish":
+            submit_payload["narration_language_instruction"] = language_instruction(submit_lang)
+        if state.transcript is None:
+            submit_payload["warnings"] = [
+                "No transcript cached for this stream: speech captions will be empty and "
+                "narration can't quote the streamer. Run transcribe_audio first."
+            ]
+        return _json_ok(submit_payload)
     except Exception as exc:
         logger.exception("submit_highlights failed")
         return _json_error(str(exc))
@@ -1435,6 +1462,13 @@ async def render_clip(
                 min_clip_index=min_clip_index,
                 voice_breakdown_path=breakdown_voice,
                 layout=layout_kind,
+                language=resolve_narration_language(
+                    config,
+                    resolved_streamer,
+                    state.transcript.language
+                    if state is not None and state.transcript is not None
+                    else None,
+                ),
             )
 
             fresh_state = cache.load_state(clean_url)
@@ -1507,6 +1541,7 @@ async def render_all_selected(
                         clip_index=None,
                         base_mode=base_mode,
                         min_clip_index=base_index + idx,
+                        language=_state_narration_language(config, state),
                     )
                     rendered.append(clip_result)
                     rendered_modes.append(clip_mode)

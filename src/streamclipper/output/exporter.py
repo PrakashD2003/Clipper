@@ -174,8 +174,11 @@ class Exporter:
         callout: str = "",
         callout_start: float | None = None,
         duck_full: bool = False,
+        language: str | None = None,
     ) -> Path:
         """Render composed clip, mix narrator ducking, burn ASS captions+chat ticker, and release handles."""
+        if language:
+            self.narrator.language = str(language).strip().lower()
         final_output = Path(output_path)
         final_output.parent.mkdir(parents=True, exist_ok=True)
 

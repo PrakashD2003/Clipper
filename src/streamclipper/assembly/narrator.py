@@ -76,6 +76,15 @@ class TransformativeNarrator:
         )
         raw_duck = config.get("transformation.duck_stream_volume", 0.18)
         self.duck_volume: float = float(0.18 if raw_duck is None else raw_duck)
+        hch = config.get("transformation.hinglish_tts_engines", ["elevenlabs", "edge-tts"])
+        self.hinglish_engine_chain: list[str] = (
+            [hch] if isinstance(hch, str) else list(hch or [])
+        )
+        self.hinglish_edge_tts_voice: str = str(
+            config.get("transformation.hinglish_edge_tts_voice", "en-IN-PrabhatNeural")
+            or "en-IN-PrabhatNeural"
+        )
+        self.language: str = "english"
         self._kokoro = KokoroTTS(self.voice, self.tts_speed)
 
     @property
@@ -95,8 +104,38 @@ class TransformativeNarrator:
         except Exception as exc:
             logger.debug("torch.cuda.empty_cache unavailable: %s", exc)
 
-    def _engine_chain(self) -> list[str]:
+    def _elevenlabs_available(self) -> bool:
+        return ElevenLabsTTS(self.elevenlabs_voice_id, self.elevenlabs_model_id).available()
+
+    def _hinglish_chain(self) -> list[str]:
+        """Hinglish chain: only multilingual-capable engines (never English-only ones)."""
+        if (self.engine or "auto").lower().strip() == "none":
+            return []
+        chain: list[str] = []
+        for name in self.hinglish_engine_chain:
+            n = str(name).lower().strip().replace("_", "-")
+            if n not in ("elevenlabs", "edge-tts") or n in chain:
+                continue
+            if n == "elevenlabs" and not self._elevenlabs_available():
+                continue
+            chain.append(n)
+        return chain or ["edge-tts"]
+
+    def _engine_chain(self, language: str | None = None) -> list[str]:
         """Resolve the ordered TTS fallback chain (legacy single ``tts_engine`` wins when set)."""
+        lang = str(language or self.language or "english").strip().lower()
+        if lang == "hinglish":
+            return self._hinglish_chain()
+        chain = self._english_engine_chain()
+        if (
+            (self.engine or "auto").lower().strip() == "auto"
+            and "elevenlabs" not in chain
+            and self._elevenlabs_available()
+        ):
+            chain.insert(0, "elevenlabs")
+        return chain
+
+    def _english_engine_chain(self) -> list[str]:
         legacy = (self.engine or "auto").lower().strip()
         known = ("chatterbox", "kokoro", "edge-tts", "elevenlabs")
         if legacy == "none":
@@ -118,19 +157,27 @@ class TransformativeNarrator:
                 chain.append(n)
         return chain or ["kokoro", "edge-tts"]
 
-    def _run_engine(self, name: str, text: str, output_wav: Path) -> Path | None:
+    def _run_engine(
+        self, name: str, text: str, output_wav: Path, language: str | None = None
+    ) -> Path | None:
         if name == "chatterbox":
             return self._synthesize_chatterbox(text, output_wav)
         if name == "kokoro":
             return self._synthesize_kokoro(text, output_wav)
         if name == "edge-tts":
+            if str(language or self.language).strip().lower() == "hinglish":
+                return self._synthesize_edge_tts(text, output_wav, language="hinglish")
             return self._synthesize_edge_tts(text, output_wav)
         if name == "elevenlabs":
             return self._synthesize_elevenlabs(text, output_wav)
         return None
 
     def synthesize_speech(
-        self, text: str, output_wav: Path, max_seconds: float | None = None
+        self,
+        text: str,
+        output_wav: Path,
+        max_seconds: float | None = None,
+        language: str | None = None,
     ) -> Path | None:
         """Synthesize text to WAV through the TTS engine chain (first engine returning audio wins)."""
         if not text or not text.strip() or not self.enabled:
@@ -140,8 +187,9 @@ class TransformativeNarrator:
         output_wav = Path(output_wav)
         output_wav.parent.mkdir(parents=True, exist_ok=True)
 
-        for name in self._engine_chain():
-            res = self._run_engine(name, clean_text, output_wav)
+        lang = str(language or self.language or "english").strip().lower()
+        for name in self._engine_chain(lang):
+            res = self._run_engine(name, clean_text, output_wav, language=lang)
             if res is not None and res.is_file() and res.stat().st_size > 0:
                 return res
             if name == "kokoro":
@@ -184,9 +232,17 @@ class TransformativeNarrator:
         self._kokoro.speed = self.tts_speed
         return self._kokoro.synthesize(text, output_wav)
 
-    def _synthesize_edge_tts(self, text: str, output_wav: Path) -> Path | None:
+    def _synthesize_edge_tts(
+        self, text: str, output_wav: Path, language: str | None = None
+    ) -> Path | None:
         """Synthesize with edge-tts using self.edge_tts_voice / edge_tts_rate."""
-        eng = EdgeTTS(self.edge_tts_voice or "en-US-AndrewMultilingualNeural", self.edge_tts_rate)
+        lang = str(language or self.language or "english").strip().lower()
+        voice = (
+            self.hinglish_edge_tts_voice
+            if lang == "hinglish"
+            else self.edge_tts_voice or "en-US-AndrewMultilingualNeural"
+        )
+        eng = EdgeTTS(voice, self.edge_tts_rate)
         return eng.synthesize(text, output_wav)
 
     def _synthesize_elevenlabs(self, text: str, output_wav: Path) -> Path | None:

@@ -12,6 +12,8 @@ MATCH THE TONE TO `moment_type`:
 - lore_secret / analysis: intriguing context setup -> mechanic or easter-egg takeaway (badge e.g. "🧠 Hidden Detail")
 - reaction: set up what the streamer is looking at -> riff on their face/voice reaction (badge e.g. "😳 Pure Shock")
 
+{language_instruction}
+
 STRICT RULES:
 1. Every sentence is 12 words or fewer. Short, punchy, spoken.
 2. `narration_intro`: 1-2 sentences (~3-5 seconds spoken). Give context or tell the viewer what to watch for WITHOUT spoiling the punchline. Opening style: {hook_style}.

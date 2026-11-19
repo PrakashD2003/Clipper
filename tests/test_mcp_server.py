@@ -3182,3 +3182,54 @@ async def test_F3_F4_render_clip_callout_layout_and_post_file(
     sub = _extract_json(await mcp.call_tool("submit_highlights", {"url": url, "highlights": json.dumps(
         [{"start": 100.0, "end": 130.0, "score": 9.0, "title": "T", "callout": "Hey!"}])}))
     assert sub["accepted_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_L5_submit_highlights_warns_without_transcript_and_reports_language(
+    mcp_env: tuple[Config, StepCache, Path],
+) -> None:
+    _, cache, _ = mcp_env
+    url = "https://www.youtube.com/watch?v=nt123456789"
+    cache.save_state(
+        PipelineState(
+            stream_info=StreamInfo(
+                url=url, title="t", platform=Platform.YOUTUBE, streamer="S",
+                game="GTA 6", duration_seconds=3600, video_id="nt123456789",
+            ),
+            status=PipelineStatus.SCORING,
+        )
+    )
+    payload = json.dumps([{"start": 10.0, "end": 40.0, "score": 8.0, "title": "T"}])
+    data = _extract_json(
+        await mcp.call_tool("submit_highlights", {"url": url, "highlights": payload})
+    )
+    assert any("No transcript cached" in w for w in data["warnings"])
+    assert data["narration_language"] == "english"
+    assert "narration_language_instruction" not in data
+
+
+@pytest.mark.asyncio
+async def test_L5_transcript_chunks_hinglish_instruction(
+    mcp_env: tuple[Config, StepCache, Path],
+) -> None:
+    _, cache, _ = mcp_env
+    url = "https://www.youtube.com/watch?v=hi123456789"
+    transcript = _make_sample_transcript()
+    transcript.language = "hi"
+    cache.save_state(
+        PipelineState(
+            stream_info=StreamInfo(
+                url=url, title="t", platform=Platform.YOUTUBE, streamer="S",
+                game="GTA 6", duration_seconds=3600, video_id="hi123456789",
+            ),
+            status=PipelineStatus.SCORING,
+            transcript=transcript,
+        )
+    )
+    data = _extract_json(
+        await mcp.call_tool(
+            "get_transcript_chunks", {"url": url, "only_with_signals": False}
+        )
+    )
+    assert data["narration_language"] == "hinglish"
+    assert "ROMAN" in data["narration_language_instruction"]

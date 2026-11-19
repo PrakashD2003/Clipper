@@ -1,5 +1,10 @@
 """Shared pytest fixtures."""
+import os
+
 import pytest
+
+# Never let a developer's real .env (API keys) leak into tests.
+os.environ.setdefault("STREAMCLIPPER_NO_DOTENV", "1")
 
 from streamclipper.config import detect_hardware_profile
 

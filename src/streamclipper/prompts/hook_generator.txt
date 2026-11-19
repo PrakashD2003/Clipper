@@ -7,6 +7,8 @@ HOOK STYLE: {hook_style}
 - nobody_noticed: point out a detail most viewers missed
 - If the style is empty or unknown, pick whichever fits best.
 
+{language_instruction}
+
 RULES:
 1. Maximum 8 words
 2. Present tense ("Tim can't believe..." not "Tim couldn't believe...")
