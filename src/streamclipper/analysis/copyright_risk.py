@@ -28,7 +28,15 @@ class CopyrightRiskDetector:
         self.config = config
         if config is not None:
             self.enabled: bool = bool(config.get("analysis.copyright_check", True))
-            self.risk_threshold: float = float(config.get("analysis.music_risk_threshold", 0.65))
+            self.risk_threshold: float = float(
+                config.get(
+                    "analysis.copyright.high_risk_threshold",
+                    config.get("analysis.music_risk_threshold", 0.65),
+                )
+            )
+            self.low_risk_threshold: float = float(
+                config.get("analysis.copyright.low_risk_threshold", 0.35)
+            )
             self.min_gap_seconds: float = float(config.get("analysis.music_min_gap_seconds", 0.4))
             self.flatness_threshold: float = float(
                 config.get("analysis.music_flatness_threshold", 0.15)
@@ -37,6 +45,7 @@ class CopyrightRiskDetector:
         else:
             self.enabled = True
             self.risk_threshold = 0.65
+            self.low_risk_threshold = 0.35
             self.min_gap_seconds = 0.4
             self.flatness_threshold = 0.15
             self.min_rms = 0.005
@@ -130,6 +139,7 @@ class CopyrightRiskDetector:
             return ("CLEAN", 0.0)
 
         gap_confidences: list[tuple[float, float]] = []  # (confidence, duration)
+        failed_gaps = 0
 
         with sf.SoundFile(str(path), "r") as sf_file:
             sr = sf_file.samplerate
@@ -175,10 +185,13 @@ class CopyrightRiskDetector:
                     conf = float(np.clip(h_ratio * tonality, 0.0, 1.0))
                     gap_confidences.append((conf, gap_dur))
                 except Exception as exc:
-                    logger.debug("HPSS analysis failed on gap [%.2f, %.2f]: %s", gap_start, gap_end, exc)
+                    logger.warning("HPSS analysis failed on gap [%.2f, %.2f]: %s", gap_start, gap_end, exc)
+                    failed_gaps += 1
                     continue
 
         if not gap_confidences:
+            if failed_gaps:
+                return ("UNKNOWN", 0.0)
             return ("CLEAN", 0.0)
 
         total_gap_dur = sum(dur for _, dur in gap_confidences)
@@ -192,7 +205,7 @@ class CopyrightRiskDetector:
 
         if final_conf >= self.risk_threshold or (peak_conf >= self.risk_threshold and peak_dur >= 1.0):
             risk = "HIGH_MUSIC_DETECTED"
-        elif final_conf >= 0.35 or peak_conf >= 0.50:
+        elif final_conf >= self.low_risk_threshold or peak_conf >= 0.50:
             risk = "LOW"
         else:
             risk = "CLEAN"

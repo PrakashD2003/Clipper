@@ -22,6 +22,7 @@ INPUT:
 - Hook title: "{hook_title}"
 - What happens: {description}
 - Key quote: "{quote}"
+- Narration style hint: {narration_style}
 
 OUTPUT (strict JSON):
 {{
