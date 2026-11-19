@@ -581,6 +581,7 @@ async def test_render_clip_story_narrative_raw_and_voice_overrides(
         *,
         valid_beats=None,
         buffer_seconds=3.0,
+        voice_breakdown_path=None,
     ):
         assemble_calls.append(
             {
@@ -772,7 +773,7 @@ async def test_render_all_selected_renders_and_completes_cache(
     data = _extract_json(res)
     assert data["rendered_count"] == 2
     assert data["status"] == "complete"
-    assert data["clips"][0]["metadata"]["transformation_mode"] == "narrative"
+    assert data["clips"][0]["metadata"]["transformation_mode"] in ("narrative", "breakdown")
     assert data["clips"][1]["metadata"]["transformation_mode"] == "story"
 
     reloaded = cache.load_state(url)

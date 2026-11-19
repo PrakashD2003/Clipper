@@ -225,6 +225,85 @@ def render_context_badge(
     return np.array(img, dtype=np.uint8)
 
 
+def render_replay_badge(
+    text: str = "🔴 INSTANT REPLAY",
+    font_size: int = 28,
+    font_name: str | None = None,
+    max_width: int | None = None,
+    as_pil: bool = False,
+) -> np.ndarray | Image.Image:
+    """Render a high-contrast sports broadcast 'INSTANT REPLAY' badge pill into an RGBA numpy array or PIL Image."""
+    font = _load_font(font_name, font_size)
+    tmp = Image.new("RGBA", (1, 1))
+    d_tmp = ImageDraw.Draw(tmp)
+
+    pad_x = 28
+    pad_y = 12
+
+    bbox = d_tmp.textbbox((0, 0), text, font=font)
+    text_w = max(1, bbox[2] - bbox[0])
+    text_h = max(1, bbox[3] - bbox[1])
+
+    badge_w = text_w + 2 * pad_x
+    badge_h = text_h + 2 * pad_y
+
+    img = Image.new("RGBA", (badge_w, badge_h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    draw.rounded_rectangle(
+        [(0, 0), (badge_w - 1, badge_h - 1)],
+        radius=min(18, badge_h // 2),
+        fill=(18, 18, 24, 235),
+        outline=(230, 35, 35, 255),
+        width=2,
+    )
+
+    tx = (badge_w - text_w) // 2 - bbox[0]
+    ty = (badge_h - text_h) // 2 - bbox[1]
+    draw.text((tx, ty), text, font=font, fill="white")
+
+    if as_pil:
+        return img
+    return np.array(img, dtype=np.uint8)
+
+
+def render_replay_badge_pil(
+    text: str = "🔴 INSTANT REPLAY",
+    font_size: int = 28,
+    font_name: str | None = None,
+    max_width: int | None = None,
+) -> Image.Image:
+    """Render a high-contrast sports broadcast 'INSTANT REPLAY' badge pill into a PIL Image."""
+    res = render_replay_badge(
+        text=text,
+        font_size=font_size,
+        font_name=font_name,
+        max_width=max_width,
+        as_pil=True,
+    )
+    return res  # type: ignore[return-value]
+
+
+def create_replay_badge(
+    text: str = "🔴 INSTANT REPLAY",
+    width: int = 1080,
+    height: int = 1920,
+    font_size: int = 28,
+    font_name: str | None = None,
+    duration: float | None = None,
+) -> ImageClip:
+    """Render a high-contrast sports broadcast replay badge pill as an ImageClip positioned at ('center', 140)."""
+    arr = render_replay_badge(
+        text=text,
+        font_size=font_size,
+        font_name=font_name,
+        max_width=int(width * 0.90) if width is not None else None,
+    )
+    clip = ImageClip(arr).with_position(("center", 140))
+    if duration is not None and duration > 0:
+        clip = clip.with_duration(duration)
+    return clip
+
+
 class HookTitleOverlay:
     """Renders hook title banner and adaptive context badge overlays using MoviePy v2."""
 

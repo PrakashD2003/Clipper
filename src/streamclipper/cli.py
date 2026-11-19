@@ -54,7 +54,7 @@ def cli(ctx: click.Context, config: str | None, verbose: bool) -> None:
 @click.option("--interactive/--no-interactive", default=True, help="Prompt to select highlights")
 @click.option(
     "--mode",
-    type=click.Choice(["auto", "narrative", "story", "raw"], case_sensitive=False),
+    type=click.Choice(["auto", "narrative", "story", "breakdown", "raw"], case_sensitive=False),
     default=None,
     help="YPP transformation mode (overrides config)",
 )
@@ -71,6 +71,13 @@ def cli(ctx: click.Context, config: str | None, verbose: bool) -> None:
     type=click.Path(dir_okay=False, path_type=Path),
     default=None,
     help="Path to custom human outro voiceover WAV",
+)
+@click.option(
+    "--voice-breakdown",
+    "voice_breakdown",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Path to custom human breakdown voiceover WAV",
 )
 @click.option(
     "--force",
@@ -90,6 +97,7 @@ def clip(
     voice_intro: Path | None,
     voice_outro: Path | None,
     force: bool,
+    voice_breakdown: Path | None = None,
 ) -> None:
     """Clip highlights from a stream URL.
 
@@ -103,6 +111,8 @@ def clip(
         console.print(f"[yellow]⚠ Intro voiceover file not found yet:[/] {voice_intro}")
     if voice_outro is not None and not voice_outro.exists():
         console.print(f"[yellow]⚠ Outro voiceover file not found yet:[/] {voice_outro}")
+    if voice_breakdown is not None and not voice_breakdown.exists():
+        console.print(f"[yellow]⚠ Breakdown voiceover file not found yet:[/] {voice_breakdown}")
 
     console.print(f"[bold green]🎬 Processing stream:[/] {url}")
 
@@ -117,6 +127,8 @@ def clip(
         "voice_intro_path": voice_intro,
         "voice_outro_path": voice_outro,
     }
+    if voice_breakdown is not None:
+        call_kwargs["voice_breakdown_path"] = voice_breakdown
     if force:
         call_kwargs["force"] = True
 
@@ -128,8 +140,9 @@ def clip(
 
     console.print(f"[bold green]✅ Generated {len(clips)} clip(s):[/]")
     for idx, result in enumerate(clips, 1):
+        music_flag = " [red]⚠️ MUSIC_DETECTED[/]" if result.metadata.music_risk == "HIGH_MUSIC_DETECTED" else ""
         console.print(
-            f"  {idx}. [cyan]{result.video_path}[/] "
+            f"  {idx}. [cyan]{result.video_path}[/]{music_flag} "
             f"([dim]{result.metadata.transformation_mode}, {result.duration_seconds:.1f}s[/])"
         )
 
@@ -140,7 +153,7 @@ def clip(
 @click.option("--max-clips", default=None, type=int, help="Clips per stream")
 @click.option(
     "--mode",
-    type=click.Choice(["auto", "narrative", "story", "raw"], case_sensitive=False),
+    type=click.Choice(["auto", "narrative", "story", "breakdown", "raw"], case_sensitive=False),
     default=None,
     help="YPP transformation mode (overrides config)",
 )
@@ -159,6 +172,13 @@ def clip(
     help="Path to custom human outro voiceover WAV",
 )
 @click.option(
+    "--voice-breakdown",
+    "voice_breakdown",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Path to custom human breakdown voiceover WAV",
+)
+@click.option(
     "--force",
     is_flag=True,
     default=False,
@@ -174,6 +194,7 @@ def auto(
     voice_intro: Path | None,
     voice_outro: Path | None,
     force: bool,
+    voice_breakdown: Path | None = None,
 ) -> None:
     """Auto-discover top streams and clip them all.
 
@@ -189,6 +210,8 @@ def auto(
         console.print(f"[yellow]⚠ Intro voiceover file not found yet:[/] {voice_intro}")
     if voice_outro is not None and not voice_outro.exists():
         console.print(f"[yellow]⚠ Outro voiceover file not found yet:[/] {voice_outro}")
+    if voice_breakdown is not None and not voice_breakdown.exists():
+        console.print(f"[yellow]⚠ Breakdown voiceover file not found yet:[/] {voice_breakdown}")
 
     console.print(f"[bold green]🔍 Discovering top {target_game} streams...[/]")
 
@@ -216,6 +239,8 @@ def auto(
         "voice_intro_path": voice_intro,
         "voice_outro_path": voice_outro,
     }
+    if voice_breakdown is not None:
+        parallel_kwargs["voice_breakdown_path"] = voice_breakdown
     if force:
         parallel_kwargs["force"] = True
     results = asyncio.run(

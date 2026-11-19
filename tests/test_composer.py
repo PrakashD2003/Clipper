@@ -14,7 +14,11 @@ import yaml
 from moviepy import ColorClip, CompositeVideoClip
 from moviepy.audio.AudioClip import AudioArrayClip
 
-from streamclipper.assembly.composer import VideoComposer, remap_timeline_for_beats
+from streamclipper.assembly.composer import (
+    VideoComposer,
+    remap_timeline_for_beats,
+    remap_timestamps,
+)
 from streamclipper.config import Config, HardwareProfile
 from streamclipper.models import FacecamRegion, WordTimestamp
 
@@ -443,6 +447,50 @@ class TestRemapTimelineForBeats:
         assert r_chat[0]["timestamp"] == pytest.approx(5.0)
         assert r_chat[1]["time"] == pytest.approx(10.0)
         assert r_chat[2]["offset"] == pytest.approx(15.0)
+
+    def test_remap_timestamps_alias(self):
+        """remap_timestamps helper accurately wraps remap_timeline_for_beats."""
+        words = [WordTimestamp(text="hello", start=10.0, end=11.0)]
+        beats = [{"start": 10.0, "end": 15.0}]
+        chat = [{"author": "u", "message": "hi", "offset_seconds": 12.0}]
+        r_words, r_chat, r_peak = remap_timestamps(
+            words=words, sub_clips=beats, chat_burst=chat, peak_time=13.0
+        )
+        assert len(r_words) == 1
+        assert r_words[0].start == pytest.approx(0.0)
+        assert r_chat[0]["offset_seconds"] == pytest.approx(2.0)
+        assert r_peak == pytest.approx(3.0)
+
+        # Also supports raw dict words and beats= keyword argument
+        dict_words = [{"word": "dict_word", "start": 11.0, "end": 12.0, "score": 0.95}]
+        r_words2, _, _ = remap_timestamps(words=dict_words, beats=beats)
+        assert len(r_words2) == 1
+        assert r_words2[0].text == "dict_word"
+        assert r_words2[0].start == pytest.approx(1.0)
+        assert r_words2[0].confidence == pytest.approx(0.95)
+
+    def test_layout_a_spike_zoom_locks_split_line_and_preserves_facecam(
+        self, tmp_path: Path
+    ):
+        """Punch-in zoom in Layout A applies to gameplay without shifting the 35%/65% split line."""
+        cfg = _make_config(
+            tmp_path, overrides={"transformation": {"punch_in_zoom": 1.20}}
+        )
+        composer = VideoComposer(cfg)
+        clip = _make_dummy_clip(duration=6.0, size=(1920, 1080))
+        facecam = FacecamRegion(x=1400, y=50, w=400, h=400)
+
+        comp = composer.compose(clip, facecam=facecam, peak_offset=2.5)
+        assert comp.size == (1080, 1920)
+        assert comp.duration == pytest.approx(6.0)
+        # Verify both gameplay and facecam clips exist in composition
+        assert len(comp.clips) == 2
+        # Facecam is top layer locked at (center, 0) with height = 35% of 1920 (672px)
+        face_clip = comp.clips[1]
+        assert face_clip.size[1] == int(1920 * 0.35)
+        # Gameplay layer is placed at (center, 672)
+        game_clip = comp.clips[0]
+        assert game_clip.size[1] == 1920 - int(1920 * 0.35)
 
 
 # ============================================================================

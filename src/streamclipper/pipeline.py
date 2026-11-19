@@ -28,6 +28,7 @@ from .models import (
     PipelineStatus,
     Platform,
     StreamInfo,
+    WordTimestamp,
 )
 from .scoring.ollama_scorer import OllamaScorer
 from .scoring.scorer import Scorer
@@ -133,14 +134,22 @@ class Pipeline:
             )
         return configured
 
+    _AUTO_BREAKDOWN_MOMENT_TYPES = frozenset({"analysis", "graphics_detail", "lore_secret"})
+
     def _resolve_highlight_mode(
         self, base_mode: str, highlight: Highlight
     ) -> tuple[str, list[dict[str, Any]]]:
-        """Resolve concrete per-highlight mode (raw | narrative | story) and validated beats."""
+        """Resolve concrete per-highlight mode (raw | narrative | story | breakdown) and validated beats."""
         if base_mode == "raw":
+            logger.warning(
+                "⚠️ WARNING: raw mode produces non-transformative clips that violate "
+                "YouTube Partner Program (YPP) reused content policies."
+            )
             return "raw", []
         if base_mode == "narrative":
             return "narrative", []
+        if base_mode == "breakdown":
+            return "breakdown", []
 
         max_clip_seconds = float(self.config.get("analysis.max_clip_seconds", 90))
         valid_beats = Scorer._validate_sub_clips(
@@ -150,8 +159,21 @@ class Pipeline:
             max_duration=max_clip_seconds,
         )
         if base_mode == "auto":
+            # Mode is resolved BEFORE Pass 2 (generate_metadata) writes narration, so only
+            # signals present at this point may drive the choice:
+            #   1. explicit breakdown commentary (Pass 1 / MCP host) -> breakdown
+            #   2. validated multi-beat sub_clips -> story (never discard valid beats)
+            #   3. detail/analysis moment types -> breakdown (funny `fail` keeps witty narrative)
+            #   4. otherwise -> narrative
+            if highlight.breakdown_commentary:
+                return "breakdown", []
             if len(valid_beats) >= 2:
                 return "story", valid_beats
+            if (
+                highlight.moment_type in self._AUTO_BREAKDOWN_MOMENT_TYPES
+                and not (highlight.narration_intro and highlight.narration_outro)
+            ):
+                return "breakdown", []
             return "narrative", []
         if base_mode == "story":
             return "story", valid_beats
@@ -168,6 +190,7 @@ class Pipeline:
         voice_intro_path: Path | None = None,
         voice_outro_path: Path | None = None,
         force: bool = False,
+        voice_breakdown_path: Path | None = None,
     ) -> list[ClipResult]:
         """Process a single stream through the full resumable pipeline."""
         if not isinstance(url, str) or not url.strip():
@@ -179,10 +202,17 @@ class Pipeline:
 
         intro_path = Path(voice_intro_path) if voice_intro_path is not None else None
         outro_path = Path(voice_outro_path) if voice_outro_path is not None else None
+        breakdown_path = (
+            Path(voice_breakdown_path) if voice_breakdown_path is not None else None
+        )
         if intro_path is not None and not intro_path.exists():
             logger.warning("Custom intro voiceover path does not exist yet: %s", intro_path)
         if outro_path is not None and not outro_path.exists():
             logger.warning("Custom outro voiceover path does not exist yet: %s", outro_path)
+        if breakdown_path is not None and not breakdown_path.exists():
+            logger.warning(
+                "Custom breakdown voiceover path does not exist yet: %s", breakdown_path
+            )
 
         if force:
             self.cache.clear(clean_url)
@@ -262,6 +292,7 @@ class Pipeline:
                     mode=mode,
                     voice_intro_path=intro_path,
                     voice_outro_path=outro_path,
+                    voice_breakdown_path=breakdown_path,
                 )
                 self.cache.save_state(state)
         except Exception:
@@ -282,6 +313,7 @@ class Pipeline:
         voice_intro_path: Path | None = None,
         voice_outro_path: Path | None = None,
         force: bool = False,
+        voice_breakdown_path: Path | None = None,
     ) -> list[list[ClipResult] | BaseException]:
         """Process multiple streams in parallel (always non-interactive, GPU-serialized)."""
         concurrency = max(1, int(max_concurrent))
@@ -297,6 +329,8 @@ class Pipeline:
                     "voice_intro_path": voice_intro_path,
                     "voice_outro_path": voice_outro_path,
                 }
+                if voice_breakdown_path is not None:
+                    kwargs["voice_breakdown_path"] = voice_breakdown_path
                 if force:
                     kwargs["force"] = True
                 return await self.process_stream(url, **kwargs)
@@ -421,6 +455,7 @@ class Pipeline:
             state.transcript,
             state.loudness_spikes,
             state.chat_spikes,
+            audio_path=state.audio_path,
         )
         state.status = PipelineStatus.ASSEMBLING
         return state
@@ -431,6 +466,7 @@ class Pipeline:
         mode: str | None = None,
         voice_intro_path: Path | None = None,
         voice_outro_path: Path | None = None,
+        voice_breakdown_path: Path | None = None,
     ) -> PipelineState:
         """Download highlight video segments, generate metadata, and assemble/export clips."""
         base_mode = self._resolve_base_mode(mode)
@@ -522,6 +558,7 @@ class Pipeline:
                     voice_outro_path,
                     valid_beats=valid_beats,
                     buffer_seconds=buffer_seconds,
+                    voice_breakdown_path=voice_breakdown_path,
                 )
             clips.append(clip_result)
 
@@ -541,6 +578,7 @@ class Pipeline:
         *,
         valid_beats: list[dict[str, Any]] | None = None,
         buffer_seconds: float = 3.0,
+        voice_breakdown_path: Path | None = None,
     ) -> ClipResult:
         """Run Phase 4 video assembly/export when installed, else persist raw segment + metadata."""
         if valid_beats is not None:
@@ -625,14 +663,77 @@ class Pipeline:
                     if (has_peak and mode != "raw")
                     else None
                 )
+                lead_pad = float(highlight.start) - actual_start
+                clip_dur = max(0.0, float(highlight.end) - float(highlight.start))
+                trim_range = (lead_pad, lead_pad + clip_dur)
                 composed = composer.compose(
                     segment_paths[0],
                     facecam,
                     peak_offset=peak_offset,
+                    trim_range=trim_range,
                 )
-                clip_start_offset = actual_start
+                # Map stream time onto the composed timeline using the trim compose()
+                # ACTUALLY applied (0.0 if it skipped trimming), not the requested one.
+                applied_trim = float(getattr(composed, "_trim_start", 0.0) or 0.0)
+                clip_start_offset = actual_start + applied_trim
                 words_for_export = highlight.word_timestamps
                 chat_for_export = highlight.chat_burst
+
+            replay_start_time = None
+            if mode == "breakdown":
+                breakdown_style = str(
+                    self.config.get("transformation.breakdown_style", "instant_replay")
+                ).lower()
+                replay_speed = float(
+                    self.config.get(
+                        "transformation.breakdown.slow_mo",
+                        self.config.get("transformation.replay_speed", 0.5),
+                    )
+                )
+                replay_window = float(
+                    self.config.get(
+                        "transformation.breakdown.replay_window",
+                        self.config.get("transformation.replay_duration_seconds", 5.0),
+                    )
+                )
+                freeze_duration = float(
+                    self.config.get("transformation.breakdown.freeze_duration", 4.0)
+                )
+                freeze_zoom = float(
+                    self.config.get("transformation.breakdown.freeze_zoom", 1.35)
+                )
+                if use_multi_beat:
+                    replay_peak = peak_offset
+                elif peak_offset is not None:
+                    replay_peak = max(0.0, highlight.peak_time - clip_start_offset)
+                else:
+                    replay_peak = None
+                if breakdown_style == "freeze_frame":
+                    composed = composer.compose_freeze_breakdown(
+                        composed,
+                        peak_offset=replay_peak,
+                        freeze_duration=freeze_duration,
+                        zoom=freeze_zoom,
+                    )
+                    freeze_start = getattr(composed, "_freeze_start", None)
+                    freeze_dur = getattr(composed, "_freeze_duration", None)
+                    if freeze_start is not None and freeze_dur:
+                        # Breakdown voiceover plays over the frozen callout
+                        replay_start_time = float(freeze_start)
+                        words_for_export, chat_for_export = self._shift_timeline_after(
+                            words_for_export,
+                            chat_for_export,
+                            clip_start_offset=clip_start_offset,
+                            at=float(freeze_start),
+                            delta=float(freeze_dur),
+                        )
+                else:
+                    composed, replay_start_time = composer.compose_instant_replay(
+                        composed,
+                        peak_offset=replay_peak,
+                        replay_window=replay_window,
+                        slow_mo=replay_speed,
+                    )
 
             composed = HookTitleOverlay(self.config).add_hook(
                 composed,
@@ -648,18 +749,26 @@ class Pipeline:
             )
 
             exporter = Exporter(self.config)
-            final_video = exporter.export(
-                clip=composed,
-                words=words_for_export,
-                clip_start_offset=clip_start_offset,
-                output_path=output_video_path,
-                chat_burst=chat_for_export if mode != "raw" else None,
-                narration_intro=metadata.narration_intro if mode != "raw" else "",
-                narration_outro=metadata.narration_outro if mode != "raw" else "",
-                voice_intro_path=voice_intro_path,
-                voice_outro_path=voice_outro_path,
-                mode=mode,
-            )
+            export_kwargs: dict[str, Any] = {
+                "clip": composed,
+                "words": words_for_export,
+                "clip_start_offset": clip_start_offset,
+                "output_path": output_video_path,
+                "chat_burst": chat_for_export if mode != "raw" else None,
+                "narration_intro": metadata.narration_intro if mode != "raw" else "",
+                "narration_outro": metadata.narration_outro if mode != "raw" else "",
+                "voice_intro_path": voice_intro_path,
+                "voice_outro_path": voice_outro_path,
+                "mode": mode,
+            }
+            if mode == "breakdown":
+                export_kwargs["breakdown_commentary"] = metadata.breakdown_commentary
+                export_kwargs["breakdown_callout"] = metadata.breakdown_callout
+                export_kwargs["replay_start"] = replay_start_time
+                if voice_breakdown_path is not None:
+                    export_kwargs["voice_breakdown_path"] = voice_breakdown_path
+
+            final_video = exporter.export(**export_kwargs)
         except Exception:
             self._close_composed_handles(composed)
             raise
@@ -669,6 +778,52 @@ class Pipeline:
             metadata=metadata,
             transcript_text=highlight.transcript_chunk,
         )
+
+    _CHAT_TIME_KEYS = ("offset_seconds", "timestamp", "time", "offset")
+
+    @classmethod
+    def _shift_timeline_after(
+        cls,
+        words: list[Any],
+        chat: list[dict[str, Any]] | None,
+        *,
+        clip_start_offset: float,
+        at: float,
+        delta: float,
+    ) -> tuple[list[Any], list[dict[str, Any]]]:
+        """Push words/chat at or after clip-relative time ``at`` later by ``delta`` seconds.
+
+        Used after a freeze-frame insertion so captions and chat ticker stay in sync with
+        the video that resumes ``delta`` seconds later. Inputs are not mutated.
+        """
+        shifted_words: list[Any] = []
+        for w in words or []:
+            if isinstance(w, dict):
+                start = float(w.get("start", 0.0))
+                if start - clip_start_offset >= at:
+                    w = {**w, "start": start + delta, "end": float(w.get("end", start)) + delta}
+            elif float(w.start) - clip_start_offset >= at:
+                w = WordTimestamp(
+                    text=w.text,
+                    start=float(w.start) + delta,
+                    end=float(w.end) + delta,
+                    confidence=getattr(w, "confidence", 0.0),
+                )
+            shifted_words.append(w)
+
+        shifted_chat: list[dict[str, Any]] = []
+        for msg in chat or []:
+            if isinstance(msg, dict):
+                key = next((k for k in cls._CHAT_TIME_KEYS if msg.get(k) is not None), None)
+                if key is not None:
+                    try:
+                        t = float(msg[key])
+                    except (TypeError, ValueError):
+                        t = None
+                    if t is not None and t - clip_start_offset >= at:
+                        msg = {**msg, key: t + delta}
+            shifted_chat.append(msg)
+        return shifted_words, shifted_chat
 
     @staticmethod
     def _close_composed_handles(clip: Any) -> None:
@@ -785,13 +940,15 @@ class Pipeline:
             beat_label = f"{len(h.sub_clips)} cuts" if len(h.sub_clips) >= 2 else "single"
             raw_intro = h.narration_intro or h.reason
             intro_preview = f"{raw_intro[:50]}..." if len(raw_intro) > 50 else raw_intro
+            music_badge = " [bold red]⚠️ MUSIC_DETECTED[/]" if h.music_risk == "HIGH_MUSIC_DETECTED" else ""
+            title_display = f"{h.title}{music_badge}"
             table.add_row(
                 str(i),
                 f"{format_time(h.start)} -> {format_time(h.end)}",
                 f"{h.final_score:.1f}/10",
                 h.moment_type,
                 beat_label,
-                h.title,
+                title_display,
                 intro_preview,
             )
 

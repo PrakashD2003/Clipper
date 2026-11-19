@@ -175,6 +175,10 @@ class Highlight(SerializableModel):
     peak_time: float = 0.0             # Exact second of loudness peak for 1.2x punch-in zoom
     chat_burst: list[dict[str, Any]] = field(default_factory=list)  # Up to 5 viewer chat messages in range
     sub_clips: list[dict[str, Any]] = field(default_factory=list)   # Optional [{"start": s, "end": e, "label": "Setup"}]
+    breakdown_commentary: str = ""     # Spoken breakdown analyzing mechanics/physics/mistake during replay
+    breakdown_callout: str = ""        # 2-5 word on-screen callout note
+    music_risk: str = "CLEAN"          # CLEAN | LOW | HIGH_MUSIC_DETECTED
+    music_confidence: float = 0.0      # Harmonic-percussive music confidence 0.0-1.0
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Highlight":
@@ -207,6 +211,12 @@ class Highlight(SerializableModel):
             ),
             chat_burst=list(data.get("chat_burst") or []),
             sub_clips=list(data.get("sub_clips") or []),
+            breakdown_commentary=data.get("breakdown_commentary") or "",
+            breakdown_callout=data.get("breakdown_callout") or "",
+            music_risk=data.get("music_risk") or "CLEAN",
+            music_confidence=float(
+                data.get("music_confidence") if data.get("music_confidence") is not None else 0.0
+            ),
         )
 
 
@@ -248,6 +258,10 @@ class ClipMetadata(SerializableModel):
     narration_outro: str = ""
     context_badge: str = ""
     transformation_mode: str = "narrative"
+    breakdown_commentary: str = ""
+    breakdown_callout: str = ""
+    music_risk: str = "CLEAN"
+    music_confidence: float = 0.0
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ClipMetadata":
@@ -266,6 +280,12 @@ class ClipMetadata(SerializableModel):
             narration_outro=data.get("narration_outro") or "",
             context_badge=data.get("context_badge") or "",
             transformation_mode=data.get("transformation_mode") or "narrative",
+            breakdown_commentary=data.get("breakdown_commentary") or "",
+            breakdown_callout=data.get("breakdown_callout") or "",
+            music_risk=data.get("music_risk") or "CLEAN",
+            music_confidence=float(
+                data.get("music_confidence") if data.get("music_confidence") is not None else 0.0
+            ),
         )
 
 

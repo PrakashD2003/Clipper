@@ -1,11 +1,15 @@
 """Abstract Scorer interface with signal fusion, transcript chunking, and YPP metadata validation."""
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+import logging
 import math
+from pathlib import Path
 from typing import Any
 
 from ..models import TranscriptionResult, TimeRange, Highlight, WordTimestamp
 from ..config import Config
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -69,6 +73,7 @@ class Scorer(ABC):
         loudness_spikes: list[TimeRange],
         chat_spikes: list[TimeRange],
         max_clips: int | None = None,
+        audio_path: Path | str | None = None,
     ) -> list[Highlight]:
         """Full scoring pipeline: chunk -> score -> filter duration -> fuse -> dedupe -> rank -> select."""
         chunks = self._chunk_transcript(transcript)
@@ -121,11 +126,28 @@ class Scorer(ABC):
         deduped = self._deduplicate(valid_highlights)
 
         limit = self.max_clips if max_clips is None else max(0, int(max_clips))
-        selected = sorted(
-            [h for h in deduped if h.final_score >= self.min_score],
-            key=lambda h: h.final_score,
-            reverse=True,
-        )[:limit]
+        eligible = [h for h in deduped if h.final_score >= self.min_score]
+
+        # Copyright-risk penalty must run BEFORE ranking/truncation so music-heavy
+        # moments can actually be displaced by clean candidates (or fall below min_score).
+        if eligible and audio_path is not None and Path(audio_path).is_file():
+            try:
+                from ..analysis.copyright_risk import CopyrightRiskDetector
+
+                detector = CopyrightRiskDetector(self.config)
+                if detector.enabled:
+                    penalty = float(self.config.get("analysis.music_penalty_factor", 0.80))
+                    for h in eligible:
+                        risk, conf = detector.detect_highlight(audio_path, h)
+                        h.music_risk = risk
+                        h.music_confidence = conf
+                        if risk == "HIGH_MUSIC_DETECTED":
+                            h.final_score = round(h.final_score * penalty, 2)
+                    eligible = [h for h in eligible if h.final_score >= self.min_score]
+            except Exception as exc:
+                logger.debug("Copyright risk detection skipped during scoring: %s", exc)
+
+        selected = sorted(eligible, key=lambda h: h.final_score, reverse=True)[:limit]
 
         for h in selected:
             h.word_timestamps = self._extract_words_for_range(transcript, h.start, h.end)

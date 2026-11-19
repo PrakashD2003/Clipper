@@ -153,6 +153,10 @@ class Exporter:
         voice_intro_path: Path | None = None,
         voice_outro_path: Path | None = None,
         mode: str | None = None,
+        breakdown_commentary: str = "",
+        voice_breakdown_path: Path | None = None,
+        replay_start: float | None = None,
+        breakdown_callout: str = "",
     ) -> Path:
         """Render composed clip, mix narrator ducking, burn ASS captions+chat ticker, and release handles."""
         final_output = Path(output_path)
@@ -206,7 +210,14 @@ class Exporter:
                 or (narration_outro and str(narration_outro).strip())
                 or voice_intro_path is not None
                 or voice_outro_path is not None
+                or (breakdown_commentary and str(breakdown_commentary).strip())
+                or voice_breakdown_path is not None
             )
+            intro_dur: float | None = None
+            outro_dur: float | None = None
+            eff_intro: float | None = None
+            eff_outro: float | None = None
+            breakdown_window: tuple[float | None, float | None] | None = None
 
             if effective_mode != "raw" and has_narration_input:
                 orig_enabled = self.narrator.enabled
@@ -226,14 +237,56 @@ class Exporter:
                         voice_outro_path=voice_outro_path,
                         temp_dir=work_dir,
                     )
-                    if intro_wav is not None or outro_wav is not None:
+                    breakdown_wav = None
+                    if effective_mode == "breakdown" and (
+                        (breakdown_commentary and str(breakdown_commentary).strip())
+                        or voice_breakdown_path is not None
+                    ):
+                        breakdown_wav = self.narrator.prepare_breakdown_track(
+                            breakdown_commentary=breakdown_commentary,
+                            voice_breakdown_path=voice_breakdown_path,
+                            temp_dir=work_dir,
+                        )
+
+                    if intro_wav is not None or outro_wav is not None or breakdown_wav is not None:
+                        intro_dur = self.narrator._probe_audio_duration(intro_wav)
+                        outro_dur = self.narrator._probe_audio_duration(outro_wav)
+                        breakdown_dur = self.narrator._probe_audio_duration(breakdown_wav)
+                        if breakdown_dur is not None and breakdown_dur > 0.01:
+                            # Same placement the breakdown ducking filtergraph uses, so
+                            # caption cards/suppression match what viewers hear.
+                            windows = self.narrator.compute_breakdown_windows(
+                                intro_dur,
+                                outro_dur,
+                                breakdown_dur,
+                                clip_duration,
+                                replay_start,
+                            )
+                            eff_intro = windows["eff_intro"]
+                            eff_outro = windows["eff_outro"]
+                            breakdown_window = (
+                                windows["breakdown_start"],
+                                windows["breakdown_end"],
+                            )
+                        else:
+                            eff_intro, eff_outro = (
+                                self.narrator.get_effective_narration_durations(
+                                    intro_dur, outro_dur, clip_duration
+                                )
+                            )
                         mixed_mp4 = work_dir / "intermediate_mixed.mp4"
+                        breakdown_kwargs: dict[str, Any] = (
+                            {"breakdown_wav": breakdown_wav, "replay_start_time": replay_start}
+                            if breakdown_wav is not None
+                            else {}
+                        )
                         current_video = self.narrator.mix_narration_with_ducking(
                             input_video=raw_mp4,
                             output_video=mixed_mp4,
                             intro_wav=intro_wav,
                             outro_wav=outro_wav,
                             clip_duration=clip_duration,
+                            **breakdown_kwargs,
                         )
                 finally:
                     if override_needed:
@@ -251,11 +304,19 @@ class Exporter:
 
             if has_words or has_chat:
                 ass_path = work_dir / "captions.ass"
+                is_raw = effective_mode == "raw"
                 self.caption_burner.generate_ass(
                     words=words or [],
                     clip_start_offset=clip_start_offset,
                     ass_path=ass_path,
                     chat_burst=effective_chat_burst,
+                    narration_intro="" if is_raw else narration_intro,
+                    narration_outro="" if is_raw else narration_outro,
+                    intro_dur=None if is_raw else eff_intro,
+                    outro_dur=None if is_raw else eff_outro,
+                    clip_duration=clip_duration,
+                    breakdown_callout="" if is_raw else breakdown_callout,
+                    breakdown_window=None if is_raw else breakdown_window,
                 )
                 result_path = self.caption_burner.burn_captions(
                     input_video=current_video,

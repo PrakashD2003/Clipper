@@ -1834,3 +1834,31 @@ class TestOllamaScorerEdgeCasesAndHardening:
 
 
 
+
+
+class TestMusicPenaltyAffectsSelection:
+    """Copyright-risk penalty must run before ranking so it changes what is selected."""
+
+    def test_music_flagged_top_pick_is_displaced_by_clean_candidate(
+        self, config: Config, long_transcript: TranscriptionResult, tmp_path: Path
+    ) -> None:
+        loud = _make_highlight(60.0, 100.0, 9.0, title="Music")
+        clean = _make_highlight(600.0, 640.0, 8.6, title="Clean")
+        scorer = _StubScorer(config, canned=[loud, clean])
+        scorer.max_clips = 1
+        audio = tmp_path / "a.wav"
+        audio.write_bytes(b"RIFF")
+
+        def fake_detect(self, audio_path, h):
+            return ("HIGH_MUSIC_DETECTED", 0.9) if h.title == "Music" else ("CLEAN", 0.0)
+
+        with (
+            patch(
+                "streamclipper.analysis.copyright_risk.CopyrightRiskDetector.detect_highlight",
+                fake_detect,
+            ),
+            patch.object(scorer, "_compute_weighted_score", side_effect=lambda h, *_: h.score),
+        ):
+            selected = scorer.score_and_select(long_transcript, [], [], audio_path=audio)
+
+        assert [h.title for h in selected] == ["Clean"]

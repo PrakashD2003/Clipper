@@ -276,6 +276,8 @@ def _install_mock_stage_deps(
             transcript: TranscriptionResult,
             loudness_spikes: list[TimeRange],
             chat_spikes: list[TimeRange],
+            max_clips: int | None = None,
+            audio_path: Path | str | None = None,
         ) -> list[Highlight]:
             call_log.append("score_and_select")
             return list(hl_list)
@@ -359,7 +361,7 @@ def _install_mock_stage_deps(
     monkeypatch.setattr(
         composer_mod.VideoComposer,
         "compose",
-        lambda self, video_path, facecam, peak_offset=None: {"kind": "single"},
+        lambda self, video_path, facecam, peak_offset=None, trim_range=None, face_center_x=None: {"kind": "single"},
     )
     monkeypatch.setattr(
         composer_mod.VideoComposer,
@@ -922,15 +924,22 @@ class TestPipelineEndToEnd:
                 )
                 return {"kind": "multi_beat"}
 
-            def compose(self, video_path, facecam, peak_offset=None):
+            def compose(self, video_path, facecam, peak_offset=None, trim_range=None):
                 compose_single_calls.append(
                     {
                         "video_path": video_path,
                         "facecam": facecam,
                         "peak_offset": peak_offset,
+                        "trim_range": trim_range,
                     }
                 )
-                return {"kind": "single"}
+                # Mirror VideoComposer.compose(): expose the trim actually applied
+                class _ComposedStub(dict):
+                    pass
+
+                result = _ComposedStub(kind="single")
+                result._trim_start = trim_range[0] if trim_range else 0.0
+                return result
 
         composer_mod.remap_timeline_for_beats = stub_remap  # type: ignore[attr-defined]
         composer_mod.VideoComposer = StubVideoComposer  # type: ignore[attr-defined]
@@ -1014,10 +1023,11 @@ class TestPipelineEndToEnd:
         assert export_calls[0]["voice_intro_path"] == intro_wav
         assert export_calls[0]["voice_outro_path"] == outro_wav
 
-        # Highlight 2: single-cut [400..445], peak=425.0, buffer=3.0 -> actual_start=397.0, peak_offset=28.0
+        # Highlight 2: single-cut [400..445], peak=425.0, buffer=3.0 -> trim_range=(3.0, 48.0), clip_start_offset=400.0
         assert len(compose_single_calls) == 1
         assert compose_single_calls[0]["peak_offset"] == pytest.approx(28.0)
-        assert export_calls[1]["clip_start_offset"] == pytest.approx(397.0)
+        assert compose_single_calls[0].get("trim_range") == (3.0, 48.0)
+        assert export_calls[1]["clip_start_offset"] == pytest.approx(400.0)
         assert export_calls[1]["mode"] == "story"
 
 
