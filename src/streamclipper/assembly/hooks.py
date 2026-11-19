@@ -283,15 +283,29 @@ def render_replay_badge_pil(
     return res  # type: ignore[return-value]
 
 
+DEFAULT_REPLAY_BADGE_TEXT = "🔴 INSTANT REPLAY"
+
+
 def create_replay_badge(
-    text: str = "🔴 INSTANT REPLAY",
+    text: str | None = None,
     width: int = 1080,
     height: int = 1920,
     font_size: int = 28,
     font_name: str | None = None,
     duration: float | None = None,
+    config: Config | None = None,
 ) -> ImageClip:
-    """Render a high-contrast sports broadcast replay badge pill as an ImageClip positioned at ('center', 140)."""
+    """Render a high-contrast sports broadcast replay badge pill as an ImageClip positioned at ('center', 140).
+
+    When ``text`` is None it comes from ``transformation.replay_badge_text`` (default literal fallback).
+    """
+    if text is None:
+        text = DEFAULT_REPLAY_BADGE_TEXT
+        if config is not None:
+            text = str(
+                config.get("transformation.replay_badge_text", DEFAULT_REPLAY_BADGE_TEXT)
+                or DEFAULT_REPLAY_BADGE_TEXT
+            )
     arr = render_replay_badge(
         text=text,
         font_size=font_size,
