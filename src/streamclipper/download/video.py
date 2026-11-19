@@ -11,6 +11,7 @@ from typing import Any
 import yt_dlp
 
 from .audio import _extract_youtube_id_from_url
+from ._ytdlp_opts import apply_ytdlp_auth_opts
 
 logger = logging.getLogger(__name__)
 
@@ -155,34 +156,6 @@ def _classify_video_error(url: str, exc: Exception) -> VideoDownloadError:
     return VideoDownloadError(f"Failed to download video segment from {url}: {raw_message}")
 
 
-def _find_cookie_file() -> str | None:
-    """Find a Netscape cookies.txt file in the environment or project tree."""
-    import os
-
-    env_val = os.environ.get("YOUTUBE_COOKIES_FILE") or os.environ.get("YT_COOKIES_FILE")
-    if env_val and Path(env_val).is_file():
-        return str(Path(env_val).resolve())
-    for cand in (
-        Path("cookies.txt"),
-        Path("cookies.txt.txt"),
-        Path(__file__).resolve().parents[3] / "cookies.txt",
-        Path(__file__).resolve().parents[3] / "cookies.txt.txt",
-    ):
-        if cand.is_file():
-            return str(cand.resolve())
-    return None
-
-
-def _find_js_runtimes() -> dict[str, Any]:
-    """Find local Node.js binary for solving YouTube challenge solvers."""
-    import shutil
-
-    node_bin = shutil.which("node") or "C:/Program Files/nodejs/node.exe"
-    if Path(node_bin).is_file():
-        return {"node": {"path": str(Path(node_bin).resolve())}}
-    return {}
-
-
 def _extract_video_id(url: str) -> str:
     """Resolve the canonical video ID without downloading media."""
     ydl_opts: dict[str, Any] = {
@@ -194,17 +167,7 @@ def _extract_video_id(url: str) -> str:
         "fragment_retries": _DEFAULT_RETRIES,
         "extractor_retries": _DEFAULT_RETRIES,
     }
-    cookie_file = _find_cookie_file()
-    if cookie_file:
-        ydl_opts["cookiefile"] = cookie_file
-    js_rts = _find_js_runtimes()
-    if js_rts:
-        ydl_opts["js_runtimes"] = js_rts
-        ydl_opts["remote_components"] = ["ejs:github"]
-    js_rts = _find_js_runtimes()
-    if js_rts:
-        ydl_opts["js_runtimes"] = js_rts
-        ydl_opts["remote_components"] = ["ejs:github"]
+    apply_ytdlp_auth_opts(ydl_opts)
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -312,13 +275,7 @@ def _download_segment_with_id(
         "fragment_retries": _DEFAULT_RETRIES,
         "extractor_retries": _DEFAULT_RETRIES,
     }
-    cookie_file = _find_cookie_file()
-    if cookie_file:
-        ydl_opts["cookiefile"] = cookie_file
-    js_rts = _find_js_runtimes()
-    if js_rts:
-        ydl_opts["js_runtimes"] = js_rts
-        ydl_opts["remote_components"] = ["ejs:github"]
+    apply_ytdlp_auth_opts(ydl_opts)
 
     logger.info(
         "Downloading video segment %s [%.2fs..%.2fs] (padded [%.2fs..%.2fs]) -> %s",
