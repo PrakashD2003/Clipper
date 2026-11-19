@@ -178,6 +178,22 @@ def _info_dict_to_stream_info(info: dict[str, Any], url: str) -> StreamInfo:
     )
 
 
+def _find_cookie_file() -> str | None:
+    """Find a Netscape cookies.txt file in the environment or project tree."""
+    import os
+
+    env_val = os.environ.get("YOUTUBE_COOKIES_FILE") or os.environ.get("YT_COOKIES_FILE")
+    if env_val and Path(env_val).is_file():
+        return str(Path(env_val).resolve())
+    for cand in (
+        Path("cookies.txt"),
+        Path(__file__).resolve().parents[3] / "cookies.txt",
+    ):
+        if cand.is_file():
+            return str(cand.resolve())
+    return None
+
+
 def extract_stream_info(url: str) -> StreamInfo:
     """Extract stream metadata without downloading media."""
     clean_url = _validate_url(url)
@@ -190,6 +206,9 @@ def extract_stream_info(url: str) -> StreamInfo:
         "fragment_retries": _DEFAULT_RETRIES,
         "extractor_retries": _DEFAULT_RETRIES,
     }
+    cookie_file = _find_cookie_file()
+    if cookie_file:
+        ydl_opts["cookiefile"] = cookie_file
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -275,6 +294,9 @@ def download_audio(
             "extractaudio": ["-ar", "16000", "-ac", "1"],
         },
     }
+    cookie_file = _find_cookie_file()
+    if cookie_file:
+        ydl_opts["cookiefile"] = cookie_file
     if progress_callback is not None:
         ydl_opts["progress_hooks"] = [progress_callback]
 

@@ -18,7 +18,9 @@ temp/
 *.live_chat.json
 
 # Config
-# secrets (API keys) — never commit
+# secrets (API keys, YouTube login cookies) — never commit
+cookies*.txt
+*.cookies
 .env
 .env.*
 !.env.example

@@ -46,6 +46,8 @@ EXPECTED_TOOLS = {
     "get_pipeline_status",
     "generate_post_metadata",
     "cleanup_temp",
+    "get_render_status",
+    "cancel_render",
 }
 
 
@@ -169,7 +171,12 @@ def _lenient_call_tool(monkeypatch: pytest.MonkeyPatch) -> None:
                         it.setdefault("narration_intro", "Opening line for the clip.")
                         it.setdefault("narration_outro", "Closing line for the clip.")
                 args["highlights"] = json.dumps(parsed)
-        elif name == "render_clip" and args.get("mode") != "raw":
+        elif name in ("render_clip", "render_all_selected"):
+            args.setdefault("wait", True)
+            if name == "render_all_selected":
+                return await _REAL_CALL_TOOL(name, args, *a, **kw)
+            if args.get("mode") == "raw":
+                return await _REAL_CALL_TOOL(name, args, *a, **kw)
             args.setdefault("narration_strict", False)
             args.setdefault("narration_intro", "Opening line for the clip.")
             args.setdefault("narration_outro", "Closing line for the clip.")
@@ -194,14 +201,14 @@ def mcp_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Config, St
 
 @pytest.mark.asyncio
 async def test_mcp_server_registration_and_schemas() -> None:
-    """Verify MCPServer instance and all 11 registered tools with valid input_schema."""
+    """Verify MCPServer instance and all 13 registered tools with valid input_schema."""
     assert isinstance(mcp, MCPServer)
     assert mcp.name == "streamclipper"
 
     tools = await mcp.list_tools()
     by_name = {tool.name: tool for tool in tools}
     assert set(by_name.keys()) == EXPECTED_TOOLS
-    assert len(tools) == 11
+    assert len(tools) == 13
 
     for name, tool in by_name.items():
         schema = tool.input_schema
