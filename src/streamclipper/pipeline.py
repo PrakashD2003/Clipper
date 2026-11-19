@@ -662,6 +662,7 @@ class Pipeline:
                     beat_ranges,
                     segments_dir,
                     buffer_seconds,
+                    video_id=state.stream_info.video_id or None,
                 )
             else:
                 single_path = await asyncio.to_thread(
@@ -671,6 +672,7 @@ class Pipeline:
                     highlight.end,
                     segments_dir,
                     buffer_seconds,
+                    video_id=state.stream_info.video_id or None,
                 )
                 segment_paths = [single_path]
 
@@ -818,6 +820,29 @@ class Pipeline:
                     beat_trim_ranges=beat_trim_ranges,
                     peak_offset=peak_offset,
                 )
+                actual_durations = getattr(composed, "_beat_durations", None)
+                if (
+                    isinstance(actual_durations, list)
+                    and len(actual_durations) == len(beats)
+                    and any(
+                        abs(float(a) - (float(b["end"]) - float(b["start"]))) > 0.05
+                        for a, b in zip(actual_durations, beats)
+                    )
+                ):
+                    logger.warning(
+                        "Story beat durations differ from requested ranges; remapping "
+                        "captions/chat to actual durations."
+                    )
+                    actual_beats = [
+                        {**b, "end": float(b["start"]) + float(a)}
+                        for a, b in zip(actual_durations, beats)
+                    ]
+                    remapped_words, remapped_chat, _ = remap_timeline_for_beats(
+                        highlight.word_timestamps,
+                        highlight.chat_burst,
+                        highlight.peak_time,
+                        actual_beats,
+                    )
                 clip_start_offset = 0.0
                 words_for_export = remapped_words
                 chat_for_export = remapped_chat

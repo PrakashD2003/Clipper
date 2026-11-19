@@ -316,6 +316,8 @@ def _install_mock_stage_deps(
         end_seconds: float,
         output_dir: Path,
         buffer_seconds: float = 3.0,
+        *,
+        video_id: str | None = None,
     ) -> Path:
         call_log.append("download_segment")
         if segment_calls is not None:
@@ -330,6 +332,8 @@ def _install_mock_stage_deps(
         segments: list[tuple[float, float]],
         output_dir: Path,
         buffer_seconds: float = 3.0,
+        *,
+        video_id: str | None = None,
     ) -> list[Path]:
         call_log.append("download_multiple_segments")
         if segment_calls is not None:
@@ -1419,7 +1423,8 @@ class TestCLIPipelineWiring:
             ],
         )
 
-        assert result.exit_code == 0, result.output
+        # L14: one failed stream makes `auto` exit non-zero after printing the summary
+        assert result.exit_code == 1, result.output
         assert "1 clip(s) generated across 1/2 stream(s)" in result.output
         assert len(parallel_calls) == 1
         assert parallel_calls[0] == {

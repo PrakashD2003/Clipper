@@ -249,6 +249,7 @@ class Exporter:
                         voice_intro_path=voice_intro_path,
                         voice_outro_path=voice_outro_path,
                         temp_dir=work_dir,
+                        clip_duration=clip_duration or None,
                     )
                     breakdown_wav = None
                     if effective_mode == "breakdown" and (

@@ -157,6 +157,7 @@ def remap_timestamps(
 
 class VideoComposer:
     def __init__(self, config: Config):
+        self._config = config
         res = config.get("video.resolution", [1080, 1920])
         self.width = int(res[0])
         self.height = int(res[1])
@@ -563,6 +564,7 @@ class VideoComposer:
             replay_window=replay_window,
             slow_mo=slow_mo,
             badge_clip=badge_clip,
+            config=getattr(self, "_config", None),
         )
 
     def compose_freeze_breakdown(
@@ -587,6 +589,7 @@ def compose_instant_replay(
     replay_window: float = 5.0,
     slow_mo: float = 0.5,
     badge_clip: Any | None = None,
+    config: Config | None = None,
 ) -> tuple[CompositeVideoClip, float]:
     """Assemble an instant replay ending on main_clip at slow_mo speed with replay badge.
 
@@ -634,7 +637,7 @@ def compose_instant_replay(
     if badge_clip is None:
         from .hooks import create_replay_badge
 
-        badge = create_replay_badge(width=w, height=h, duration=replay_slow.duration)
+        badge = create_replay_badge(width=w, height=h, duration=replay_slow.duration, config=config)
     else:
         badge = badge_clip
         if hasattr(badge, "with_duration"):

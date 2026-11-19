@@ -69,6 +69,7 @@ class StepCache:
             "audio_path": str(state.audio_path) if state.audio_path else None,
             "has_transcript": state.transcript is not None,
             "analysis_complete": bool(state.analysis_complete),
+            "requested_max_clips": state.requested_max_clips,
             "loudness_spikes": [s.to_dict() for s in state.loudness_spikes],
             "chat_spikes": [s.to_dict() for s in state.chat_spikes],
             "highlights": [h.to_dict() for h in state.highlights],
@@ -115,6 +116,11 @@ class StepCache:
                 ],
                 clips=[ClipResult.from_dict(c) for c in (data.get("clips") or [])],
                 analysis_complete=bool(data.get("analysis_complete", False)),
+                requested_max_clips=(
+                    int(data["requested_max_clips"])
+                    if data.get("requested_max_clips") is not None
+                    else None
+                ),
             )
             if data.get("audio_path"):
                 state.audio_path = Path(data["audio_path"])
@@ -150,7 +156,7 @@ class StepCache:
         """List all cached pipeline states."""
         states: list[PipelineState] = []
         for cache_file in sorted(self.cache_dir.glob("*.json")):
-            if cache_file.stem.endswith("_transcript"):
+            if cache_file.stem.endswith("_transcript") or cache_file.stem.startswith("scoring_ckpt_"):
                 continue
             try:
                 with open(cache_file, encoding="utf-8") as f:

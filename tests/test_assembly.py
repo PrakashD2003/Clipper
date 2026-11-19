@@ -1136,8 +1136,10 @@ class TestExporter:
             voice_intro_path: Path | None,
             voice_outro_path: Path | None,
             temp_dir: Path | None,
+            clip_duration: float | None = None,
         ) -> tuple[Path | None, Path | None]:
             events.append("narrator:prepare")
+            assert clip_duration == pytest.approx(15.0)  # G7: exporter passes the budget source
             assert fake_clip.closed and src1.closed and src2.closed
             assert temp_dir is not None and temp_dir.is_dir()
             outro_synth = temp_dir / "narrator_outro.wav"

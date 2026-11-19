@@ -726,3 +726,30 @@ def test_L14_auto_exits_nonzero_on_failure_and_clip_wraps_valueerror(
     assert res.exit_code == 1
     assert "Error: bad mode" in res.output
     assert "Traceback" not in res.output
+
+
+def test_M6_requested_max_clips_round_trips_through_cache(tmp_path: Path) -> None:
+    """M6 integration: StepCache persists requested_max_clips so resume compares real values."""
+    cache = StepCache(_make_config(tmp_path))
+    url = "https://youtube.com/watch?v=gta6_test"
+    state = _make_full_pipeline_state(url=url, include_transcript=False)
+    state.requested_max_clips = 3
+    cache.save_state(state)
+    reloaded = cache.load_state(url)
+    assert reloaded is not None
+    assert reloaded.requested_max_clips == 3
+
+
+def test_G3_scoring_checkpoint_files_are_not_listed_as_states(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Scorer checkpoints share cache_dir; list_all must skip them without warnings."""
+    cache = StepCache(_make_config(tmp_path))
+    cache.save_state(_make_full_pipeline_state(include_transcript=False))
+    (cache.cache_dir / "scoring_ckpt_0123456789abcdef.json").write_text(
+        json.dumps({"chunks": {}}), encoding="utf-8"
+    )
+    with caplog.at_level("WARNING"):
+        states = cache.list_all()
+    assert len(states) == 1
+    assert "scoring_ckpt" not in caplog.text

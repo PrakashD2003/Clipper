@@ -225,3 +225,13 @@ def test_G8_profile_cascade_used_and_capture_released(tmp_path: Path) -> None:
     assert region is not None
     assert profile.detectMultiScale.called
     cap.release.assert_called_once()
+
+
+def test_L23_instant_replay_badge_uses_composer_config(tmp_path: Path) -> None:
+    """L23 integration: VideoComposer.compose_instant_replay forwards its config to the badge."""
+    cfg = _cfg(tmp_path, "transformation:\n  replay_badge_text: 'CUSTOM RE'\n")
+    composer = VideoComposer(cfg)
+    with patch("streamclipper.assembly.composer.compose_instant_replay") as replay:
+        replay.return_value = (MagicMock(), 0.0)
+        composer.compose_instant_replay(MagicMock(), peak_offset=1.0)
+    assert replay.call_args.kwargs["config"] is cfg
