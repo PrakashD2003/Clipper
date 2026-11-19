@@ -300,7 +300,9 @@ class TestTranscriberHardwareProfiles:
         tmp_path: Path,
         dummy_wav: Path,
     ) -> None:
-        monkeypatch.setattr(config_mod, "USER_CONFIG_PATH", tmp_path / "missing.yaml")
+        user_cfg = tmp_path / "custom_lang.yaml"
+        user_cfg.write_text("transcription:\n  language: en\n", encoding="utf-8")
+        monkeypatch.setattr(config_mod, "USER_CONFIG_PATH", user_cfg)
         _install_fake_torch(monkeypatch, cuda_available=False)
 
         captured_transcribe: dict[str, Any] = {}
@@ -320,7 +322,7 @@ class TestTranscriberHardwareProfiles:
         fake_wx.align = lambda *a, **kw: {"segments": []}  # type: ignore[attr-defined]
         monkeypatch.setitem(sys.modules, "whisperx", fake_wx)
 
-        cfg = Config(hardware_profile=_make_cpu_profile())
+        cfg = Config(user_config_path=user_cfg, hardware_profile=_make_cpu_profile())
         Transcriber(cfg).transcribe(dummy_wav)
         assert captured_transcribe == {"batch_size": 4, "language": "en"}
 
@@ -501,7 +503,7 @@ class TestTranscriberFallbackAndErrors:
         }
         assert fw_calls["transcribe"] == {
             "audio_path": str(dummy_wav),
-            "language": "en",
+            "language": None,
             "word_timestamps": True,
         }
         assert result.language == "en"

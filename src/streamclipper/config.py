@@ -16,7 +16,7 @@ DEFAULT_CONFIG_PATH = (
 USER_CONFIG_PATH = Path("config.yaml")
 
 VALID_WEIGHT_KEYS = frozenset({"loudness", "chat_velocity", "llm_score"})
-VALID_TRANSFORMATION_MODES = frozenset({"auto", "narrative", "story", "raw"})
+VALID_TRANSFORMATION_MODES = frozenset({"auto", "narrative", "story", "breakdown", "raw"})
 
 
 @dataclass(frozen=True)

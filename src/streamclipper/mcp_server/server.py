@@ -450,6 +450,7 @@ async def _render_single_highlight(
     voice_outro_path: Path | None = None,
     *,
     min_clip_index: int = 1,
+    voice_breakdown_path: Path | None = None,
 ) -> tuple[ClipResult, str]:
     """Download segment(s), build offline ClipMetadata, and assemble one highlight."""
     clip_mode, valid_beats = pipeline._resolve_highlight_mode(base_mode, highlight)
@@ -503,6 +504,10 @@ async def _render_single_highlight(
         narration_outro="" if clip_mode == "raw" else _as_str(highlight.narration_outro),
         context_badge="" if clip_mode == "raw" else _as_str(highlight.context_badge),
         transformation_mode=clip_mode,
+        breakdown_commentary="" if clip_mode == "raw" else _as_str(highlight.breakdown_commentary),
+        breakdown_callout="" if clip_mode == "raw" else _as_str(highlight.breakdown_callout),
+        music_risk=highlight.music_risk,
+        music_confidence=highlight.music_confidence,
     )
 
     async with _get_gpu_lock():
@@ -513,18 +518,38 @@ async def _render_single_highlight(
                 config, game_name, streamer_name, min_index=min_clip_index
             )
         )
-        clip_result = await asyncio.to_thread(
-            pipeline._assemble_highlight,
-            highlight,
-            metadata,
-            segment_paths,
-            effective_index,
-            clip_mode,
-            voice_intro_path,
-            voice_outro_path,
-            valid_beats=valid_beats,
-            buffer_seconds=buffer_seconds,
-        )
+        assemble_kwargs: dict[str, Any] = {
+            "valid_beats": valid_beats,
+            "buffer_seconds": buffer_seconds,
+        }
+        if voice_breakdown_path is not None:
+            assemble_kwargs["voice_breakdown_path"] = voice_breakdown_path
+
+        try:
+            clip_result = await asyncio.to_thread(
+                pipeline._assemble_highlight,
+                highlight,
+                metadata,
+                segment_paths,
+                effective_index,
+                clip_mode,
+                voice_intro_path,
+                voice_outro_path,
+                **assemble_kwargs,
+            )
+        except TypeError:
+            assemble_kwargs.pop("voice_breakdown_path", None)
+            clip_result = await asyncio.to_thread(
+                pipeline._assemble_highlight,
+                highlight,
+                metadata,
+                segment_paths,
+                effective_index,
+                clip_mode,
+                voice_intro_path,
+                voice_outro_path,
+                **assemble_kwargs,
+            )
     return clip_result, clip_mode
 
 
@@ -1024,6 +1049,8 @@ async def submit_highlights(url: str, highlights: str) -> str:
                 narration_intro = _as_str(item.get("narration_intro"))
                 narration_outro = _as_str(item.get("narration_outro"))
                 context_badge = _as_str(item.get("context_badge"))
+                breakdown_commentary = _as_str(item.get("breakdown_commentary"))
+                breakdown_callout = _as_str(item.get("breakdown_callout"))
 
                 raw_beats = _parse_raw_sub_clips(item.get("sub_clips"))
                 validated_beats = Scorer._validate_sub_clips(
@@ -1045,7 +1072,20 @@ async def submit_highlights(url: str, highlights: str) -> str:
                     narration_outro=narration_outro,
                     context_badge=context_badge,
                     sub_clips=validated_beats,
+                    breakdown_commentary=breakdown_commentary,
+                    breakdown_callout=breakdown_callout,
                 )
+                if state.audio_path and Path(state.audio_path).is_file():
+                    try:
+                        from ..analysis.copyright_risk import CopyrightRiskDetector
+
+                        detector = CopyrightRiskDetector(config)
+                        if detector.enabled:
+                            risk, conf = detector.detect_highlight(state.audio_path, highlight)
+                            highlight.music_risk = risk
+                            highlight.music_confidence = conf
+                    except Exception:
+                        pass
                 highlight.final_score = scorer._compute_weighted_score(
                     highlight, state.loudness_spikes, state.chat_spikes
                 )
@@ -1135,8 +1175,11 @@ async def render_clip(
     mode: str = "auto",
     voice_intro_path: str = "",
     voice_outro_path: str = "",
+    breakdown_commentary: str = "",
+    breakdown_callout: str = "",
+    voice_breakdown_path: str = "",
 ) -> str:
-    """Render a single highlight into a final 9:16 vertical clip (mode: auto | narrative | story | raw) with YPP transformative narration, zoom, and ASS captions+chat ticker."""
+    """Render a single highlight into a final 9:16 vertical clip (mode: auto | narrative | story | breakdown | raw) with YPP transformative narration, zoom, and ASS captions+chat ticker."""
     try:
         clean_url = url.strip() if isinstance(url, str) else ""
         if not clean_url:
@@ -1193,6 +1236,14 @@ async def render_clip(
         if outro_path is not None and not outro_path.is_file():
             return _json_error(f"voice_outro_path not found: {outro_path}")
 
+        breakdown_voice = (
+            Path(voice_breakdown_path.strip())
+            if isinstance(voice_breakdown_path, str) and voice_breakdown_path.strip()
+            else None
+        )
+        if breakdown_voice is not None and not breakdown_voice.is_file():
+            return _json_error(f"voice_breakdown_path not found: {breakdown_voice}")
+
         cache_key = cache.get_cache_key(clean_url)
         async with _get_url_lock(cache_key):
             state = cache.load_state(clean_url)
@@ -1218,6 +1269,8 @@ async def render_clip(
                 narration_outro=_as_str(narration_outro),
                 context_badge=_as_str(context_badge),
                 sub_clips=validated_beats,
+                breakdown_commentary=_as_str(breakdown_commentary),
+                breakdown_callout=_as_str(breakdown_callout),
             )
 
             if state is not None:
@@ -1256,6 +1309,7 @@ async def render_clip(
                 voice_intro_path=intro_path,
                 voice_outro_path=outro_path,
                 min_clip_index=min_clip_index,
+                voice_breakdown_path=breakdown_voice,
             )
 
             fresh_state = cache.load_state(clean_url)

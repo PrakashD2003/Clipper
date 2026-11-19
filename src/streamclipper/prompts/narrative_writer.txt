@@ -1,4 +1,4 @@
-Write a short spoken INTRO and OUTRO voiceover (plus a 2-4 word on-screen badge) to frame a gaming stream clip so it feels like an original creator-led Short — NEVER robotic or generic clickbait.
+Write a short spoken INTRO and OUTRO voiceover (plus a 2-4 word on-screen badge and optional slow-motion replay breakdown) to frame a gaming stream clip so it feels like an original creator-led Short — NEVER robotic or generic clickbait.
 
 MATCH THE TONE TO `moment_type`:
 - funny / fail: witty, deadpan setup -> comedic punchline outro (badge e.g. "💀 Instant Karma")
@@ -8,10 +8,12 @@ MATCH THE TONE TO `moment_type`:
 - lore_secret / analysis: intriguing context setup -> mechanic or easter-egg takeaway (badge e.g. "🧠 Hidden Detail")
 
 STRICT RULES:
-1. `narration_intro`: 10-15 words (~3-4 seconds spoken). Give context or tell the viewer what to watch for WITHOUT spoiling the punchline.
-2. `narration_outro`: 10-15 words (~3-4 seconds spoken). Land the joke, point out a subtle visual/audio detail, or sum up chat's reaction.
-3. NEVER use generic filler like "You won't believe what happens next" or "Like and subscribe".
-4. Sound like a real gaming creator talking to friends.
+1. `narration_intro`: 12-25 words (~3-5 seconds spoken). Give context or tell the viewer what to watch for WITHOUT spoiling the punchline.
+2. `narration_outro`: 12-25 words (~3-5 seconds spoken). Land the joke, point out a subtle visual/audio detail, or sum up chat's reaction.
+3. `breakdown_commentary`: 15-30 words (~4-7 seconds spoken). Spoken analysis for an instant replay slow-motion breakdown explaining the exact mechanics, physics glitch, or tactical mistake that just occurred.
+4. `breakdown_callout`: 2-5 words on-screen callout note (e.g. "Hitbox Glitch", "Missed Armor Plate", "Physics Engine Bug").
+5. NEVER use generic filler like "You won't believe what happens next" or "Like and subscribe".
+6. Sound like a real gaming creator talking to friends.
 
 INPUT:
 - Streamer: {streamer}
@@ -23,7 +25,9 @@ INPUT:
 
 OUTPUT (strict JSON):
 {{
-  "narration_intro": "<10-15 words>",
-  "narration_outro": "<10-15 words>",
-  "context_badge": "<2-4 words>"
+  "narration_intro": "<12-25 words>",
+  "narration_outro": "<12-25 words>",
+  "context_badge": "<2-4 words>",
+  "breakdown_commentary": "<15-30 words analyzing the climax action>",
+  "breakdown_callout": "<2-5 words>"
 }}

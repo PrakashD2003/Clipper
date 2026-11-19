@@ -136,11 +136,17 @@ class Pipeline:
     def _resolve_highlight_mode(
         self, base_mode: str, highlight: Highlight
     ) -> tuple[str, list[dict[str, Any]]]:
-        """Resolve concrete per-highlight mode (raw | narrative | story) and validated beats."""
+        """Resolve concrete per-highlight mode (raw | narrative | story | breakdown) and validated beats."""
         if base_mode == "raw":
+            logger.warning(
+                "⚠️ WARNING: raw mode produces non-transformative clips that violate "
+                "YouTube Partner Program (YPP) reused content policies."
+            )
             return "raw", []
         if base_mode == "narrative":
             return "narrative", []
+        if base_mode == "breakdown":
+            return "breakdown", []
 
         max_clip_seconds = float(self.config.get("analysis.max_clip_seconds", 90))
         valid_beats = Scorer._validate_sub_clips(
@@ -150,9 +156,17 @@ class Pipeline:
             max_duration=max_clip_seconds,
         )
         if base_mode == "auto":
-            if len(valid_beats) >= 2:
+            if highlight.breakdown_commentary:
+                return "breakdown", []
+            elif (
+                highlight.moment_type in {"analysis", "fail", "graphics_detail", "lore_secret"}
+                and not (highlight.narration_intro and highlight.narration_outro)
+            ):
+                return "breakdown", []
+            elif len(valid_beats) >= 2:
                 return "story", valid_beats
-            return "narrative", []
+            else:
+                return "narrative", []
         if base_mode == "story":
             return "story", valid_beats
         return base_mode, []
@@ -168,6 +182,7 @@ class Pipeline:
         voice_intro_path: Path | None = None,
         voice_outro_path: Path | None = None,
         force: bool = False,
+        voice_breakdown_path: Path | None = None,
     ) -> list[ClipResult]:
         """Process a single stream through the full resumable pipeline."""
         if not isinstance(url, str) or not url.strip():
@@ -179,10 +194,17 @@ class Pipeline:
 
         intro_path = Path(voice_intro_path) if voice_intro_path is not None else None
         outro_path = Path(voice_outro_path) if voice_outro_path is not None else None
+        breakdown_path = (
+            Path(voice_breakdown_path) if voice_breakdown_path is not None else None
+        )
         if intro_path is not None and not intro_path.exists():
             logger.warning("Custom intro voiceover path does not exist yet: %s", intro_path)
         if outro_path is not None and not outro_path.exists():
             logger.warning("Custom outro voiceover path does not exist yet: %s", outro_path)
+        if breakdown_path is not None and not breakdown_path.exists():
+            logger.warning(
+                "Custom breakdown voiceover path does not exist yet: %s", breakdown_path
+            )
 
         if force:
             self.cache.clear(clean_url)
@@ -262,6 +284,7 @@ class Pipeline:
                     mode=mode,
                     voice_intro_path=intro_path,
                     voice_outro_path=outro_path,
+                    voice_breakdown_path=breakdown_path,
                 )
                 self.cache.save_state(state)
         except Exception:
@@ -282,6 +305,7 @@ class Pipeline:
         voice_intro_path: Path | None = None,
         voice_outro_path: Path | None = None,
         force: bool = False,
+        voice_breakdown_path: Path | None = None,
     ) -> list[list[ClipResult] | BaseException]:
         """Process multiple streams in parallel (always non-interactive, GPU-serialized)."""
         concurrency = max(1, int(max_concurrent))
@@ -297,6 +321,8 @@ class Pipeline:
                     "voice_intro_path": voice_intro_path,
                     "voice_outro_path": voice_outro_path,
                 }
+                if voice_breakdown_path is not None:
+                    kwargs["voice_breakdown_path"] = voice_breakdown_path
                 if force:
                     kwargs["force"] = True
                 return await self.process_stream(url, **kwargs)
@@ -416,12 +442,24 @@ class Pipeline:
         if max_clips is not None:
             scorer.max_clips = max(0, int(max_clips))
         await asyncio.to_thread(scorer.check_connection)
-        state.highlights = await asyncio.to_thread(
-            scorer.score_and_select,
-            state.transcript,
-            state.loudness_spikes,
-            state.chat_spikes,
-        )
+        score_kwargs: dict[str, Any] = {}
+        if state.audio_path is not None:
+            score_kwargs["audio_path"] = state.audio_path
+        try:
+            state.highlights = await asyncio.to_thread(
+                scorer.score_and_select,
+                state.transcript,
+                state.loudness_spikes,
+                state.chat_spikes,
+                **score_kwargs,
+            )
+        except TypeError:
+            state.highlights = await asyncio.to_thread(
+                scorer.score_and_select,
+                state.transcript,
+                state.loudness_spikes,
+                state.chat_spikes,
+            )
         state.status = PipelineStatus.ASSEMBLING
         return state
 
@@ -431,6 +469,7 @@ class Pipeline:
         mode: str | None = None,
         voice_intro_path: Path | None = None,
         voice_outro_path: Path | None = None,
+        voice_breakdown_path: Path | None = None,
     ) -> PipelineState:
         """Download highlight video segments, generate metadata, and assemble/export clips."""
         base_mode = self._resolve_base_mode(mode)
@@ -522,6 +561,7 @@ class Pipeline:
                     voice_outro_path,
                     valid_beats=valid_beats,
                     buffer_seconds=buffer_seconds,
+                    voice_breakdown_path=voice_breakdown_path,
                 )
             clips.append(clip_result)
 
@@ -541,6 +581,7 @@ class Pipeline:
         *,
         valid_beats: list[dict[str, Any]] | None = None,
         buffer_seconds: float = 3.0,
+        voice_breakdown_path: Path | None = None,
     ) -> ClipResult:
         """Run Phase 4 video assembly/export when installed, else persist raw segment + metadata."""
         if valid_beats is not None:
@@ -625,14 +666,70 @@ class Pipeline:
                     if (has_peak and mode != "raw")
                     else None
                 )
-                composed = composer.compose(
-                    segment_paths[0],
-                    facecam,
-                    peak_offset=peak_offset,
-                )
-                clip_start_offset = actual_start
+                lead_pad = float(highlight.start) - actual_start
+                clip_dur = max(0.0, float(highlight.end) - float(highlight.start))
+                trim_range = (lead_pad, lead_pad + clip_dur)
+                try:
+                    composed = composer.compose(
+                        segment_paths[0],
+                        facecam,
+                        peak_offset=peak_offset,
+                        trim_range=trim_range,
+                    )
+                    trimmed = True
+                except TypeError:
+                    composed = composer.compose(
+                        segment_paths[0],
+                        facecam,
+                        peak_offset=peak_offset,
+                    )
+                    trimmed = False
+                clip_start_offset = float(highlight.start)
                 words_for_export = highlight.word_timestamps
                 chat_for_export = highlight.chat_burst
+
+            replay_start_time = None
+            if mode == "breakdown":
+                breakdown_style = str(
+                    self.config.get("transformation.breakdown_style", "instant_replay")
+                ).lower()
+                replay_speed = float(
+                    self.config.get(
+                        "transformation.breakdown.slow_mo",
+                        self.config.get("transformation.replay_speed", 0.5),
+                    )
+                )
+                replay_window = float(
+                    self.config.get(
+                        "transformation.breakdown.replay_window",
+                        self.config.get("transformation.replay_duration_seconds", 5.0),
+                    )
+                )
+                freeze_duration = float(
+                    self.config.get("transformation.breakdown.freeze_duration", 4.0)
+                )
+                freeze_zoom = float(
+                    self.config.get("transformation.breakdown.freeze_zoom", 1.35)
+                )
+                replay_peak = (
+                    max(0.0, highlight.peak_time - float(highlight.start))
+                    if (not use_multi_beat and trimmed and has_peak)
+                    else peak_offset
+                )
+                if breakdown_style == "freeze_frame":
+                    composed = composer.compose_freeze_breakdown(
+                        composed,
+                        peak_offset=replay_peak,
+                        freeze_duration=freeze_duration,
+                        zoom=freeze_zoom,
+                    )
+                else:
+                    composed, replay_start_time = composer.compose_instant_replay(
+                        composed,
+                        peak_offset=replay_peak,
+                        replay_window=replay_window,
+                        slow_mo=replay_speed,
+                    )
 
             composed = HookTitleOverlay(self.config).add_hook(
                 composed,
@@ -648,18 +745,31 @@ class Pipeline:
             )
 
             exporter = Exporter(self.config)
-            final_video = exporter.export(
-                clip=composed,
-                words=words_for_export,
-                clip_start_offset=clip_start_offset,
-                output_path=output_video_path,
-                chat_burst=chat_for_export if mode != "raw" else None,
-                narration_intro=metadata.narration_intro if mode != "raw" else "",
-                narration_outro=metadata.narration_outro if mode != "raw" else "",
-                voice_intro_path=voice_intro_path,
-                voice_outro_path=voice_outro_path,
-                mode=mode,
-            )
+            export_kwargs: dict[str, Any] = {
+                "clip": composed,
+                "words": words_for_export,
+                "clip_start_offset": clip_start_offset,
+                "output_path": output_video_path,
+                "chat_burst": chat_for_export if mode != "raw" else None,
+                "narration_intro": metadata.narration_intro if mode != "raw" else "",
+                "narration_outro": metadata.narration_outro if mode != "raw" else "",
+                "voice_intro_path": voice_intro_path,
+                "voice_outro_path": voice_outro_path,
+                "mode": mode,
+            }
+            if mode == "breakdown":
+                export_kwargs["breakdown_commentary"] = metadata.breakdown_commentary
+                export_kwargs["replay_start"] = replay_start_time
+                if voice_breakdown_path is not None:
+                    export_kwargs["voice_breakdown_path"] = voice_breakdown_path
+
+            try:
+                final_video = exporter.export(**export_kwargs)
+            except TypeError:
+                export_kwargs.pop("breakdown_commentary", None)
+                export_kwargs.pop("replay_start", None)
+                export_kwargs.pop("voice_breakdown_path", None)
+                final_video = exporter.export(**export_kwargs)
         except Exception:
             self._close_composed_handles(composed)
             raise
@@ -785,13 +895,15 @@ class Pipeline:
             beat_label = f"{len(h.sub_clips)} cuts" if len(h.sub_clips) >= 2 else "single"
             raw_intro = h.narration_intro or h.reason
             intro_preview = f"{raw_intro[:50]}..." if len(raw_intro) > 50 else raw_intro
+            music_badge = " [bold red]⚠️ MUSIC_DETECTED[/]" if h.music_risk == "HIGH_MUSIC_DETECTED" else ""
+            title_display = f"{h.title}{music_badge}"
             table.add_row(
                 str(i),
                 f"{format_time(h.start)} -> {format_time(h.end)}",
                 f"{h.final_score:.1f}/10",
                 h.moment_type,
                 beat_label,
-                h.title,
+                title_display,
                 intro_preview,
             )
 

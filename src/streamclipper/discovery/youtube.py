@@ -26,6 +26,30 @@ def _coerce_non_negative_int(value: Any) -> int | None:
     return int(numeric)
 
 
+# Language codes accepted by yt-dlp's YouTube extractor `lang` arg (case-sensitive).
+# Passing anything else (e.g. "en-US") makes every search fail with
+# "Unsupported language code", which `ignoreerrors` silently turns into 0 results.
+_YTDLP_YOUTUBE_LANGS: frozenset[str] = frozenset(
+    "af az id ms bs ca cs da de et en-IN en-GB en es es-419 es-US eu fil fr fr-CA "
+    "gl hr zu is it sw lv lt hu nl no uz pl pt-PT pt ro sq sk sl sr-Latn fi sv vi "
+    "tr be bg ky kk mk mn ru sr uk el hy iw ur ar fa ne mr hi as bn pa gu or ta te "
+    "kn ml si th lo my ka am km zh-CN zh-TW zh-HK ja ko".split()
+)
+_YTDLP_LANGS_BY_LOWER: dict[str, str] = {code.lower(): code for code in _YTDLP_YOUTUBE_LANGS}
+
+
+def _to_ytdlp_youtube_lang(language: str) -> str:
+    """Map a BCP-47 tag (e.g. "en-US", "ja_JP") to a yt-dlp-supported YouTube lang code."""
+    tag = (language or "").strip().replace("_", "-")
+    exact = _YTDLP_LANGS_BY_LOWER.get(tag.lower())
+    if exact:
+        return exact
+    base = tag.split("-", 1)[0].lower()
+    if base == "he":
+        base = "iw"
+    return _YTDLP_LANGS_BY_LOWER.get(base, "en")
+
+
 def _resolve_stream_url(entry: dict[str, Any], video_id: str) -> str:
     """Extract a canonical YouTube watch URL from a yt-dlp search entry."""
     for key in ("webpage_url", "url"):
@@ -61,6 +85,16 @@ class YouTubeDiscovery:
         self.keywords: list[str] = [
             str(kw).strip() for kw in raw_keywords if isinstance(kw, str) and kw.strip()
         ]
+        raw_lang = config.get("discovery.language", "en-US")
+        self.language: str = str(raw_lang).strip() if raw_lang is not None else "en-US"
+        if not self.language:
+            self.language = "en-US"
+        raw_region = config.get("discovery.region", "US")
+        self.region: str = str(raw_region).strip() if raw_region is not None else "US"
+        if not self.region:
+            self.region = "US"
+        raw_proxy = config.get("discovery.proxy", "")
+        self.proxy: str = str(raw_proxy or "").strip()
 
     def _build_queries(self, game: str | None) -> tuple[str, list[str]]:
         """Resolve the target game label and deduplicated search queries."""
@@ -120,7 +154,14 @@ class YouTubeDiscovery:
             "extract_flat": False,
             "skip_download": True,
             "ignoreerrors": True,
+            "http_headers": {"Accept-Language": f"{self.language},en;q=0.9"},
+            "geo_bypass_country": self.region,
+            "extractor_args": {
+                "youtube": {"lang": [_to_ytdlp_youtube_lang(self.language)]}
+            },
         }
+        if self.proxy:
+            ydl_opts["proxy"] = self.proxy
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:

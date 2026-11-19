@@ -37,7 +37,7 @@ class Transcriber:
         self.model_size: str = str(config.get("transcription.model_size", "base"))
         self.compute_type: str = str(config.get("transcription.compute_type", "int8"))
         self.batch_size: int = int(config.get("transcription.batch_size", 4))
-        self.language: str = str(config.get("transcription.language", "en"))
+        self.language: str = str(config.get("transcription.language", "auto"))
 
         # Safety guard: float16 / int8_float16 are unsupported on CPU backends
         if self.device == "cpu" and self.compute_type in ("float16", "int8_float16"):
@@ -107,7 +107,13 @@ class Transcriber:
                 except (TypeError, ValueError):
                     transcribe_kwargs["language"] = self.language
             result = model.transcribe(audio, **transcribe_kwargs)
-            detected_lang = str(result.get("language") or self.language)
+            raw_detected = result.get("language")
+            if raw_detected:
+                detected_lang = str(raw_detected)
+            elif self.language and self.language.lower() != "auto":
+                detected_lang = self.language
+            else:
+                detected_lang = "en"
 
             # Stage 1: Free ASR model before loading wav2vec2 alignment model (critical on 6 GB GPUs)
             del model
@@ -229,7 +235,13 @@ class Transcriber:
                 language=fw_language,
                 word_timestamps=True,
             )
-            detected_lang = str(getattr(info, "language", None) or self.language)
+            info_lang = getattr(info, "language", None)
+            if info_lang:
+                detected_lang = str(info_lang)
+            elif self.language and self.language.lower() != "auto":
+                detected_lang = self.language
+            else:
+                detected_lang = "en"
 
             transcript_segments: list[TranscriptSegment] = []
             for seg in segments_iter:

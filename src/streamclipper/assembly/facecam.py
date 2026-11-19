@@ -37,19 +37,28 @@ def _is_in_corner(x: int, y: int, w: int, h: int, frame_w: int, frame_h: int) ->
 class FacecamDetector:
     """Detects facecam overlay position in gaming streams using OpenCV Haar Cascades."""
 
-    def __init__(self, config: Config | None = None) -> None:
+    def __init__(
+        self,
+        config: Config | None = None,
+        min_area_ratio: float | None = None,
+    ) -> None:
         self.config = config
 
         # Configurable detection parameters
+        if min_area_ratio is not None:
+            self.min_area_ratio = float(min_area_ratio)
+        elif config is not None:
+            self.min_area_ratio = float(config.get("facecam.min_area_ratio", 0.002))
+        else:
+            self.min_area_ratio = 0.015
+
         if config is not None:
-            self.min_area_ratio: float = float(config.get("facecam.min_area_ratio", 0.015))
             self.max_area_ratio: float = float(config.get("facecam.max_area_ratio", 0.25))
             self.min_detection_ratio: float = float(config.get("facecam.min_detection_ratio", 0.30))
             self.padding_w_ratio: float = float(config.get("facecam.padding_w_ratio", 1.8))
             self.padding_h_ratio: float = float(config.get("facecam.padding_h_ratio", 1.5))
             self.num_samples: int = int(config.get("facecam.num_samples", 50))
         else:
-            self.min_area_ratio = 0.015
             self.max_area_ratio = 0.25
             self.min_detection_ratio = 0.30
             self.padding_w_ratio = 1.8

@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "streamclipper": {
+      "type": "stdio",
+      "command": "D:\\GTA6-Clipper\\.venv\\Scripts\\streamclipper-mcp.exe",
+      "args": [],
+      "env": {}
+    }
+  }
+}

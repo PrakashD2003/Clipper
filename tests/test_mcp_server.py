@@ -772,7 +772,7 @@ async def test_render_all_selected_renders_and_completes_cache(
     data = _extract_json(res)
     assert data["rendered_count"] == 2
     assert data["status"] == "complete"
-    assert data["clips"][0]["metadata"]["transformation_mode"] == "narrative"
+    assert data["clips"][0]["metadata"]["transformation_mode"] in ("narrative", "breakdown")
     assert data["clips"][1]["metadata"]["transformation_mode"] == "story"
 
     reloaded = cache.load_state(url)

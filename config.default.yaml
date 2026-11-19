@@ -17,13 +17,16 @@ discovery:
   min_viewers: 1000
   max_streams: 10
   min_duration_hours: 1  # skip short videos
+  language: "en-US"      # Target search language (Accept-Language + yt-dlp youtube lang)
+  region: "US"           # Target search country/region (geo_bypass_country)
+  proxy: ""              # Optional HTTP/SOCKS5 proxy for yt-dlp discovery
 
 transcription:
   engine: "whisperx"      # whisperx | faster-whisper
   model_size: "auto"      # auto | tiny | base | small | medium | large-v2
   device: "auto"          # auto | cpu | cuda
   compute_type: "auto"    # auto | float16 | int8_float16 | int8
-  language: "en"
+  language: "auto"
   batch_size: "auto"      # auto | integer (e.g. 4, 8, 16)
 
 analysis:
@@ -32,6 +35,14 @@ analysis:
   max_clip_seconds: 90
   max_clips_per_stream: 5
   min_highlight_score: 7.0
+  copyright_check: true                # Pre-flight acoustic music risk check on speech gaps
+  music_risk_threshold: 0.65           # Harmonic-percussive music confidence threshold
+  music_penalty_factor: 0.80           # Score multiplier for clips flagged with high music
+  copyright:
+    enabled: true
+    min_gap_seconds: 0.4
+    high_risk_threshold: 0.65
+    low_risk_threshold: 0.35
 
   # Signal weights (must sum to 1.0)
   weights:
@@ -97,9 +108,24 @@ output:
   save_metadata_json: true
   save_transcript_txt: true
 
+facecam:
+  min_area_ratio: 0.002
+  max_area_ratio: 0.25
+  min_detection_ratio: 0.30
+
 transformation:
   enabled: true                        # Enable YPP anti-reused-content transformation
-  mode: "auto"                         # auto (story if valid sub_clips else narrative) | narrative (single-cut + voiceover/overlays) | story (multi-beat cuts + voiceover/overlays) | raw (uncut + captions only)
+  mode: "auto"                         # auto (story/breakdown/narrative) | narrative | story | breakdown | raw
+  breakdown_style: "instant_replay"    # instant_replay (play clip + slow-mo replay) | freeze_frame
+  replay_speed: 0.5                    # Slow-motion factor for instant replay
+  replay_duration_seconds: 5.0         # Climax duration replayed in instant replay
+  replay_badge_text: "🔴 INSTANT REPLAY"
+  breakdown:
+    replay_window: 5.0
+    slow_mo: 0.5
+    freeze_duration: 4.0
+    freeze_zoom: 1.35
+  narration_style: "intro_and_breakdown" # intro_and_breakdown | breakdown_only
   tts_engine: "auto"                   # auto (kokoro -> edge-tts) | kokoro | edge-tts | elevenlabs | none
   tts_voice: "af_heart"                # Kokoro voice ID (used when engine is kokoro)
   edge_tts_voice: "en-US-GuyNeural"    # Edge-TTS voice ID (used when engine is edge-tts or auto fallback)

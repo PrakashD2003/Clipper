@@ -32,7 +32,7 @@ dependencies = [
 [project.optional-dependencies]
 whisperx = ["whisperx @ git+https://github.com/m-bain/whisperX.git"]
 mcp = ["mcp>=2.0.0"]
-tts = ["edge-tts>=6.1.0", "kokoro>=0.9.0"]
+tts = ["edge-tts>=6.1.0"]
 edge-tts = ["edge-tts>=6.1.0"]
 kokoro = ["kokoro>=0.9.0"]
 dev = ["pytest>=7.0", "pytest-asyncio>=0.21"]

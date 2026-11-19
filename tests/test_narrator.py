@@ -218,8 +218,64 @@ transformation:
             mock_edge.assert_called_once_with("Test edge voice", out_wav)
             # Verify the configured edge-tts voice is distinct from kokoro voice
             assert narrator.edge_tts_voice == "en-US-GuyNeural"
+
+    def test_kokoro_skips_and_falls_back_when_espeak_ng_missing_on_windows(
+        self, base_config: Config, tmp_path: Path
+    ) -> None:
+        """On Windows, if espeak-ng is not installed, Kokoro is skipped and edge-tts is used."""
+        narrator = TransformativeNarrator(base_config)
+        out_wav = tmp_path / "fallback.wav"
+
+        with (
+            patch("os.name", "nt"),
+            patch("streamclipper.assembly.narrator._is_espeak_available", return_value=False),
+            patch.object(
+                narrator, "_synthesize_edge_tts", return_value=create_synthetic_wav(out_wav)
+            ) as mock_edge,
+        ):
+            # _synthesize_kokoro returns None directly when espeak-ng is missing on Windows
+            assert narrator._synthesize_kokoro("test text", out_wav) is None
+            # And synthesize_speech falls back to edge-tts in auto mode
+            res = narrator.synthesize_speech("test text", out_wav)
+            assert res == out_wav
+            mock_edge.assert_called_once()
             assert narrator.voice == "af_heart"
             assert narrator.edge_tts_voice != narrator.voice
+
+    def test_espeak_available_sets_phonemizer_env_when_dll_found(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When libespeak-ng.dll candidate exists on Windows, it sets PHONEMIZER_ESPEAK_LIBRARY."""
+        fake_dll = tmp_path / "libespeak-ng.dll"
+        fake_dll.write_text("fake binary", encoding="utf-8")
+        monkeypatch.delenv("PHONEMIZER_ESPEAK_LIBRARY", raising=False)
+
+        from streamclipper.assembly.narrator import _is_espeak_available
+
+        with (
+            patch("os.name", "nt"),
+            patch("shutil.which", return_value=None),
+            patch("pathlib.Path.exists", return_value=True),
+        ):
+            avail = _is_espeak_available()
+            assert avail is True
+            assert os.environ.get("PHONEMIZER_ESPEAK_LIBRARY") is not None
+
+    def test_get_effective_narration_durations(self, base_config: Config) -> None:
+        """get_effective_narration_durations cleanly scales durations to prevent overlap and climax bleed."""
+        narrator = TransformativeNarrator(base_config)
+        # None inputs
+        assert narrator.get_effective_narration_durations(None, None, 10.0) == (None, None)
+        # Within budget (3s + 3s = 6s < 15s budget on 20s clip)
+        assert narrator.get_effective_narration_durations(3.0, 3.0, 20.0) == (3.0, 3.0)
+        # Exceeds budget (4s + 4s = 8s > 6.0s on 8s clip -> 3.0s, 3.0s)
+        eff_i, eff_o = narrator.get_effective_narration_durations(4.0, 4.0, 8.0)
+        assert eff_i == pytest.approx(3.0)
+        assert eff_o == pytest.approx(3.0)
+        # Single intro clamped (9s on 10s clip -> 7.5s)
+        eff_i, eff_o = narrator.get_effective_narration_durations(9.0, None, 10.0)
+        assert eff_i == pytest.approx(7.5)
+        assert eff_o is None
 
     def test_elevenlabs_unconfigured_falls_back_to_auto(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

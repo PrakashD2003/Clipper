@@ -235,6 +235,73 @@ class TestAssGeneration:
             == "Dialogue: 1,0:00:01.00,0:00:03.50,ChatTicker,,0,0,0,,Viewer2: NO WAY \\{gg\\} \\\u200bN"
         )
 
+    def test_generate_ass_suppresses_streamer_words_during_narration_and_emits_narration_cards(
+        self, tmp_path: Path
+    ) -> None:
+        """Streamer words falling inside ducked narration windows are suppressed; narration cards are emitted."""
+        cfg = _make_config(tmp_path)
+        burner = AssCaptionBurner(cfg)
+        words = [
+            # Words in intro window [0..2.0s] relative to offset 100.0:
+            WordTimestamp("intro", 100.0, 100.8),
+            WordTimestamp("ducked", 100.8, 101.5),
+            # Climax streamer speech [3.0..7.0s]:
+            WordTimestamp("climax", 103.0, 103.5),
+            WordTimestamp("reaction", 103.5, 104.0),
+            # Words in outro window [8.0..10.0s]:
+            WordTimestamp("outro", 108.5, 109.5),
+        ]
+        ass_path = tmp_path / "sub" / "narrated.ass"
+        burner.generate_ass(
+            words=words,
+            clip_start_offset=100.0,
+            ass_path=ass_path,
+            narration_intro="Look at this insane move",
+            narration_outro="He actually pulled it off",
+            intro_dur=2.0,
+            outro_dur=2.0,
+            clip_duration=10.0,
+        )
+
+        content = ass_path.read_text(encoding="utf-8")
+        hormozi_lines = [ln for ln in content.splitlines() if ",Hormozi,," in ln]
+
+        # Intro narration card emitted at 0.0 -> 2.0s
+        assert any(
+            "0:00:00.00,0:00:02.00,Hormozi" in ln and "LOOK AT THIS INSANE MOVE" in ln
+            for ln in hormozi_lines
+        )
+        # Outro narration card emitted at 8.0 -> 10.0s (10.0 - 2.0 = 8.0s)
+        assert any(
+            "0:00:08.00,0:00:10.00,Hormozi" in ln and "HE ACTUALLY PULLED IT OFF" in ln
+            for ln in hormozi_lines
+        )
+
+        # Climax streamer words ("CLIMAX", "REACTION") are present
+        assert any("CLIMAX" in ln for ln in hormozi_lines)
+        assert any("REACTION" in ln for ln in hormozi_lines)
+
+        # Ducked words ("intro ducked", "outro") are suppressed from streamer captions
+        assert not any("DUCKED" in ln for ln in hormozi_lines)
+
+    def test_generate_ass_accepts_raw_dict_words(self, tmp_path: Path) -> None:
+        """generate_ass gracefully accepts dictionary word mappings from WhisperX."""
+        cfg = _make_config(tmp_path)
+        burner = AssCaptionBurner(cfg)
+        dict_words = [
+            {"word": "whisper", "start": 10.0, "end": 10.5, "score": 0.9},
+            {"text": "dictionary", "start": 10.5, "end": 11.0, "confidence": 0.95},
+        ]
+        ass_path = tmp_path / "dict_words.ass"
+        burner.generate_ass(
+            words=dict_words,
+            clip_start_offset=10.0,
+            ass_path=ass_path,
+        )
+        content = ass_path.read_text(encoding="utf-8")
+        assert "WHISPER" in content
+        assert "DICTIONARY" in content
+
     def test_custom_colors_font_and_group_size(self, tmp_path: Path) -> None:
         cfg = _make_config(
             tmp_path,
@@ -1189,6 +1256,72 @@ class TestExporter:
         assert list((tmp_path / "temp").glob("streamclipper_export_*")) == []
         assert user_intro.is_file()
         assert progress_steps == [0.0, 0.5, 0.75, 1.0]
+
+    def test_export_forwards_effective_clamped_durations_to_generate_ass(
+        self, tmp_path: Path
+    ) -> None:
+        """Exporter must compute and forward effective clamped durations to generate_ass."""
+        cfg = _make_config(
+            tmp_path,
+            overrides={"general": {"temp_dir": str(tmp_path / "temp")}},
+        )
+        exporter = Exporter(cfg)
+        captured_kwargs: dict[str, Any] = {}
+
+        def fake_gen_ass(**kwargs: Any) -> Path:
+            captured_kwargs.update(kwargs)
+            kwargs["ass_path"].write_text("[Script Info]\n", encoding="utf-8")
+            return kwargs["ass_path"]
+
+        fake_clip = _FakeCompositeClip(
+            events=[],
+            duration=8.0,
+            has_audio=True,
+        )
+        fake_intro = tmp_path / "intro.wav"
+        fake_intro.write_bytes(b"RIFF....WAVE")
+        fake_outro = tmp_path / "outro.wav"
+        fake_outro.write_bytes(b"RIFF....WAVE")
+
+        with (
+            patch.object(
+                exporter.narrator,
+                "prepare_narration_tracks",
+                return_value=(fake_intro, fake_outro),
+            ),
+            patch.object(
+                exporter.narrator,
+                "_probe_audio_duration",
+                side_effect=[4.0, 4.0],
+            ),
+            patch.object(
+                exporter.narrator,
+                "mix_narration_with_ducking",
+                return_value=tmp_path / "mixed.mp4",
+            ),
+            patch.object(
+                exporter.caption_burner, "generate_ass", side_effect=fake_gen_ass
+            ),
+            patch.object(
+                exporter.caption_burner,
+                "burn_captions",
+                return_value=tmp_path / "final.mp4",
+            ),
+        ):
+            exporter.export(
+                clip=fake_clip,  # type: ignore[arg-type]
+                words=[WordTimestamp("test", 0.0, 1.0)],
+                clip_start_offset=0.0,
+                output_path=tmp_path / "out.mp4",
+                narration_intro="Intro",
+                narration_outro="Outro",
+                mode="narrative",
+            )
+
+        # On an 8.0s clip, intro=4.0 and outro=4.0 must be clamped to 3.0s each (75% budget)
+        assert captured_kwargs["intro_dur"] == pytest.approx(3.0)
+        assert captured_kwargs["outro_dur"] == pytest.approx(3.0)
+        assert captured_kwargs["clip_duration"] == pytest.approx(8.0)
 
     def test_export_closes_all_handles_and_cleans_temp_on_write_error(
         self, tmp_path: Path

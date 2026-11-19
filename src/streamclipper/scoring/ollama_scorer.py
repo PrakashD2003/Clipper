@@ -479,6 +479,8 @@ class OllamaScorer(Scorer):
             narration_intro = _as_str(item.get("narration_intro"))
             narration_outro = _as_str(item.get("narration_outro"))
             context_badge = _as_str(item.get("context_badge"))
+            breakdown_commentary = _as_str(item.get("breakdown_commentary"))
+            breakdown_callout = _as_str(item.get("breakdown_callout"))
 
             highlights.append(
                 Highlight(
@@ -493,6 +495,8 @@ class OllamaScorer(Scorer):
                     narration_outro=narration_outro,
                     context_badge=context_badge,
                     sub_clips=sub_clips,
+                    breakdown_commentary=breakdown_commentary,
+                    breakdown_callout=breakdown_callout,
                 )
             )
 
@@ -535,6 +539,10 @@ class OllamaScorer(Scorer):
                 intro = _as_str(data.get("narration_intro")) or existing_intro
                 outro = _as_str(data.get("narration_outro")) or existing_outro
                 badge = _as_str(data.get("context_badge")) or existing_badge
+                if not highlight.breakdown_commentary and data.get("breakdown_commentary"):
+                    highlight.breakdown_commentary = _as_str(data.get("breakdown_commentary"))
+                if not highlight.breakdown_callout and data.get("breakdown_callout"):
+                    highlight.breakdown_callout = _as_str(data.get("breakdown_callout"))
                 return intro, outro, badge
             except (json.JSONDecodeError, ValueError) as exc:
                 logger.warning(
@@ -700,18 +708,32 @@ class OllamaScorer(Scorer):
             narration_intro = ""
             narration_outro = ""
             context_badge = ""
+            breakdown_commentary = ""
+            breakdown_callout = ""
         else:
             narration_intro = _as_str(highlight.narration_intro)
             narration_outro = _as_str(highlight.narration_outro)
             context_badge = _as_str(highlight.context_badge)
+            breakdown_commentary = _as_str(highlight.breakdown_commentary)
+            breakdown_callout = _as_str(highlight.breakdown_callout)
 
-            if not (narration_intro and narration_outro and context_badge):
+            need_narrative = not (narration_intro and narration_outro and context_badge)
+            if transformation_mode == "breakdown" and not breakdown_commentary:
+                need_narrative = True
+
+            if need_narrative:
                 gen_intro, gen_outro, gen_badge = self.generate_narrative(
                     highlight, streamer, game
                 )
                 narration_intro = narration_intro or gen_intro
                 narration_outro = narration_outro or gen_outro
                 context_badge = context_badge or gen_badge
+                breakdown_commentary = breakdown_commentary or _as_str(highlight.breakdown_commentary)
+                breakdown_callout = breakdown_callout or _as_str(highlight.breakdown_callout)
+
+            if transformation_mode == "breakdown" and not breakdown_commentary:
+                breakdown_commentary = f"Take a closer look at that climax moment: {_as_str(highlight.reason)}"
+                breakdown_callout = breakdown_callout or "Instant Replay"
 
         caption, hashtags = self._generate_caption_and_hashtags(
             highlight, streamer, game, hook_title
@@ -734,4 +756,8 @@ class OllamaScorer(Scorer):
             narration_outro=narration_outro,
             context_badge=context_badge,
             transformation_mode=transformation_mode,
+            breakdown_commentary=breakdown_commentary,
+            breakdown_callout=breakdown_callout,
+            music_risk=highlight.music_risk,
+            music_confidence=highlight.music_confidence,
         )

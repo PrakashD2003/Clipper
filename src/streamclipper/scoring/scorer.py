@@ -1,11 +1,15 @@
 """Abstract Scorer interface with signal fusion, transcript chunking, and YPP metadata validation."""
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+import logging
 import math
+from pathlib import Path
 from typing import Any
 
 from ..models import TranscriptionResult, TimeRange, Highlight, WordTimestamp
 from ..config import Config
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -69,6 +73,7 @@ class Scorer(ABC):
         loudness_spikes: list[TimeRange],
         chat_spikes: list[TimeRange],
         max_clips: int | None = None,
+        audio_path: Path | str | None = None,
     ) -> list[Highlight]:
         """Full scoring pipeline: chunk -> score -> filter duration -> fuse -> dedupe -> rank -> select."""
         chunks = self._chunk_transcript(transcript)
@@ -134,6 +139,22 @@ class Scorer(ABC):
                 h.transcript_chunk = scoped_text
             h.peak_time = self._extract_peak_time(h, loudness_spikes)
             h.chat_burst = self._extract_chat_burst(h, chat_spikes)
+
+        if audio_path is not None and Path(audio_path).is_file():
+            try:
+                from ..analysis.copyright_risk import CopyrightRiskDetector
+
+                detector = CopyrightRiskDetector(self.config)
+                if detector.enabled:
+                    penalty = float(self.config.get("analysis.music_penalty_factor", 0.80))
+                    for h in selected:
+                        risk, conf = detector.detect_highlight(audio_path, h)
+                        h.music_risk = risk
+                        h.music_confidence = conf
+                        if risk == "HIGH_MUSIC_DETECTED":
+                            h.final_score = round(h.final_score * penalty, 2)
+            except Exception as exc:
+                logger.debug("Copyright risk detection skipped during scoring: %s", exc)
 
         return selected
 

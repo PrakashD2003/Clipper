@@ -198,8 +198,13 @@ class AssCaptionBurner:
         clip_start_offset: float,
         ass_path: Path,
         chat_burst: list[dict[str, Any]] | None = None,
+        narration_intro: str = "",
+        narration_outro: str = "",
+        intro_dur: float | None = None,
+        outro_dur: float | None = None,
+        clip_duration: float | None = None,
     ) -> Path:
-        """Write an .ass subtitle file honoring captions.style (hormozi | single_word | sentence) and optional ChatTicker events."""
+        """Write an .ass subtitle file honoring captions.style, optional ChatTicker events, and narration windows."""
         target_path = Path(ass_path)
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -220,7 +225,58 @@ Style: ChatTicker,{self.font},34,&H00FFFFFF,&H00FFFFFF,&H99000000,&H99000000,-1,
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
         events: list[str] = []
-        cleaned_words = [w for w in words if str(w.text or "").strip()]
+
+        # Determine narration exclusion windows to prevent muffled streamer words during ducked speech
+        intro_cutoff = (
+            float(intro_dur)
+            if (intro_dur is not None and float(intro_dur) > 0.05)
+            else 0.0
+        )
+        outro_start_cutoff = (
+            max(intro_cutoff, float(clip_duration - outro_dur))
+            if (
+                outro_dur is not None
+                and float(outro_dur) > 0.05
+                and clip_duration is not None
+                and float(clip_duration) > float(outro_dur)
+            )
+            else float("inf")
+        )
+
+        # Emit tone-matched narration intro card during ducked intro window
+        if narration_intro and intro_cutoff > 0.0:
+            intro_start_ts = _sec_to_ass_time(0.0)
+            intro_end_ts = _sec_to_ass_time(intro_cutoff)
+            safe_intro = _escape_ass_text(str(narration_intro).strip().upper())
+            events.append(
+                f"Dialogue: 0,{intro_start_ts},{intro_end_ts},Hormozi,,0,0,0,,{{\\c{self.highlight_bgr}}}{safe_intro}"
+            )
+
+        # Filter streamer words: suppress speech during ducked intro & outro windows
+        cleaned_words: list[WordTimestamp] = []
+        for w in words:
+            if isinstance(w, dict):
+                text_val = str(w.get("text") or w.get("word") or "").strip()
+                s_val = float(w.get("start", 0.0))
+                e_val = float(w.get("end", 0.0))
+                w_obj = WordTimestamp(
+                    text=text_val,
+                    start=s_val,
+                    end=e_val,
+                    confidence=float(w.get("confidence", 0.0)),
+                )
+            else:
+                w_obj = w
+                text_val = str(w_obj.text or "").strip()
+                s_val = float(w_obj.start)
+
+            if not text_val:
+                continue
+            if intro_cutoff > 0.0 and (s_val - clip_start_offset) < intro_cutoff:
+                continue
+            if (s_val - clip_start_offset) >= outro_start_cutoff:
+                continue
+            cleaned_words.append(w_obj)
 
         effective_group_size = (
             1 if self.style == "single_word" else max(1, self.words_per_group)
@@ -263,6 +319,19 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 events.append(
                     f"Dialogue: 0,{start_ts},{end_ts},Hormozi,,0,0,0,,{line_text}"
                 )
+
+        # Emit tone-matched narration outro card during ducked outro window
+        if (
+            narration_outro
+            and outro_start_cutoff < float("inf")
+            and clip_duration is not None
+        ):
+            outro_start_ts = _sec_to_ass_time(outro_start_cutoff)
+            outro_end_ts = _sec_to_ass_time(clip_duration)
+            safe_outro = _escape_ass_text(str(narration_outro).strip().upper())
+            events.append(
+                f"Dialogue: 0,{outro_start_ts},{outro_end_ts},Hormozi,,0,0,0,,{{\\c{self.highlight_bgr}}}{safe_outro}"
+            )
 
         if self.show_chat_ticker and chat_burst:
             emitted = 0
