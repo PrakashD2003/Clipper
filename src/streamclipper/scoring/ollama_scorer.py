@@ -13,6 +13,7 @@ import ollama
 
 from ..config import Config, VALID_TRANSFORMATION_MODES
 from ..language import language_instruction
+from ..narration_style import BANNED_PHRASES, check_narration, narration_guide
 from ..models import ClipMetadata, Highlight, TimeRange
 from .scorer import Scorer, TranscriptChunk
 
@@ -34,18 +35,8 @@ VALID_MOMENT_TYPES: frozenset[str] = frozenset(
     }
 )
 
-# D4: generic phrases the narrative LLM must never produce (lower-case substring match).
-BANNED_PHRASES: tuple[str, ...] = (
-    "the chat went wild",
-    "chat went completely wild",
-    "you won't believe",
-    "watch what happens",
-    "subscribe for more",
-    "over a million people",
-    "insane moment",
-    "most viral",
-)
-
+# D4: generic phrases the narrative LLM must never produce. Defined in narration_style (shared
+# with the MCP guide) and re-exported here for compatibility.
 def grounded_fallback_intro(
     highlight: Highlight, streamer: str = "", game: str = ""
 ) -> str:
@@ -68,16 +59,18 @@ def grounded_fallback_intro(
     title = _clean(highlight.title, 80)
     reason = _clean(_as_str(highlight.reason).split(". ")[0], 140)
     quote = _clean(highlight.best_quote, 90)
-    parts: list[str] = []
+    parts: list[str] = ["Look at this"]
     if title:
         parts.append(title)
     if quote:
-        parts.append(f'{streamer or "The streamer"} says "{quote}"')
+        parts.append(f'{streamer or "The streamer"} says "{quote}". Wait for it')
     elif reason:
         parts.append(reason)
-    if not parts:
-        parts.append(f"A moment from {streamer + chr(39) + 's' if streamer else 'this'} {game or 'stream'} stream")
-    return ". ".join(parts) + "."
+    if len(parts) == 1:
+        parts.append(
+            f"A moment from {streamer + chr(39) + 's' if streamer else 'this'} {game or 'stream'} stream"
+        )
+    return ". ".join(parts) + "!"
 
 
 _THINK_TAG_RE = re.compile(r"<think>.*?</think>", flags=re.DOTALL | re.IGNORECASE)
@@ -655,19 +648,21 @@ class OllamaScorer(Scorer):
             avoid_phrases=", ".join(f'"{p}"' for p in (avoid_phrases or [])) or "(none)",
             hook_style=_as_str(hook_style) or "any",
             language_instruction=language_instruction(language),
+            style_guide=narration_guide(language, _as_str(hook_style), avoid_phrases),
         )
         existing_intro = _as_str(highlight.narration_intro)
         existing_outro = _as_str(highlight.narration_outro)
         existing_badge = _as_str(highlight.context_badge)
 
-        banned_retries = 0
-        max_banned_retries = 2
-        banned_note = ""
-        result: tuple[str, str, str] | None = None
+        chat_texts = [ln[2:] for ln in chat_lines[:5]]
+        excerpt = _as_str(highlight.transcript_chunk)[:1500]
+        max_attempts = 3
+        note = ""
         json_failures = 0
-        for attempt in range(1, self.MAX_JSON_RETRIES + max_banned_retries + 1):
-            prompt = base_prompt + banned_note
-            if json_failures and not banned_note:
+        best: tuple[int, dict[str, Any], tuple[str, str, str]] | None = None
+        for attempt in range(1, max_attempts + 1):
+            prompt = base_prompt + note
+            if json_failures and not note:
                 prompt = (
                     f"{base_prompt}\n\n"
                     'IMPORTANT: Return ONLY a valid JSON object with keys '
@@ -679,49 +674,65 @@ class OllamaScorer(Scorer):
                 data = json.loads(_clean_llm_text(raw_text))
                 if not isinstance(data, dict):
                     raise ValueError("Expected JSON object for narrative response.")
-                intro = _as_str(data.get("narration_intro")) or existing_intro
-                outro = _as_str(data.get("narration_outro")) or existing_outro
-                badge = _as_str(data.get("context_badge")) or existing_badge
-                callout = _as_str(data.get("callout"))
-
-                bad = self._find_banned_phrase(
-                    [_as_str(data.get("narration_intro")), _as_str(data.get("narration_outro")), callout],
-                    avoid_phrases,
-                )
-                if bad and banned_retries < max_banned_retries:
-                    banned_retries += 1
-                    logger.warning("Narrative contained banned phrase %r; regenerating.", bad)
-                    banned_note = (
-                        f'\n\nREJECTED: your previous answer used the banned phrase "{bad}". '
-                        "Rewrite every line without it, using concrete details from the excerpt."
-                    )
-                    result = (intro, outro, badge)
-                    continue
-                if bad:
-                    logger.warning("Narrative still contains banned phrase %r after retries.", bad)
-
-                if callout and not highlight.callout:
-                    highlight.callout = callout
-                if not highlight.breakdown_commentary and data.get("breakdown_commentary"):
-                    highlight.breakdown_commentary = _as_str(data.get("breakdown_commentary"))
-                if not highlight.breakdown_callout and data.get("breakdown_callout"):
-                    highlight.breakdown_callout = _as_str(data.get("breakdown_callout"))
-                return intro, outro, badge
             except (json.JSONDecodeError, ValueError) as exc:
                 json_failures += 1
                 logger.warning(
                     "Malformed JSON from generate_narrative (attempt %d/%d): %s",
-                    json_failures,
-                    self.MAX_JSON_RETRIES,
+                    attempt,
+                    max_attempts,
                     exc,
                 )
-                banned_note = ""
-                if json_failures >= self.MAX_JSON_RETRIES:
-                    break
+                note = ""
+                continue
 
-        if result is not None:
-            return result
-        return existing_intro, existing_outro, existing_badge
+            intro = _as_str(data.get("narration_intro")) or existing_intro
+            outro = _as_str(data.get("narration_outro")) or existing_outro
+            badge = _as_str(data.get("context_badge")) or existing_badge
+            problems = check_narration(
+                {
+                    "narration_intro": _as_str(data.get("narration_intro")),
+                    "narration_outro": _as_str(data.get("narration_outro")),
+                    "callout": _as_str(data.get("callout")),
+                },
+                transcript_excerpt=excerpt,
+                chat_samples=chat_texts,
+                avoid_phrases=avoid_phrases,
+            )
+            if best is None or len(problems) < best[0]:
+                best = (len(problems), data, (intro, outro, badge))
+            if not problems:
+                break
+            logger.warning(
+                "Narrative quality problems (attempt %d/%d): %s",
+                attempt,
+                max_attempts,
+                "; ".join(problems),
+            )
+            note = (
+                "\n\nREJECTED. Fix these problems: "
+                + "; ".join(problems)
+                + ". Rewrite every line in the energetic, interactive gamer voice using "
+                "concrete details from the excerpt."
+            )
+        else:
+            if best is not None:
+                logger.warning(
+                    "Narrative still has %d quality problem(s) after %d attempts; keeping best.",
+                    best[0],
+                    max_attempts,
+                )
+
+        if best is None:
+            return existing_intro, existing_outro, existing_badge
+        _, data, result = best
+        callout = _as_str(data.get("callout"))
+        if callout and not highlight.callout:
+            highlight.callout = callout
+        if not highlight.breakdown_commentary and data.get("breakdown_commentary"):
+            highlight.breakdown_commentary = _as_str(data.get("breakdown_commentary"))
+        if not highlight.breakdown_callout and data.get("breakdown_callout"):
+            highlight.breakdown_callout = _as_str(data.get("breakdown_callout"))
+        return result
 
     def _generate_hook_title(
         self,

@@ -19,6 +19,7 @@ from ..analysis.transcriber import Transcriber
 from ..cache import StepCache
 from ..config import Config
 from ..language import language_instruction, resolve_narration_language
+from ..narration_style import check_narration, narration_guide
 from ..discovery.youtube import YouTubeDiscovery
 from ..download.audio import _extract_youtube_id_from_url, download_audio
 from ..download.chat import ChatScraper
@@ -60,7 +61,10 @@ SERVER_INSTRUCTIONS = (
     "get_transcript_chunks -> submit_highlights -> render_all_selected (or render_clip). "
     "Required fields: every non-raw highlight needs a non-empty narration_intro AND "
     "narration_outro (1-2 short sentences, grounded in the transcript, in the reported narration "
-    "language). submit_highlights requires a transcript (run transcribe_audio first) and rejects "
+    "language). Write narration following narration_guide from get_transcript_chunks "
+    "(energetic, interactive gamer voice, grounded in the transcript); generic, ungrounded or "
+    "non-interactive lines are rejected with a problems list so you can rewrite and resubmit. "
+    "submit_highlights requires a transcript (run transcribe_audio first) and rejects "
     "highlights that start before analysis.skip_intro_minutes. Use mode 'breakdown' (instant "
     "replay) ONLY for moment_type clutch, fail, graphics_detail or analysis with a "
     "breakdown_commentary; reactions (hype, funny, chat_chaos, lore_secret) get narrative/story."
@@ -168,6 +172,40 @@ def _state_narration_language(config: Config, state: Any) -> str:
         getattr(state.stream_info, "streamer", None),
         getattr(transcript, "language", None) if transcript is not None else None,
     )
+
+
+def _variety_state(config: Config) -> Any:
+    from ..output.variety import VarietyState
+
+    return VarietyState(
+        Path(config.get("general.cache_dir", "./.cache")) / "variety_state.json",
+        hook_styles=list(config.get("transformation.hook_styles", None) or []) or None,
+    )
+
+
+def _recent_outros(config: Config, n: int = 20) -> list[str]:
+    """Recent outro lines from the VarietyState (empty when none / unreadable)."""
+    try:
+        return _variety_state(config).recent_outros(n)
+    except Exception:
+        return []
+
+
+def _next_hook_style(config: Config) -> str:
+    try:
+        return _variety_state(config).next_hook_style()
+    except Exception:
+        return ""
+
+
+def _chat_texts(messages: list[Any]) -> list[str]:
+    out: list[str] = []
+    for msg in messages or []:
+        if isinstance(msg, dict):
+            text = _as_str(msg.get("text") or msg.get("message"))
+            if text:
+                out.append(text)
+    return out
 
 
 def _json_error(message: str) -> str:
@@ -1002,6 +1040,8 @@ async def get_transcript_chunks(
     Resolves cached PipelineState via `url` or `StepCache.find_by_audio_path(audio_path)`.
     When only_with_signals=True (default), returns only chunks overlapping at least one
     loudness or chat spike (reduces token usage by 60-80%).
+    The response includes narration_guide + avoid_phrases: write narration following
+    narration_guide (energetic, interactive gamer voice, grounded in the transcript).
     """
     try:
         clean_url = url.strip() if isinstance(url, str) else ""
@@ -1059,6 +1099,11 @@ async def get_transcript_chunks(
         }
         if narration_lang == "hinglish":
             payload["narration_language_instruction"] = language_instruction(narration_lang)
+        avoid = _recent_outros(config)
+        payload["avoid_phrases"] = avoid
+        payload["narration_guide"] = narration_guide(
+            narration_lang, _next_hook_style(config), avoid
+        )
         if (
             only_with_signals
             and not state.analysis_complete
@@ -1077,7 +1122,10 @@ async def get_transcript_chunks(
 
 @mcp.tool()
 async def submit_highlights(
-    url: str, highlights: str, allow_without_transcript: bool = False
+    url: str,
+    highlights: str,
+    allow_without_transcript: bool = False,
+    narration_strict: bool = True,
 ) -> str:
     """Submit highlight selections from the MCP client LLM for rendering.
 
@@ -1091,6 +1139,13 @@ async def submit_highlights(
     non-empty breakdown_commentary; reactions (hype, funny, chat_chaos, lore_secret) get
     narrative/story instead. Always render with render_clip / render_all_selected; never
     assemble clips yourself with ffmpeg, subtitle files or system TTS voices.
+
+    Write narration following narration_guide from get_transcript_chunks (energetic,
+    interactive gamer voice, grounded in the transcript). Every non-raw highlight's narration is
+    quality-checked (banned generic phrases, repeats, long sentences, not grounded in the
+    transcript/chat, non-interactive outro); failing highlights are rejected with a `problems`
+    list so you can rewrite and resubmit. Pass narration_strict=false to accept them with the
+    problems returned as warnings instead.
     """
     try:
         clean_url = url.strip() if isinstance(url, str) else ""
@@ -1154,6 +1209,8 @@ async def submit_highlights(
             accepted: list[Highlight] = []
             rejected_count = 0
             rejected_reasons: list[dict[str, Any]] = []
+            narration_warnings: list[dict[str, Any]] = []
+            recent_outros = _recent_outros(config)
             skip_intro_seconds = float(getattr(scorer, "skip_intro_seconds", 0.0) or 0.0)
             narr_lang = _state_narration_language(config, state)
 
@@ -1318,6 +1375,36 @@ async def submit_highlights(
                 highlight.chat_burst = scorer._extract_chat_burst(
                     highlight, state.chat_spikes
                 )
+                if item_mode != "raw":
+                    problems = check_narration(
+                        {
+                            "narration_intro": narration_intro,
+                            "narration_outro": narration_outro,
+                            "callout": callout,
+                        },
+                        transcript_excerpt=_as_str(highlight.transcript_chunk),
+                        chat_samples=_chat_texts(highlight.chat_burst),
+                        avoid_phrases=recent_outros,
+                    )
+                    if problems and narration_strict:
+                        rejected_count += 1
+                        rejected_reasons.append(
+                            {
+                                "start": start,
+                                "end": end,
+                                "reason": (
+                                    "narration failed the quality check: rewrite it following "
+                                    "narration_guide (energetic, interactive gamer voice, "
+                                    "grounded in the transcript) and resubmit this highlight."
+                                ),
+                                "problems": problems,
+                            }
+                        )
+                        continue
+                    if problems:
+                        narration_warnings.append(
+                            {"start": start, "end": end, "problems": problems}
+                        )
                 accepted.append(highlight)
 
             if raw_items and not accepted:
@@ -1361,11 +1448,15 @@ async def submit_highlights(
         }
         if submit_lang == "hinglish":
             submit_payload["narration_language_instruction"] = language_instruction(submit_lang)
+        submit_warnings: list[Any] = []
         if state.transcript is None:
-            submit_payload["warnings"] = [
+            submit_warnings.append(
                 "No transcript cached for this stream: speech captions will be empty and "
                 "narration can't quote the streamer. Run transcribe_audio first."
-            ]
+            )
+        submit_warnings.extend(narration_warnings)
+        if submit_warnings:
+            submit_payload["warnings"] = submit_warnings
         return _json_ok(submit_payload)
     except Exception as exc:
         logger.exception("submit_highlights failed")
@@ -1393,6 +1484,7 @@ async def render_clip(
     voice_breakdown_path: str = "",
     callout: str = "",
     layout: str = "",
+    narration_strict: bool = True,
 ) -> str:
     """Render a single highlight into a final 9:16 vertical clip (mode: auto | narrative | story | breakdown | raw) with YPP transformative narration, zoom, and ASS captions+chat ticker.
 
@@ -1406,6 +1498,10 @@ async def render_clip(
     or analysis, with non-empty breakdown_commentary and a peak inside the clip; otherwise it is
     rendered as narrative/story and the response says so (mode_adjusted + reason). Use
     narrative/story (or auto) for reactions: hype, funny, chat_chaos, lore_secret.
+
+    Write narration following narration_guide from get_transcript_chunks (energetic,
+    interactive gamer voice, grounded in the transcript). Given narration text is
+    quality-checked and rejected with a problems list unless narration_strict=false.
     """
     try:
         clean_url = url.strip() if isinstance(url, str) else ""
@@ -1447,6 +1543,40 @@ async def render_clip(
                     "language) and call render_clip again, or use mode='raw' for an "
                     "un-narrated cut."
                 )
+
+            if narration_strict and (_as_str(narration_intro) or _as_str(narration_outro)):
+                nq_state = cache.load_state(clean_url)
+                nq_excerpt = ""
+                nq_chat: list[str] = []
+                if nq_state is not None:
+                    probe_h = Highlight(
+                        start=float(start), end=float(end), score=0.0, title="", reason=""
+                    )
+                    if nq_state.transcript is not None:
+                        nq_excerpt = scorer._extract_transcript_for_range(
+                            nq_state.transcript, float(start), float(end)
+                        )
+                    nq_chat = _chat_texts(
+                        scorer._extract_chat_burst(probe_h, nq_state.chat_spikes)
+                    )
+                nq_problems = check_narration(
+                    {
+                        "narration_intro": _as_str(narration_intro),
+                        "narration_outro": _as_str(narration_outro),
+                        "callout": _as_str(callout),
+                    },
+                    transcript_excerpt=nq_excerpt,
+                    chat_samples=nq_chat,
+                    avoid_phrases=_recent_outros(config),
+                )
+                if nq_problems:
+                    return _json_error(
+                        "Narration failed the quality check: "
+                        + "; ".join(nq_problems)
+                        + ". Rewrite following narration_guide from get_transcript_chunks "
+                        "(energetic, interactive gamer voice, grounded in the transcript) and "
+                        "call render_clip again, or pass narration_strict=false to render as is."
+                    )
 
         skip_intro_seconds = float(config.get("analysis.skip_intro_minutes", 5) or 0) * 60.0
         if skip_intro_seconds > 0 and float(start) < skip_intro_seconds:

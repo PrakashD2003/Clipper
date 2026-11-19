@@ -183,7 +183,7 @@ transformation:
   narration_gain_db: 3                 # Narration level above the ducked stream bed
   crossfade_seconds: 0.25              # Ramp at every duck transition
   callout_enabled: true                # Short spoken callout over the key moment
-  persona: "hyped, witty gaming commentator who reacts like a friend watching live"
+  persona: "high-energy gamer friend reacting live — hyped, funny, talks straight to the viewer"
   enable_top3: true                    # Allow top-3 compilation clips (mode: top3)
   top3_item_seconds: 14
   format_rotation: [narrative, story, breakdown]

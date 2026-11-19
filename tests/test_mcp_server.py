@@ -153,6 +153,7 @@ def _lenient_call_tool(monkeypatch: pytest.MonkeyPatch) -> None:
         args = dict(arguments or {})
         if name == "submit_highlights":
             args.setdefault("allow_without_transcript", True)
+            args.setdefault("narration_strict", False)
             try:
                 parsed = json.loads(mcp_server._clean_llm_text(args.get("highlights", "")))
             except (TypeError, ValueError):
@@ -169,6 +170,7 @@ def _lenient_call_tool(monkeypatch: pytest.MonkeyPatch) -> None:
                         it.setdefault("narration_outro", "Closing line for the clip.")
                 args["highlights"] = json.dumps(parsed)
         elif name == "render_clip" and args.get("mode") != "raw":
+            args.setdefault("narration_strict", False)
             args.setdefault("narration_intro", "Opening line for the clip.")
             args.setdefault("narration_outro", "Closing line for the clip.")
         return await _REAL_CALL_TOOL(name, args, *a, **kw)
@@ -3302,13 +3304,20 @@ async def test_Q3_submit_requires_transcript_unless_allowed(
     payload = json.dumps(
         [{"start": 10.0, "end": 40.0, "narration_intro": "a", "narration_outro": "b"}]
     )
-    res = await _REAL_CALL_TOOL("submit_highlights", {"url": url, "highlights": payload})
+    res = await _REAL_CALL_TOOL(
+        "submit_highlights", {"url": url, "highlights": payload, "narration_strict": False}
+    )
     err = json.loads(res.content[0].text)["error"]
     assert "transcribe_audio" in err and "allow_without_transcript" in err
     ok = _extract_json(
         await _REAL_CALL_TOOL(
             "submit_highlights",
-            {"url": url, "highlights": payload, "allow_without_transcript": True},
+            {
+                "url": url,
+                "highlights": payload,
+                "allow_without_transcript": True,
+                "narration_strict": False,
+            },
         )
     )
     assert ok["accepted_count"] == 1 and ok["warnings"]
@@ -3331,7 +3340,10 @@ async def test_Q2_Q3_submit_rejects_missing_narration_and_pre_skip_intro(
         ]
     )
     data = _extract_json(
-        await _REAL_CALL_TOOL("submit_highlights", {"url": url, "highlights": payload})
+        await _REAL_CALL_TOOL(
+            "submit_highlights",
+            {"url": url, "highlights": payload, "narration_strict": False},
+        )
     )
     assert data["accepted_count"] == 2 and data["rejected_count"] == 2
     reasons = {r["start"]: r["reason"] for r in data["rejected"]}
@@ -3415,6 +3427,7 @@ async def test_Q3_render_clip_rejects_pre_skip_intro_start(
         "hook_title": "T",
         "narration_intro": "a",
         "narration_outro": "b",
+        "narration_strict": False,
     }
     res = await _REAL_CALL_TOOL("render_clip", args)
     err = json.loads(res.content[0].text)["error"]

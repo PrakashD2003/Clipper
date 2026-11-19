@@ -1089,7 +1089,7 @@ class TestOllamaScorerNarrativeAndMetadata:
         narrative_json = json.dumps(
             {
                 "narration_intro": "Look closely at the neon reflections on the wet sidewalk here.",
-                "narration_outro": "Rockstar really modeled individual ripples for every passing headlight.",
+                "narration_outro": "Rockstar modeled every single ripple. Did you notice that?",
                 "context_badge": "🎨 Insane Detail",
             }
         )
@@ -1114,7 +1114,7 @@ class TestOllamaScorerNarrativeAndMetadata:
         assert "graphics_detail" in sent_prompt
         assert "Tim" in sent_prompt
         assert intro == "Look closely at the neon reflections on the wet sidewalk here."
-        assert outro == "Rockstar really modeled individual ripples for every passing headlight."
+        assert outro == "Rockstar modeled every single ripple. Did you notice that?"
         assert badge == "🎨 Insane Detail"
 
     def test_generate_metadata_backfills_missing_narrative_fields(self, config: Config):
@@ -1122,7 +1122,7 @@ class TestOllamaScorerNarrativeAndMetadata:
         narrative_json = json.dumps(
             {
                 "narration_intro": "He swore he had this getaway completely under control.",
-                "narration_outro": "Instant karma hit him before he even finished the sentence.",
+                "narration_outro": "Instant karma hit him fast. Ever done that?",
                 "context_badge": "💀 Instant Karma",
             }
         )
@@ -1438,7 +1438,7 @@ class TestOllamaScorerEdgeCasesAndHardening:
                     response=json.dumps(
                         {
                             "narration_intro": "Watch closely here.",
-                            "narration_outro": "That timing was unreal.",
+                            "narration_outro": "Was that timing unreal or what?",
                             "context_badge": "🔥 Timing",
                         }
                     )
@@ -1449,7 +1449,7 @@ class TestOllamaScorerEdgeCasesAndHardening:
             intro, outro, badge = scorer.generate_narrative(h, "Tim", "GTA 6")
 
         assert intro == "Watch closely here."
-        assert outro == "That timing was unreal."
+        assert outro == "Was that timing unreal or what?"
         assert badge == "🔥 Timing"
         retry_prompt = mock_client.generate.call_args_list[1].kwargs["prompt"]
         assert "IMPORTANT: Return ONLY a valid JSON object" in retry_prompt
@@ -2154,7 +2154,7 @@ class TestBatchD:
 
     def test_D4_banned_phrase_triggers_retry(self, config: Config) -> None:
         bad = json.dumps({"narration_intro": "The chat went wild here.", "narration_outro": "Ok.", "context_badge": "B", "callout": "a b c d"})
-        good = json.dumps({"narration_intro": "He eyes the red truck.", "narration_outro": "Honestly, I'd have bailed.", "context_badge": "Good", "callout": "Watch the red truck"})
+        good = json.dumps({"narration_intro": "He eyes the red truck.", "narration_outro": "Honestly, I'd have bailed. Would you?", "context_badge": "Good", "callout": "Watch the red truck"})
         with patch("streamclipper.scoring.ollama_scorer.ollama.Client") as cls:
             cls.return_value.generate.side_effect = [GenerateResponse(response=bad), GenerateResponse(response=good)]
             scorer = OllamaScorer(config)
@@ -2176,7 +2176,7 @@ class TestBatchD:
         assert "purple sedan" in sent and "hates this truck" in sent and "question" in sent
 
     def test_D5_generate_metadata_hook_style_and_callout(self, config: Config) -> None:
-        narrative = json.dumps({"narration_intro": "Tim eyes the exit.", "narration_outro": "Brave. Dumb.", "context_badge": "B", "callout": "Here comes the truck"})
+        narrative = json.dumps({"narration_intro": "Tim eyes the exit.", "narration_outro": "Brave. Dumb. Agree?", "context_badge": "B", "callout": "Here comes the truck"})
         caption = json.dumps({"caption": "c", "hashtags": ["a"]})
         with patch("streamclipper.scoring.ollama_scorer.ollama.Client") as cls:
             cls.return_value.generate.side_effect = [
