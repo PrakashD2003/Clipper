@@ -51,7 +51,7 @@ analysis:
   music_penalty_factor: 0.80           # Score multiplier for clips flagged with high music
   copyright:
     enabled: true
-    min_gap_seconds: 0.4
+    min_gap_seconds: 2.0               # Min TOTAL non-speech audio that must be tested; less -> music_risk UNKNOWN (never a false CLEAN)
     high_risk_threshold: 0.65
     low_risk_threshold: 0.35
 
@@ -85,6 +85,7 @@ video:
   codec: "auto"             # auto (h264_nvenc if CUDA+NVENC else libx264) | h264_nvenc | libx264
   audio_codec: "aac"
   game_fit: "full"          # full (16:9 game area) | balanced (4:3 centre crop, taller game area)
+  blur_fill_game_scale: 1.15  # blur_fill layout: game width as a multiple of frame width (centre-cropped horizontally; 1.0-1.3). Higher = taller game, more cropped sides
   crf: 23                   # quality (libx264 -crf / h264_nvenc -cq, lower = better, 18-28 range)
 
 captions:
@@ -97,6 +98,11 @@ captions:
   stroke_color: "black"
   stroke_width: 4
   position_y_ratio: 0.75     # 75% down the screen
+  rotate_styles: true        # Rotate style_presets per streamer so clips don't share one template look
+  style_presets:             # Word-caption / narration-card looks (font falls back automatically if missing)
+    - {font: "Arial", primary_color: "#FFFFFF", highlight_color: "#FFD700", outline_color: "#000000"}      # white + gold
+    - {font: "Arial Black", primary_color: "#FFFFFF", highlight_color: "#00E5FF", outline_color: "#000000"} # bold white + cyan
+    - {font: "Segoe UI Black", primary_color: "#FFEB3B", highlight_color: "#FF4081", outline_color: "#000000"} # yellow + pink
 
 hook_title:
   enabled: true
@@ -108,6 +114,10 @@ hook_title:
   stroke_width: 3
   position: "top"            # top | center
   fade_in: true
+
+hooks:
+  persistent_title: true     # blur_fill layout: keep the hook title (and badge) on screen for the whole clip (false = hook_title.duration_seconds)
+  streamer_tag: true         # blur_fill layout: small "@streamer" credit pill at the bottom of the hook band
 
 metadata:
   hashtag_count: 15
@@ -123,7 +133,9 @@ output:
   max_clips_per_streamer_per_day: 3    # Extra clips are routed to queued_dir
   queued_dir: "queued"                 # Sub-folder for clips over the daily cap
   write_post_file: true                # Write a ready-to-paste post .txt next to each clip
-  min_commentary_ratio: 0.35           # Minimum share of narration vs. stream audio (YPP transformative)
+  min_commentary_ratio: 0.35           # Minimum share of narration vs. stream audio (YPP transformative); measured after export, below this the clip JSON gets low_commentary: true
+  require_narration: true              # Hard gate: a non-raw clip whose narration mix did not run is quarantined, never shipped silent
+  quarantine_dir: "_quarantine"        # Sub-folder of the output dir (game/streamer/date below it) for clips that failed the narration gate
 
 facecam:
   min_area_ratio: 0.002
@@ -154,12 +166,18 @@ transformation:
   tts_engine: "auto"                   # auto (kokoro -> edge-tts) | kokoro | edge-tts | elevenlabs | none
   tts_voice: "am_puck"                 # Energetic Kokoro voice ID (fallback: am_fenrir)
   edge_tts_voice: "en-US-AndrewMultilingualNeural" # Edge-TTS voice ID (used when engine is edge-tts or auto fallback)
-  elevenlabs_voice_id: ""              # Optional ElevenLabs voice/clone ID (uses ELEVENLABS_API_KEY env var)
+  elevenlabs_voice_id: ""              # ElevenLabs voice for English narration (uses ELEVENLABS_API_KEY from env or .env)
+  elevenlabs_hinglish_voice_id: ""     # ElevenLabs voice for Hinglish narration ("" = use elevenlabs_voice_id)
   elevenlabs_model_id: "eleven_multilingual_v2"
-  tts_engines: [chatterbox, kokoro, edge-tts]  # Fallback chain, tried in order
+  tts_engines: [chatterbox, kokoro, edge-tts]  # Fallback chain, tried in order; ElevenLabs is auto-prepended when ELEVENLABS_API_KEY (env or .env) and elevenlabs_voice_id are set
+  narration_language: "auto"            # auto | english | hinglish (auto = Hinglish when the transcript is Hindi/Urdu)
+  streamer_languages: {}                # per-streamer override, case-insensitive, e.g. {CarryisLive: hinglish}
+  hinglish_tts_engines: [elevenlabs, edge-tts]   # English-only engines (chatterbox turbo, kokoro) are never used for Hinglish
+  hinglish_edge_tts_voice: "en-IN-PrabhatNeural" # Indian-English Edge voice reads Roman Hinglish best
   tts_external_python: ".venv-tts/Scripts/python.exe"  # Separate venv for engines with conflicting deps
   tts_reference_wav: ""                # Voice-clone reference WAV ("" = engine default voice)
   tts_speed: 1.1
+  tts_retries: 1                       # Extra full passes over the TTS engine chain (0.5 s apart) when every engine failed
   edge_tts_rate: "+10%"
   target_lufs: -14                     # Final loudness normalization target
   narration_gain_db: 3                 # Narration level above the ducked stream bed
@@ -169,6 +187,7 @@ transformation:
   enable_top3: true                    # Allow top-3 compilation clips (mode: top3)
   top3_item_seconds: 14
   format_rotation: [narrative, story, breakdown]
+  breakdown_moment_types: [clutch, fail, graphics_detail, analysis]  # ONLY these moment types may use breakdown (instant replay); needs breakdown_commentary + a peak inside the clip. Reactions (hype/funny/chat_chaos/lore_secret) get narrative/story
   hook_styles: [question, hot_take, countdown, nobody_noticed]
   duck_stream_volume: 0.18             # Duck original stream audio to 18% during narrator voiceover
   punch_in_zoom: 1.20                  # 1.20x center zoom around peak_time (1.0 = disabled)

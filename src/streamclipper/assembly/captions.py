@@ -179,6 +179,7 @@ class AssCaptionBurner:
             named_style = _NAMED_ASS_COLORS.get(raw_highlight.strip().lower())
             highlight_bgr = f"&H{named_style[4:]}&" if named_style else "&H00D7FF&"
         self.highlight_bgr = highlight_bgr
+        self._ticker_font = self.font  # ChatTicker keeps the base font; presets never touch it
 
         self.codec = str(config.get("video.codec", "libx264") or "libx264").strip().lower()
         resolution = config.get("video.resolution", [1080, 1920])
@@ -194,7 +195,36 @@ class AssCaptionBurner:
         self.margin_v = round(self.height * (1.0 - pos_y_ratio))
         self.show_chat_ticker = bool(config.get("transformation.show_chat_ticker", True))
 
-    def generate_ass(
+    def generate_ass(self, *args: Any, style_preset: dict[str, Any] | None = None, **kwargs: Any) -> Path:
+        """Write the .ass file; `style_preset` ({font, primary_color, highlight_color, outline_color})
+        overrides the word-caption and narration-card styles only (ChatTicker is left alone)."""
+        if not style_preset:
+            return self._generate_ass(*args, **kwargs)
+        saved = (self.font, self.primary_color, self.stroke_color, self.highlight_bgr)
+        try:
+            font = re.sub(r"[,\r\n]+", " ", str(style_preset.get("font") or "")).strip()
+            if font:
+                self.font = font
+            if style_preset.get("primary_color"):
+                self.primary_color = _color_to_ass_style(
+                    style_preset["primary_color"], default=self.primary_color
+                )
+            if style_preset.get("outline_color"):
+                self.stroke_color = _color_to_ass_style(
+                    style_preset["outline_color"], default=self.stroke_color
+                )
+            if style_preset.get("highlight_color"):
+                raw = str(style_preset["highlight_color"])
+                bgr = _hex_to_ass_bgr(raw, default="")
+                if not bgr:
+                    named = _NAMED_ASS_COLORS.get(raw.strip().lower())
+                    bgr = f"&H{named[4:]}&" if named else self.highlight_bgr
+                self.highlight_bgr = bgr
+            return self._generate_ass(*args, **kwargs)
+        finally:
+            self.font, self.primary_color, self.stroke_color, self.highlight_bgr = saved
+
+    def _generate_ass(
         self,
         words: list[WordTimestamp],
         clip_start_offset: float,
@@ -218,6 +248,7 @@ class AssCaptionBurner:
         secondary_style_color = "&H00" + self.highlight_bgr[2:-1]
         hormozi_margin_v = self.margin_v
         ticker_align, ticker_margin_v = 9, 260
+        caption_center: tuple[int, int] | None = None
         callout_style = "Hormozi"
         callout_style_line = ""
         if layout is not None:
@@ -226,6 +257,11 @@ class AssCaptionBurner:
             cb = layout.caption_band
             hormozi_margin_v = max(0, self.height - int(cb.y + 0.62 * cb.h))
             ticker_margin_v = int(cb.y + 0.70 * cb.h)
+            if layout.kind == "blur_fill":
+                # Word captions / narration cards centre vertically in the caption band.
+                caption_center = (self.width // 2, int(cb.y + 0.5 * cb.h))
+                hormozi_margin_v = max(0, self.height - int(cb.y + 0.5 * cb.h))
+                ticker_margin_v = int(cb.y + 0.74 * cb.h)
             callout_style = "Callout"
             callout_style_line = (
                 f"Style: Callout,{self.font},{max(1, int(self.font_size * 0.8))},"
@@ -242,7 +278,7 @@ WrapStyle: 0
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Hormozi,{self.font},{self.font_size},{self.primary_color},{secondary_style_color},{self.stroke_color},&H80000000,-1,0,0,0,100,100,0,0,1,{self.stroke_width},0,2,60,60,{hormozi_margin_v},1
-Style: ChatTicker,{self.font},34,&H00FFFFFF,&H00FFFFFF,&H99000000,&H99000000,-1,0,0,0,100,100,0,0,3,2,0,{ticker_align},40,40,{ticker_margin_v},1
+Style: ChatTicker,{self._ticker_font},34,&H00FFFFFF,&H00FFFFFF,&H99000000,&H99000000,-1,0,0,0,100,100,0,0,3,2,0,{ticker_align},40,40,{ticker_margin_v},1
 {callout_style_line}
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -431,6 +467,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                     f"Dialogue: 1,{msg_start},{msg_end},ChatTicker,,0,0,0,,{author}: {text}"
                 )
                 emitted += 1
+
+        if caption_center is not None:
+            marker = ",Hormozi,,0,0,0,,"
+            pos = "{\\an5\\pos(%d,%d)}" % caption_center
+            events = [e.replace(marker, marker + pos, 1) if marker in e else e for e in events]
 
         body = "\n".join(events) + "\n" if events else ""
         target_path.write_text(header + body, encoding="utf-8")

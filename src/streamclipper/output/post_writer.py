@@ -5,7 +5,15 @@ from pathlib import Path
 
 from ..models import ClipMetadata, StreamInfo
 
-AI_DISCLOSURE_REMINDER = "Tick YouTube's 'Altered or synthetic content' disclosure (AI voice)"
+AI_DISCLOSURE_REMINDER = (
+    "AI voiceover: YouTube requires the 'Altered or synthetic content' label when the voice "
+    "is cloned from a real person or could pass as a real person; for an obviously synthetic "
+    "narrator it's optional (ticking it is always safe). Never clone the streamer's voice."
+)
+MUSIC_UNKNOWN_REMINDER = (
+    "Music check inconclusive (streamer talks over the audio) - listen for background "
+    "music before posting."
+)
 POSTING_CADENCE_REMINDER = "Post at most 2–3 Shorts per day"
 
 
@@ -34,6 +42,11 @@ def write_post_file(video_path: Path, metadata: ClipMetadata, stream_info: Strea
         "REMINDERS",
         f"- {AI_DISCLOSURE_REMINDER}",
         f"- {POSTING_CADENCE_REMINDER}",
+        *(
+            [f"- {MUSIC_UNKNOWN_REMINDER}"]
+            if str(getattr(metadata, "music_risk", "") or "").upper() == "UNKNOWN"
+            else []
+        ),
         "",
     ]
     out = video.with_name(f"{video.stem}_post.txt")

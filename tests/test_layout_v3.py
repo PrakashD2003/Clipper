@@ -36,7 +36,7 @@ def test_A1_compute_layout_table():
     assert _boxes(compute_layout("stacked", "full")) == ((0, 180), (180, 880), (880, 1488), (1488, 1920))
     assert _boxes(compute_layout("stacked", "balanced")) == ((0, 180), (180, 680), (680, 1490), (1490, 1920))
     assert _boxes(compute_layout("reaction", "balanced")) == ((0, 180), (0, 960), (960, 1568), (1568, 1920))
-    assert _boxes(compute_layout("blur_fill", "full")) == ((380, 640), None, (656, 1264), (1264, 1920))
+    assert _boxes(compute_layout("blur_fill", "full")) == ((180, 520), None, (560, 1259), (1275, 1800))
     assert _boxes(compute_layout("blur_fill", "balanced")) == ((300, 540), None, (555, 1365), (1365, 1920))
     g = compute_layout("stacked", "balanced")
     assert (g.game_box.w, g.game_box.h) == (1080, 810)

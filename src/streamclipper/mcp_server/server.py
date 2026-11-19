@@ -18,6 +18,7 @@ from ..analysis.loudness import LoudnessDetector
 from ..analysis.transcriber import Transcriber
 from ..cache import StepCache
 from ..config import Config
+from ..language import language_instruction, resolve_narration_language
 from ..discovery.youtube import YouTubeDiscovery
 from ..download.audio import _extract_youtube_id_from_url, download_audio
 from ..download.chat import ChatScraper
@@ -51,7 +52,21 @@ from ..scoring.scorer import Scorer, TranscriptChunk
 
 logger = logging.getLogger(__name__)
 
-mcp = MCPServer("streamclipper")
+SERVER_INSTRUCTIONS = (
+    "Always render with render_clip / render_all_selected. Never assemble clips yourself with "
+    "ffmpeg, subtitle files or system TTS voices — those outputs skip the narration, captions, "
+    "loudness and copyright checks. "
+    "Workflow: download_stream_audio -> transcribe_audio -> analyze_signals -> "
+    "get_transcript_chunks -> submit_highlights -> render_all_selected (or render_clip). "
+    "Required fields: every non-raw highlight needs a non-empty narration_intro AND "
+    "narration_outro (1-2 short sentences, grounded in the transcript, in the reported narration "
+    "language). submit_highlights requires a transcript (run transcribe_audio first) and rejects "
+    "highlights that start before analysis.skip_intro_minutes. Use mode 'breakdown' (instant "
+    "replay) ONLY for moment_type clutch, fail, graphics_detail or analysis with a "
+    "breakdown_commentary; reactions (hype, funny, chat_chaos, lore_secret) get narrative/story."
+)
+
+mcp = MCPServer("streamclipper", instructions=SERVER_INSTRUCTIONS)
 
 _LOOP_GPU_LOCKS: weakref.WeakKeyDictionary[
     asyncio.AbstractEventLoop, asyncio.Lock
@@ -141,6 +156,18 @@ def _get_cache(config: Config) -> StepCache:
 def _json_ok(payload: dict[str, Any]) -> str:
     """Serialize a tool result dict to a formatted JSON string."""
     return json.dumps(payload, indent=2)
+
+
+def _state_narration_language(config: Config, state: Any) -> str:
+    """Resolve english/hinglish from a cached PipelineState (streamer + transcript language)."""
+    if state is None:
+        return resolve_narration_language(config, None, None)
+    transcript = getattr(state, "transcript", None)
+    return resolve_narration_language(
+        config,
+        getattr(state.stream_info, "streamer", None),
+        getattr(transcript, "language", None) if transcript is not None else None,
+    )
 
 
 def _json_error(message: str) -> str:
@@ -486,9 +513,22 @@ async def _render_single_highlight(
     min_clip_index: int = 1,
     voice_breakdown_path: Path | None = None,
     layout: str = "",
+    language: str = "english",
+    notes: list[dict[str, Any]] | None = None,
 ) -> tuple[ClipResult, str]:
-    """Download segment(s), build offline ClipMetadata, and assemble one highlight."""
+    """Download segment(s), build offline ClipMetadata, and assemble one highlight.
+
+    When an explicit "breakdown" request is downgraded because the moment is unsuitable, a
+    `{"mode_adjusted": ..., "reason": ...}` dict is appended to *notes* (if provided).
+    """
     clip_mode, valid_beats = pipeline._resolve_highlight_mode(base_mode, highlight)
+    if base_mode == "breakdown" and clip_mode != "breakdown" and notes is not None:
+        notes.append(
+            {
+                "mode_adjusted": f"breakdown -> {clip_mode}",
+                "reason": pipeline._breakdown_ineligible_reason(highlight),
+            }
+        )
     segments_dir = pipeline.temp_dir / "segments"
     segments_dir.mkdir(parents=True, exist_ok=True)
     buffer_seconds = 3.0
@@ -543,6 +583,7 @@ async def _render_single_highlight(
         breakdown_callout="" if clip_mode == "raw" else _as_str(highlight.breakdown_callout),
         music_risk=highlight.music_risk,
         music_confidence=highlight.music_confidence,
+        narration_language=language,
     )
     # `callout` lands on ClipMetadata in Batch D; set it as an attribute so this works pre/post merge.
     metadata.callout = "" if clip_mode == "raw" else _as_str(getattr(highlight, "callout", ""))
@@ -574,7 +615,13 @@ async def _render_single_highlight(
             **extra_kwargs,
         )
 
-    if config.get("output.write_post_file", True):
+    if getattr(clip_result, "quarantined", False):
+        logger.warning(
+            "Clip quarantined (%s); skipping post file: %s",
+            getattr(clip_result, "quarantine_reason", ""),
+            clip_result.video_path,
+        )
+    elif config.get("output.write_post_file", True):
         try:
             from ..output.post_writer import write_post_file
         except ImportError:
@@ -973,6 +1020,7 @@ async def get_transcript_chunks(
             return _json_error(
                 "Transcript is not available in cache. Run transcribe_audio first."
             )
+        narration_lang = _state_narration_language(config, state)
 
         scorer = _MCPScorer(config)
         all_chunks = scorer._chunk_transcript(
@@ -1007,7 +1055,10 @@ async def get_transcript_chunks(
             "returned_chunks": len(chunks_payload),
             "filtered_out_chunks": max(0, len(all_chunks) - len(chunks_payload)),
             "chunks": chunks_payload,
+            "narration_language": narration_lang,
         }
+        if narration_lang == "hinglish":
+            payload["narration_language_instruction"] = language_instruction(narration_lang)
         if (
             only_with_signals
             and not state.analysis_complete
@@ -1025,8 +1076,22 @@ async def get_transcript_chunks(
 
 
 @mcp.tool()
-async def submit_highlights(url: str, highlights: str) -> str:
-    """Submit highlight selections (including moment_type, narration_intro, narration_outro, context_badge, sub_clips) from the MCP client LLM for rendering."""
+async def submit_highlights(
+    url: str, highlights: str, allow_without_transcript: bool = False
+) -> str:
+    """Submit highlight selections from the MCP client LLM for rendering.
+
+    Run transcribe_audio first: a transcript is REQUIRED unless allow_without_transcript=true.
+    Each highlight needs start, end, title, moment_type, a non-empty narration_intro AND
+    narration_outro (written in the narration language this tool reports; a highlight without
+    them is rejected unless it sets "mode": "raw"), plus optional context_badge, sub_clips,
+    peak_time. Highlights that start before analysis.skip_intro_minutes are rejected.
+    breakdown_commentary / breakdown_callout are only used by "breakdown" (instant replay),
+    which is allowed ONLY for moment_type clutch, fail, graphics_detail or analysis and needs a
+    non-empty breakdown_commentary; reactions (hype, funny, chat_chaos, lore_secret) get
+    narrative/story instead. Always render with render_clip / render_all_selected; never
+    assemble clips yourself with ffmpeg, subtitle files or system TTS voices.
+    """
     try:
         clean_url = url.strip() if isinstance(url, str) else ""
         if not clean_url:
@@ -1078,9 +1143,19 @@ async def submit_highlights(url: str, highlights: str) -> str:
                     status=PipelineStatus.SCORING,
                 )
 
+            if state.transcript is None and not allow_without_transcript:
+                return _json_error(
+                    "No transcript cached for this stream. Run transcribe_audio first so "
+                    "narration and captions can use what the streamer actually says, then "
+                    "submit highlights again (or pass allow_without_transcript=true to "
+                    "submit without one)."
+                )
+
             accepted: list[Highlight] = []
             rejected_count = 0
             rejected_reasons: list[dict[str, Any]] = []
+            skip_intro_seconds = float(getattr(scorer, "skip_intro_seconds", 0.0) or 0.0)
+            narr_lang = _state_narration_language(config, state)
 
             for item in raw_items:
                 if not isinstance(item, dict):
@@ -1092,6 +1167,45 @@ async def submit_highlights(url: str, highlights: str) -> str:
                 if start is None or end is None or end <= start:
                     rejected_count += 1
                     continue
+
+                if skip_intro_seconds > 0 and start < skip_intro_seconds:
+                    rejected_count += 1
+                    rejected_reasons.append(
+                        {
+                            "start": start,
+                            "end": end,
+                            "reason": (
+                                f"starts at {start:.0f}s, before analysis.skip_intro_minutes "
+                                f"({skip_intro_seconds / 60:g} min = {skip_intro_seconds:.0f}s): "
+                                "that part of the stream is pre-game/intro. Pick a moment later."
+                            ),
+                        }
+                    )
+                    continue
+
+                item_mode = _as_str(item.get("mode") or item.get("transformation_mode")).lower()
+                if item_mode != "raw":
+                    missing = [
+                        f
+                        for f in ("narration_intro", "narration_outro")
+                        if not _as_str(item.get(f))
+                    ]
+                    if missing:
+                        rejected_count += 1
+                        rejected_reasons.append(
+                            {
+                                "start": start,
+                                "end": end,
+                                "reason": (
+                                    f"missing {' and '.join(missing)}: every non-raw clip must "
+                                    "open with an intro voiceover and close with an outro. "
+                                    "Write them (1-2 short sentences each, grounded in what "
+                                    "the streamer says) in the narration language "
+                                    f"'{narr_lang}' and resubmit this highlight."
+                                ),
+                            }
+                        )
+                        continue
 
                 score = _parse_score(item.get("score"))
                 title = (
@@ -1234,17 +1348,25 @@ async def submit_highlights(url: str, highlights: str) -> str:
                     state.status = PipelineStatus.PENDING
             cache.save_state(state)
 
-        return _json_ok(
-            {
-                "url": clean_url,
-                "accepted_count": len(accepted),
-                "rejected_count": rejected_count,
-                "rejected": rejected_reasons,
-                "dropped_count": dropped_count,
-                "status": state.status.name.lower(),
-                "highlights": [h.to_dict() for h in accepted],
-            }
-        )
+        submit_lang = _state_narration_language(config, state)
+        submit_payload: dict[str, Any] = {
+            "url": clean_url,
+            "accepted_count": len(accepted),
+            "rejected_count": rejected_count,
+            "rejected": rejected_reasons,
+            "dropped_count": dropped_count,
+            "status": state.status.name.lower(),
+            "highlights": [h.to_dict() for h in accepted],
+            "narration_language": submit_lang,
+        }
+        if submit_lang == "hinglish":
+            submit_payload["narration_language_instruction"] = language_instruction(submit_lang)
+        if state.transcript is None:
+            submit_payload["warnings"] = [
+                "No transcript cached for this stream: speech captions will be empty and "
+                "narration can't quote the streamer. Run transcribe_audio first."
+            ]
+        return _json_ok(submit_payload)
     except Exception as exc:
         logger.exception("submit_highlights failed")
         return _json_error(str(exc))
@@ -1272,7 +1394,19 @@ async def render_clip(
     callout: str = "",
     layout: str = "",
 ) -> str:
-    """Render a single highlight into a final 9:16 vertical clip (mode: auto | narrative | story | breakdown | raw) with YPP transformative narration, zoom, and ASS captions+chat ticker."""
+    """Render a single highlight into a final 9:16 vertical clip (mode: auto | narrative | story | breakdown | raw) with YPP transformative narration, zoom, and ASS captions+chat ticker.
+
+    ALWAYS render with this tool or render_all_selected. NEVER assemble clips yourself with
+    ffmpeg, subtitle files or system TTS voices: those outputs skip the narration, captions,
+    loudness and copyright checks.
+
+    Required for every non-raw mode: narration_intro AND narration_outro (1-2 short sentences
+    each, grounded in what the streamer says, in the stream's narration language). Mode
+    "breakdown" (instant replay) is only allowed for moment_type clutch, fail, graphics_detail
+    or analysis, with non-empty breakdown_commentary and a peak inside the clip; otherwise it is
+    rendered as narrative/story and the response says so (mode_adjusted + reason). Use
+    narrative/story (or auto) for reactions: hype, funny, chat_chaos, lore_secret.
+    """
     try:
         clean_url = url.strip() if isinstance(url, str) else ""
         if not clean_url:
@@ -1295,6 +1429,32 @@ async def render_clip(
         scorer = _MCPScorer(config)
 
         base_mode = pipeline._resolve_base_mode(mode)
+
+        if base_mode != "raw":
+            missing_narr = [
+                name
+                for name, val, vpath in (
+                    ("narration_intro", narration_intro, voice_intro_path),
+                    ("narration_outro", narration_outro, voice_outro_path),
+                )
+                if not _as_str(val) and not _as_str(vpath)
+            ]
+            if missing_narr:
+                return _json_error(
+                    f"Missing {' and '.join(missing_narr)}: every non-raw clip must open with an "
+                    "intro voiceover and close with an outro. Write them (1-2 short sentences "
+                    "each, grounded in what the streamer says, in the stream's narration "
+                    "language) and call render_clip again, or use mode='raw' for an "
+                    "un-narrated cut."
+                )
+
+        skip_intro_seconds = float(config.get("analysis.skip_intro_minutes", 5) or 0) * 60.0
+        if skip_intro_seconds > 0 and float(start) < skip_intro_seconds:
+            return _json_error(
+                f"start={float(start):.0f}s is before analysis.skip_intro_minutes "
+                f"({skip_intro_seconds / 60:g} min = {skip_intro_seconds:.0f}s): that part of the "
+                "stream is pre-game/intro. Pick a moment later."
+            )
 
         layout_kind = _as_str(layout).lower()
         if layout_kind not in ("", "stacked", "blur_fill", "reaction"):
@@ -1421,6 +1581,7 @@ async def render_clip(
                 highlight.peak_time = scorer._extract_peak_time(highlight, [])
 
             min_clip_index = (len(state.clips) + 1) if state is not None else 1
+            render_notes: list[dict[str, Any]] = []
             clip_result, resolved_mode = await _render_single_highlight(
                 pipeline=pipeline,
                 config=config,
@@ -1435,21 +1596,32 @@ async def render_clip(
                 min_clip_index=min_clip_index,
                 voice_breakdown_path=breakdown_voice,
                 layout=layout_kind,
+                notes=render_notes,
+                language=resolve_narration_language(
+                    config,
+                    resolved_streamer,
+                    state.transcript.language
+                    if state is not None and state.transcript is not None
+                    else None,
+                ),
             )
 
             fresh_state = cache.load_state(clean_url)
-            if fresh_state is not None:
+            if fresh_state is not None and not getattr(clip_result, "quarantined", False):
                 fresh_state.clips = _merge_clip_results(fresh_state.clips, [clip_result])
                 cache.save_state(fresh_state)
 
-        return _json_ok(
-            {
-                "url": clean_url,
-                "mode": resolved_mode,
-                "bounds_adjustment": bounds_adjustment,
-                "clip": clip_result.to_dict(),
-            }
-        )
+        render_payload: dict[str, Any] = {
+            "url": clean_url,
+            "mode": resolved_mode,
+            "bounds_adjustment": bounds_adjustment,
+            "quarantined": bool(getattr(clip_result, "quarantined", False)),
+            "quarantine_reason": getattr(clip_result, "quarantine_reason", ""),
+            "clip": clip_result.to_dict(),
+        }
+        if render_notes:
+            render_payload.update(render_notes[0])
+        return _json_ok(render_payload)
     except Exception as exc:
         logger.exception("render_clip failed")
         return _json_error(str(exc))
@@ -1459,7 +1631,15 @@ async def render_clip(
 async def render_all_selected(
     url: str, mode: str | None = None, force: bool = False
 ) -> str:
-    """Render all selected highlights stored in StepCache for a stream."""
+    """Render all selected highlights stored in StepCache for a stream.
+
+    ALWAYS render with this tool or render_clip. NEVER assemble clips yourself with ffmpeg,
+    subtitle files or system TTS voices: those outputs skip the narration, captions, loudness
+    and copyright checks. Highlights must carry narration_intro/narration_outro (set via
+    submit_highlights); "breakdown" is only honoured for moment_type clutch, fail,
+    graphics_detail or analysis (others are rendered as narrative/story and reported in
+    `adjusted`).
+    """
     rendered: list[ClipResult] = []
     clean_url = ""
     try:
@@ -1491,7 +1671,9 @@ async def render_all_selected(
             base_index = len(existing_clips)
 
             skipped_count = 0
+            quarantined_clips: list[ClipResult] = []
             rendered_modes: list[str] = []
+            adjusted_notes: list[dict[str, Any]] = []
             try:
                 for idx, highlight in enumerate(selected_highlights, start=1):
                     if not force and _has_rendered_clip(existing_clips + rendered, highlight):
@@ -1507,7 +1689,12 @@ async def render_all_selected(
                         clip_index=None,
                         base_mode=base_mode,
                         min_clip_index=base_index + idx,
+                        language=_state_narration_language(config, state),
+                        notes=adjusted_notes,
                     )
+                    if getattr(clip_result, "quarantined", False):
+                        quarantined_clips.append(clip_result)
+                        continue
                     rendered.append(clip_result)
                     rendered_modes.append(clip_mode)
                     # Persist incremental clip progress so mid-batch failures never orphan rendered files
@@ -1545,6 +1732,9 @@ async def render_all_selected(
                 "mode": base_mode,
                 "rendered_count": len(rendered),
                 "skipped_count": skipped_count,
+                "quarantined_count": len(quarantined_clips),
+                "quarantined": [c.to_dict() for c in quarantined_clips],
+                "adjusted": adjusted_notes,
                 "status": state.status.name.lower(),
                 "clips": [
                     {**c.to_dict(), "mode": m}

@@ -12,6 +12,7 @@ import httpx
 import ollama
 
 from ..config import Config, VALID_TRANSFORMATION_MODES
+from ..language import language_instruction
 from ..models import ClipMetadata, Highlight, TimeRange
 from .scorer import Scorer, TranscriptChunk
 
@@ -44,6 +45,40 @@ BANNED_PHRASES: tuple[str, ...] = (
     "insane moment",
     "most viral",
 )
+
+def grounded_fallback_intro(
+    highlight: Highlight, streamer: str = "", game: str = ""
+) -> str:
+    """Short intro voiceover built only from the highlight's own title/quote/reason.
+
+    Used when the narrative writer (Ollama pass 2) is unavailable or returns nothing, so a
+    non-raw clip never opens without a voiceover. Parts containing a banned generic phrase
+    are dropped.
+    """
+    def _clean(text: Any, limit: int) -> str:
+        t = " ".join(_as_str(text).split())
+        if not t:
+            return ""
+        if any(p in t.lower() for p in BANNED_PHRASES):
+            return ""
+        if len(t) > limit:
+            t = t[:limit].rsplit(" ", 1)[0].rstrip(",;:- ")
+        return t.rstrip(".!? ")
+
+    title = _clean(highlight.title, 80)
+    reason = _clean(_as_str(highlight.reason).split(". ")[0], 140)
+    quote = _clean(highlight.best_quote, 90)
+    parts: list[str] = []
+    if title:
+        parts.append(title)
+    if quote:
+        parts.append(f'{streamer or "The streamer"} says "{quote}"')
+    elif reason:
+        parts.append(reason)
+    if not parts:
+        parts.append(f"A moment from {streamer + chr(39) + 's' if streamer else 'this'} {game or 'stream'} stream")
+    return ". ".join(parts) + "."
+
 
 _THINK_TAG_RE = re.compile(r"<think>.*?</think>", flags=re.DOTALL | re.IGNORECASE)
 _CODE_FENCE_RE = re.compile(
@@ -586,6 +621,7 @@ class OllamaScorer(Scorer):
         *,
         hook_style: str | None = None,
         avoid_phrases: list[str] | None = None,
+        language: str = "english",
     ) -> tuple[str, str, str]:
         """Backfill (narration_intro, narration_outro, context_badge) via narrative_writer.txt.
 
@@ -618,6 +654,7 @@ class OllamaScorer(Scorer):
             chat_samples="\n".join(chat_lines[:5]) or "(none)",
             avoid_phrases=", ".join(f'"{p}"' for p in (avoid_phrases or [])) or "(none)",
             hook_style=_as_str(hook_style) or "any",
+            language_instruction=language_instruction(language),
         )
         existing_intro = _as_str(highlight.narration_intro)
         existing_outro = _as_str(highlight.narration_outro)
@@ -692,6 +729,7 @@ class OllamaScorer(Scorer):
         streamer: str,
         game: str,
         hook_style: str | None = None,
+        language: str = "english",
     ) -> str:
         """Generate a short hook title using hook_generator.txt."""
         prompt = self.hook_prompt.format(
@@ -700,6 +738,7 @@ class OllamaScorer(Scorer):
             description=_as_str(highlight.reason),
             quote=_as_str(highlight.best_quote),
             hook_style=_as_str(hook_style) or "any",
+            language_instruction=language_instruction(language),
         )
         raw_text = self._call_generate(prompt, json_format=False)
         cleaned = _clean_llm_text(raw_text)
@@ -813,9 +852,12 @@ class OllamaScorer(Scorer):
         mode: str | None = None,
         hook_style: str | None = None,
         avoid_phrases: list[str] | None = None,
+        language: str = "english",
     ) -> ClipMetadata:
         """Generate hook title, narrative fields, callout, caption, and hashtags for a highlight."""
-        hook_title = self._generate_hook_title(highlight, streamer, game, hook_style)
+        hook_title = self._generate_hook_title(
+            highlight, streamer, game, hook_style, language=language
+        )
 
         if mode is not None and str(mode).strip():
             requested_mode = str(mode).strip().lower()
@@ -867,6 +909,7 @@ class OllamaScorer(Scorer):
                     game,
                     hook_style=hook_style,
                     avoid_phrases=avoid_phrases,
+                    language=language,
                 )
                 narration_intro = narration_intro or gen_intro
                 narration_outro = narration_outro or gen_outro
@@ -899,6 +942,7 @@ class OllamaScorer(Scorer):
             narration_outro=narration_outro,
             context_badge=context_badge,
             transformation_mode=transformation_mode,
+            narration_language=str(language or "english"),
             breakdown_commentary=breakdown_commentary,
             breakdown_callout=breakdown_callout,
             music_risk=highlight.music_risk,
