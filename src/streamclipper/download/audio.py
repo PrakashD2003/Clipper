@@ -14,6 +14,8 @@ from ..models import Platform, StreamInfo
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_RETRIES = 3
+
 _YOUTUBE_ID_RE = re.compile(
     r"(?:youtube\.com/(?:watch\?(?:.*&)?v=|live/|shorts/|embed/)|youtu\.be/)([A-Za-z0-9_-]{11})(?:[?&#/]|$)"
 )
@@ -56,6 +58,19 @@ def _classify_download_error(url: str, exc: Exception) -> AudioDownloadError:
 
     if any(
         token in lower
+        for token in ("confirm you're not a bot", "confirm you’re not a bot")
+    ):
+        return AudioDownloadError(
+            f"YouTube bot-check blocked the request; try cookies or retry later ({url}): {raw_message}"
+        )
+
+    if "http error 429" in lower or "too many requests" in lower:
+        return AudioDownloadError(
+            f"Rate limited by the server (HTTP 429); retry later ({url}): {raw_message}"
+        )
+
+    if any(
+        token in lower
         for token in ("private video", "this video is private", "members-only", "members only")
     ):
         return AudioDownloadError(
@@ -68,9 +83,9 @@ def _classify_download_error(url: str, exc: Exception) -> AudioDownloadError:
             "confirm your age",
             "age-restricted",
             "age restricted",
-            "sign in",
+            "sign in to confirm your age",
             "login required",
-            "cookies",
+            "use --cookies",
         )
     ):
         return AudioDownloadError(
@@ -85,7 +100,7 @@ def _classify_download_error(url: str, exc: Exception) -> AudioDownloadError:
             "blocked it in your country",
             "geo-restricted",
             "geo restricted",
-            "region",
+            "not available in your region",
         )
     ):
         return AudioDownloadError(
@@ -97,9 +112,9 @@ def _classify_download_error(url: str, exc: Exception) -> AudioDownloadError:
         for token in (
             "video unavailable",
             "has been removed",
-            "deleted",
+            "video has been deleted",
             "no longer available",
-            "terminated",
+            "account associated with this video has been terminated",
             "isn't available",
         )
     ):
@@ -171,6 +186,9 @@ def extract_stream_info(url: str) -> StreamInfo:
         "no_warnings": True,
         "noplaylist": True,
         "skip_download": True,
+        "retries": _DEFAULT_RETRIES,
+        "fragment_retries": _DEFAULT_RETRIES,
+        "extractor_retries": _DEFAULT_RETRIES,
     }
 
     try:
@@ -181,6 +199,11 @@ def extract_stream_info(url: str) -> StreamInfo:
 
     if not isinstance(info, dict):
         raise AudioDownloadError(f"Could not extract stream metadata for URL: {clean_url}")
+
+    if info.get("live_status") in {"is_live", "is_upcoming"} or info.get("is_live") is True:
+        raise AudioDownloadError(
+            f"Stream is live or upcoming and cannot be downloaded yet ({clean_url})"
+        )
 
     return _info_dict_to_stream_info(info, clean_url)
 
@@ -239,6 +262,9 @@ def download_audio(
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
+        "retries": _DEFAULT_RETRIES,
+        "fragment_retries": _DEFAULT_RETRIES,
+        "extractor_retries": _DEFAULT_RETRIES,
         "postprocessors": [
             {
                 "key": "FFmpegExtractAudio",
