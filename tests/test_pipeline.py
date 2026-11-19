@@ -190,7 +190,9 @@ def _install_mock_stage_deps(
     audio_file.parent.mkdir(parents=True, exist_ok=True)
     audio_file.write_bytes(b"RIFF....WAVE")
 
-    def fake_download_audio(url: str, output_dir: Path) -> tuple[Path, StreamInfo]:
+    def fake_download_audio(
+        url: str, output_dir: Path, progress_callback: Any = None
+    ) -> tuple[Path, StreamInfo]:
         call_log.append("download_audio")
         vid = url.split("=")[-1] if "=" in url else "vid001"
         path = Path(output_dir) / f"{vid}.wav"
@@ -288,6 +290,7 @@ def _install_mock_stage_deps(
             streamer: str,
             game: str,
             source_url: str,
+            mode: str | None = None,
         ) -> ClipMetadata:
             call_log.append("generate_metadata")
             return ClipMetadata(
@@ -913,6 +916,7 @@ class TestPipelineEndToEnd:
                 facecam,
                 beat_trim_ranges=None,
                 peak_offset=None,
+                face_center_x=None,
             ):
                 compose_story_calls.append(
                     {
@@ -924,7 +928,9 @@ class TestPipelineEndToEnd:
                 )
                 return {"kind": "multi_beat"}
 
-            def compose(self, video_path, facecam, peak_offset=None, trim_range=None):
+            def compose(
+                self, video_path, facecam, peak_offset=None, trim_range=None, face_center_x=None
+            ):
                 compose_single_calls.append(
                     {
                         "video_path": video_path,
@@ -978,6 +984,11 @@ class TestPipelineEndToEnd:
 
             def get_clip_path(self, game: str, streamer: str, index: int) -> Path:
                 return self.out_dir / f"clip_{index:02d}.mp4"
+
+            def next_available_index(
+                self, game: str, streamer: str, min_index: int = 1, date_str: str | None = None
+            ) -> int:
+                return min_index
 
             def save_clip(
                 self, video_path: Path, metadata: ClipMetadata, transcript_text: str = ""
@@ -1775,3 +1786,225 @@ class TestAuditHardeningAndModes:
         final_state = pipeline.cache.load_state(url)
         assert final_state is not None
         assert final_state.status is PipelineStatus.COMPLETE
+
+
+# ---------------------------------------------------------------------------
+# Review fixes: H2 / M6 / M4 / L12 / L13 / L22 / G9 / G10 / A9 regressions
+# ---------------------------------------------------------------------------
+
+
+def _today() -> str:
+    from datetime import date
+
+    return date.today().isoformat()
+
+
+class TestReviewFixes:
+    @pytest.mark.asyncio
+    async def test_h2_existing_clip_is_not_overwritten(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _install_mock_stage_deps(monkeypatch, tmp_path, call_log=[])
+        existing = tmp_path / "output" / "GTA 6" / "CustomStreamer" / _today() / "clip_01.mp4"
+        existing.parent.mkdir(parents=True)
+        existing.write_bytes(b"old")
+        pipeline = Pipeline(_make_config(tmp_path))
+        clips = await pipeline.process_stream(
+            "https://youtube.com/watch?v=h2",
+            max_clips=1,
+            game="GTA 6",
+            streamer="CustomStreamer",
+        )
+        assert clips[0].video_path.name == "clip_02.mp4"
+        assert existing.read_bytes() == b"old"
+
+    @pytest.mark.asyncio
+    async def test_m6_larger_max_clips_reruns_scoring(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        call_log: list[str] = []
+        _install_mock_stage_deps(
+            monkeypatch, tmp_path, call_log=call_log, highlights=_sample_highlights()[:1]
+        )
+        pipeline = Pipeline(_make_config(tmp_path))
+        url = "https://youtube.com/watch?v=m6"
+        await pipeline.process_stream(url, max_clips=1)
+        assert call_log.count("score_and_select") == 1
+        roundtrip = PipelineState.from_dict(
+            PipelineState(
+                stream_info=_sample_stream_info(), requested_max_clips=4
+            ).to_dict()
+        )
+        assert roundtrip.requested_max_clips == 4
+        clips = await pipeline.process_stream(url, max_clips=3)
+        assert call_log.count("score_and_select") == 2
+        assert len(clips) == 1
+
+    @pytest.mark.asyncio
+    async def test_m4_chat_scrape_failure_propagates_and_is_not_marked_complete(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        audio = _install_mock_stage_deps(monkeypatch, tmp_path, call_log=[])
+
+        class BoomScraper:
+            def load_cache(self, path: Path) -> None:
+                return None
+
+            def scrape(self, url: str, temp_dir: Path) -> pd.DataFrame:
+                raise RuntimeError("scrape down")
+
+        monkeypatch.setattr(pipeline_mod, "ChatScraper", BoomScraper)
+        pipeline = Pipeline(_make_config(tmp_path))
+        state = PipelineState(
+            stream_info=_sample_stream_info(), audio_path=audio, transcript=_sample_transcript()
+        )
+        with pytest.raises(RuntimeError, match="scrape down"):
+            await pipeline._step_analyze(state)
+        assert state.analysis_complete is False
+
+    @pytest.mark.asyncio
+    async def test_m4_empty_chat_writes_header_only_csv_and_is_not_rescraped(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from streamclipper.download.chat import ChatScraper, _empty_chat_df
+
+        audio = _install_mock_stage_deps(monkeypatch, tmp_path, call_log=[])
+        scrapes: list[str] = []
+
+        class EmptyScraper(ChatScraper):
+            def scrape(self, url: str, temp_dir: Path) -> pd.DataFrame:
+                scrapes.append(url)
+                return _empty_chat_df()
+
+        monkeypatch.setattr(pipeline_mod, "ChatScraper", EmptyScraper)
+        pipeline = Pipeline(_make_config(tmp_path))
+        info = _sample_stream_info()
+        for _ in range(2):
+            state = PipelineState(stream_info=info, audio_path=audio)
+            await pipeline._step_analyze(state)
+        csv_path = pipeline.temp_dir / f"{info.video_id}_chat.csv"
+        assert csv_path.is_file()
+        assert csv_path.read_text(encoding="utf-8").strip().startswith("offset_seconds")
+        assert len(scrapes) == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "engine,expect_locked", [("edge-tts", False), ("kokoro", True)]
+    )
+    async def test_l12_assembly_lock_depends_on_tts_engine(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        engine: str,
+        expect_locked: bool,
+    ) -> None:
+        _install_mock_stage_deps(monkeypatch, tmp_path, call_log=[])
+        pipeline = Pipeline(_make_config(tmp_path, {"transformation": {"tts_engine": engine}}))
+        observed: list[bool] = []
+        original = Pipeline._assemble_highlight
+
+        def spy(self: Pipeline, *a: Any, **kw: Any) -> ClipResult:
+            observed.append(self._gpu_lock.locked())
+            return original(self, *a, **kw)
+
+        monkeypatch.setattr(Pipeline, "_assemble_highlight", spy)
+        await pipeline.process_stream("https://youtube.com/watch?v=l12", max_clips=1)
+        assert observed == [expect_locked]
+
+    def test_l13_close_failure_is_logged_at_debug(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import logging
+
+        class Bad:
+            def close(self) -> None:
+                raise OSError("close-fail-xyz")
+
+        with caplog.at_level(logging.DEBUG, logger="streamclipper.pipeline"):
+            Pipeline._close_composed_handles(Bad())
+        assert "close-fail-xyz" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_l22_ignored_beats_logged(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        import logging
+
+        _install_mock_stage_deps(monkeypatch, tmp_path, call_log=[])
+        pipeline = Pipeline(_make_config(tmp_path))
+        beats = [{"start": 110.0, "end": 124.0}, {"start": 140.0, "end": 160.0}]
+        monkeypatch.setattr(
+            Pipeline, "_resolve_highlight_mode", lambda self, b, h: ("narrative", beats)
+        )
+        with caplog.at_level(logging.INFO, logger="streamclipper.pipeline"):
+            await pipeline.process_stream("https://youtube.com/watch?v=l22", max_clips=1)
+        assert "Ignoring 2 validated sub_clips" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_g9_resume_does_not_rerender_finished_clips(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import streamclipper.output.exporter as exporter_mod
+
+        _install_mock_stage_deps(monkeypatch, tmp_path, call_log=[])
+        renders: list[str] = []
+        fail_second = {"on": True}
+
+        def export(self: Any, **kwargs: Any) -> Path:
+            renders.append(Path(kwargs["output_path"]).name)
+            if len(renders) == 2 and fail_second["on"]:
+                raise RuntimeError("render died")
+            out = Path(kwargs["output_path"])
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(b"mp4")
+            return out
+
+        monkeypatch.setattr(exporter_mod.Exporter, "export", export)
+        pipeline = Pipeline(_make_config(tmp_path))
+        url = "https://youtube.com/watch?v=g9"
+        with pytest.raises(RuntimeError, match="render died"):
+            await pipeline.process_stream(url, max_clips=2)
+        fail_second["on"] = False
+        clips = await pipeline.process_stream(url, max_clips=2)
+        assert len(clips) == 2
+        assert len(renders) == 3  # clip 1 rendered once, clip 2 twice
+
+    @pytest.mark.asyncio
+    async def test_g10_skip_high_music_skips_flagged_highlight(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        hls = _sample_highlights()
+        hls[0].music_risk = "HIGH_MUSIC_DETECTED"
+        _install_mock_stage_deps(monkeypatch, tmp_path, call_log=[], highlights=hls)
+        pipeline = Pipeline(_make_config(tmp_path, {"analysis": {"skip_high_music": True}}))
+        clips = await pipeline.process_stream("https://youtube.com/watch?v=g10", max_clips=2)
+        assert [c.metadata.hook_title for c in clips] == ["NPC KARMA MOMENT"]
+
+    @pytest.mark.asyncio
+    async def test_g10_default_keeps_flagged_highlight(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        hls = _sample_highlights()
+        hls[0].music_risk = "HIGH_MUSIC_DETECTED"
+        _install_mock_stage_deps(monkeypatch, tmp_path, call_log=[], highlights=hls)
+        pipeline = Pipeline(_make_config(tmp_path))
+        clips = await pipeline.process_stream("https://youtube.com/watch?v=g10b", max_clips=2)
+        assert len(clips) == 2
+
+    @pytest.mark.asyncio
+    async def test_a9_cross_process_gpu_lock_creates_and_releases_file(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _install_mock_stage_deps(monkeypatch, tmp_path, call_log=[])
+        pipeline = Pipeline(
+            _make_config(tmp_path, {"general": {"cross_process_gpu_lock": True}})
+        )
+        await pipeline.process_stream("https://youtube.com/watch?v=a9", max_clips=1)
+        lock_path = tmp_path / ".cache" / "gpu.lock"
+        assert lock_path.is_file()
+        fh = await asyncio.wait_for(asyncio.to_thread(pipeline._acquire_file_lock), 5)
+        pipeline._release_file_lock(fh)
+        assert fh.closed

@@ -1749,3 +1749,129 @@ class TestPackage46RealEndToEndIntegration:
         seg1.unlink()
         seg2.unlink()
         assert not seg1.exists() and not seg2.exists()
+
+
+
+# ---------------------------------------------------------------------------
+# Review fixes: M11 / M13 / L9 exporter regressions
+# ---------------------------------------------------------------------------
+
+
+def _narration_patches(exporter: Exporter, tmp_path: Path, mix_kwargs: dict[str, Any]):
+    fake_intro = tmp_path / "intro.wav"
+    fake_intro.write_bytes(b"RIFF....WAVE")
+    return (
+        patch.object(
+            exporter.narrator,
+            "prepare_narration_tracks",
+            return_value=(fake_intro, None),
+        ),
+        patch.object(
+            exporter.narrator,
+            "_probe_audio_duration",
+            side_effect=lambda p: 2.0 if p is not None else None,
+        ),
+        patch.object(exporter.narrator, "mix_narration_with_ducking", **mix_kwargs),
+    )
+
+
+def test_m11_mix_failure_keeps_unnarrated_video_and_clears_windows(tmp_path: Path) -> None:
+    cfg = _make_config(tmp_path, overrides={"general": {"temp_dir": str(tmp_path / "temp")}})
+    exporter = Exporter(cfg)
+    captured: dict[str, Any] = {}
+
+    def fake_gen_ass(**kwargs: Any) -> Path:
+        captured.update(kwargs)
+        kwargs["ass_path"].write_text("[Script Info]\n", encoding="utf-8")
+        return kwargs["ass_path"]
+
+    p1, p2, p3 = _narration_patches(
+        exporter, tmp_path, {"side_effect": RuntimeError("mix boom")}
+    )
+    with (
+        p1,
+        p2,
+        p3,
+        patch.object(exporter.caption_burner, "generate_ass", side_effect=fake_gen_ass),
+        patch.object(
+            exporter.caption_burner, "burn_captions", return_value=tmp_path / "final.mp4"
+        ) as burn,
+    ):
+        exporter.export(
+            clip=_FakeCompositeClip([], duration=8.0),  # type: ignore[arg-type]
+            words=[WordTimestamp("hi", 0.0, 1.0)],
+            clip_start_offset=0.0,
+            output_path=tmp_path / "out.mp4",
+            narration_intro="Intro",
+            mode="narrative",
+        )
+    assert captured["intro_dur"] is None
+    assert captured["outro_dur"] is None
+    assert captured["breakdown_window"] is None
+    assert Path(burn.call_args.kwargs["input_video"]).name == "intermediate_raw.mp4"
+
+
+def test_m13_narration_card_alone_generates_and_burns_ass(tmp_path: Path) -> None:
+    cfg = _make_config(tmp_path, overrides={"general": {"temp_dir": str(tmp_path / "temp")}})
+    exporter = Exporter(cfg)
+
+    def fake_gen_ass(**kwargs: Any) -> Path:
+        kwargs["ass_path"].write_text("[Script Info]\n", encoding="utf-8")
+        return kwargs["ass_path"]
+
+    p1, p2, p3 = _narration_patches(
+        exporter, tmp_path, {"return_value": tmp_path / "mixed.mp4"}
+    )
+    with (
+        p1,
+        p2,
+        p3,
+        patch.object(
+            exporter.caption_burner, "generate_ass", side_effect=fake_gen_ass
+        ) as gen,
+        patch.object(
+            exporter.caption_burner, "burn_captions", return_value=tmp_path / "final.mp4"
+        ) as burn,
+    ):
+        exporter.export(
+            clip=_FakeCompositeClip([], duration=8.0),  # type: ignore[arg-type]
+            words=[],
+            clip_start_offset=0.0,
+            output_path=tmp_path / "out.mp4",
+            narration_intro="Intro",
+            mode="narrative",
+        )
+    assert gen.call_count == 1
+    assert gen.call_args.kwargs["intro_dur"] == pytest.approx(2.0)
+    assert burn.call_count == 1
+
+
+def test_l9_ffmpeg_stderr_tail_logged_on_failure(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    import logging
+
+    cfg = _make_config(
+        tmp_path,
+        overrides={"general": {"temp_dir": str(tmp_path / "temp")}},
+        video_codec="h264_nvenc",
+    )
+    exporter = Exporter(cfg)
+    side_effects = [
+        subprocess.CalledProcessError(1, ["ffmpeg"], stderr=b"x" * 600 + b"NVENC-BOOM"),
+        subprocess.CompletedProcess(args=["ffmpeg"], returncode=0),
+    ]
+    with caplog.at_level(logging.WARNING, logger="streamclipper.output.exporter"):
+        with patch(
+            "streamclipper.output.exporter.subprocess.run", side_effect=side_effects
+        ):
+            exporter.export(
+                clip=_FakeCompositeClip([]),  # type: ignore[arg-type]
+                words=[],
+                clip_start_offset=0.0,
+                output_path=tmp_path / "o" / "p.mp4",
+                mode="raw",
+            )
+    joined = "\n".join(r.getMessage() for r in caplog.records)
+    assert "NVENC-BOOM" in joined
+    assert "x" * 490 in joined and "x" * 520 not in joined
