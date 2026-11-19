@@ -485,6 +485,7 @@ async def _render_single_highlight(
     *,
     min_clip_index: int = 1,
     voice_breakdown_path: Path | None = None,
+    layout: str = "",
 ) -> tuple[ClipResult, str]:
     """Download segment(s), build offline ClipMetadata, and assemble one highlight."""
     clip_mode, valid_beats = pipeline._resolve_highlight_mode(base_mode, highlight)
@@ -543,6 +544,12 @@ async def _render_single_highlight(
         music_risk=highlight.music_risk,
         music_confidence=highlight.music_confidence,
     )
+    # `callout` lands on ClipMetadata in Batch D; set it as an attribute so this works pre/post merge.
+    metadata.callout = "" if clip_mode == "raw" else _as_str(getattr(highlight, "callout", ""))
+
+    extra_kwargs: dict[str, Any] = {}
+    if layout:
+        extra_kwargs["layout_kind"] = layout
 
     async with _gpu_guard(config):
         effective_index = (
@@ -564,7 +571,29 @@ async def _render_single_highlight(
             valid_beats=valid_beats,
             buffer_seconds=buffer_seconds,
             voice_breakdown_path=voice_breakdown_path,
+            **extra_kwargs,
         )
+
+    if config.get("output.write_post_file", True):
+        try:
+            from ..output.post_writer import write_post_file
+        except ImportError:
+            write_post_file = None  # module not merged yet
+        if write_post_file is not None:
+            try:
+                stream_info = StreamInfo(
+                    url=url,
+                    title="",
+                    platform=Platform.YOUTUBE,
+                    streamer=streamer_name,
+                    game=game_name,
+                    duration_seconds=0,
+                )
+                await asyncio.to_thread(
+                    write_post_file, Path(clip_result.video_path), metadata, stream_info
+                )
+            except Exception:
+                logger.warning("write_post_file failed", exc_info=True)
     return clip_result, clip_mode
 
 
@@ -1078,6 +1107,7 @@ async def submit_highlights(url: str, highlights: str) -> str:
                 context_badge = _as_str(item.get("context_badge"))
                 breakdown_commentary = _as_str(item.get("breakdown_commentary"))
                 breakdown_callout = _as_str(item.get("breakdown_callout"))
+                callout = _as_str(item.get("callout"))
 
                 raw_beats = _parse_raw_sub_clips(item.get("sub_clips"))
                 validated_beats = Scorer._validate_sub_clips(
@@ -1102,6 +1132,7 @@ async def submit_highlights(url: str, highlights: str) -> str:
                     breakdown_commentary=breakdown_commentary,
                     breakdown_callout=breakdown_callout,
                 )
+                highlight.callout = callout
                 stitched = sum(float(b["end"]) - float(b["start"]) for b in validated_beats)
                 if not (
                     validated_beats
@@ -1238,6 +1269,8 @@ async def render_clip(
     breakdown_commentary: str = "",
     breakdown_callout: str = "",
     voice_breakdown_path: str = "",
+    callout: str = "",
+    layout: str = "",
 ) -> str:
     """Render a single highlight into a final 9:16 vertical clip (mode: auto | narrative | story | breakdown | raw) with YPP transformative narration, zoom, and ASS captions+chat ticker."""
     try:
@@ -1262,6 +1295,12 @@ async def render_clip(
         scorer = _MCPScorer(config)
 
         base_mode = pipeline._resolve_base_mode(mode)
+
+        layout_kind = _as_str(layout).lower()
+        if layout_kind not in ("", "stacked", "blur_fill", "reaction"):
+            return _json_error(
+                f"Invalid layout: {layout!r} (use '' for auto, stacked, blur_fill or reaction)."
+            )
 
         parsed_sub_clips: list[dict[str, Any]] = []
         if isinstance(sub_clips_json, str) and sub_clips_json.strip():
@@ -1356,6 +1395,7 @@ async def render_clip(
                 breakdown_callout=_as_str(breakdown_callout),
                 bounds_adjustment=bounds_adjustment,
             )
+            highlight.callout = _as_str(callout)
 
             if state is not None:
                 highlight.final_score = scorer._compute_weighted_score(
@@ -1394,6 +1434,7 @@ async def render_clip(
                 voice_outro_path=outro_path,
                 min_clip_index=min_clip_index,
                 voice_breakdown_path=breakdown_voice,
+                layout=layout_kind,
             )
 
             fresh_state = cache.load_state(clean_url)

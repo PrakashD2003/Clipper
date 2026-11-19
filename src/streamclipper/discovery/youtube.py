@@ -232,6 +232,10 @@ class YouTubeDiscovery:
 
         seen_ids: set[str] = set()
         streams: list[StreamInfo] = []
+        raw_blocked = self.config.get("discovery.blocked_streamers", []) or []
+        if isinstance(raw_blocked, str):
+            raw_blocked = [raw_blocked]
+        blocked = {str(b).strip().lower() for b in raw_blocked if str(b).strip()}
 
         for entry in results:
             if not isinstance(entry, dict):
@@ -240,6 +244,14 @@ class YouTubeDiscovery:
             video_id = str(entry.get("id") or "").strip()
             if not video_id or video_id in seen_ids:
                 continue
+
+            if blocked:
+                names = {
+                    str(entry.get(k) or "").strip().lower()
+                    for k in ("uploader", "channel", "creator")
+                }
+                if names & blocked:
+                    continue
 
             duration = _coerce_non_negative_int(entry.get("duration"))
             if duration is None or duration < self.min_duration:

@@ -767,3 +767,42 @@ def test_G12_default_config_copies_are_identical() -> None:
         return p.read_bytes().decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
 
     assert _norm(root_copy) == _norm(pkg_copy)
+
+
+def test_F1_default_config_has_v3_keys_and_hardware_stays_auto() -> None:
+    cfg = Config()
+    assert cfg.get("video.game_fit") == "full"
+    assert cfg.get("facecam.min_detection_ratio") == 0.6
+    assert cfg.get("facecam.max_center_jitter") == 0.05
+    assert cfg.get("facecam.overrides") == {}
+    assert cfg.get("analysis.max_clip_seconds") == 35
+    assert cfg.get("analysis.skip_intro_minutes") == 5
+    assert cfg.get("content_gate.enabled") is True
+    assert cfg.get("output.max_final_seconds") == 59
+    assert cfg.get("output.queued_dir") == "queued"
+    assert cfg.get("transformation.tts_engines") == ["chatterbox", "kokoro", "edge-tts"]
+    assert cfg.get("transformation.target_lufs") == -14
+    assert cfg.get("transformation.format_rotation") == ["narrative", "story", "breakdown"]
+    assert cfg.get("discovery.blocked_streamers") == []
+    raw = yaml.safe_load(
+        (Path(config_mod.__file__).resolve().parent / "config.default.yaml").read_text("utf-8")
+    )
+    assert raw["video"]["codec"] == "auto"
+    assert raw["transcription"]["model_size"] == "auto"
+    assert raw["llm"]["model"] == "auto"
+
+
+def test_F2_game_fit_and_top3_mode_validation(tmp_path: Path) -> None:
+    for bad in ("stretch", "", 3):
+        p = tmp_path / "bad.yaml"
+        p.write_text(yaml.safe_dump({"video": {"game_fit": bad}}), encoding="utf-8")
+        with pytest.raises(ValueError, match="game_fit"):
+            Config(user_config_path=p)
+    ok = tmp_path / "ok.yaml"
+    ok.write_text(
+        yaml.safe_dump({"video": {"game_fit": "balanced"}, "transformation": {"mode": "top3"}}),
+        encoding="utf-8",
+    )
+    cfg = Config(user_config_path=ok)
+    assert cfg.get("video.game_fit") == "balanced"
+    assert cfg.get("transformation.mode") == "top3"

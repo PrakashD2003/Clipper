@@ -20,7 +20,8 @@ DEFAULT_CONFIG_PATH = (
 USER_CONFIG_PATH = Path("config.yaml")
 
 VALID_WEIGHT_KEYS = frozenset({"loudness", "chat_velocity", "llm_score"})
-VALID_TRANSFORMATION_MODES = frozenset({"auto", "narrative", "story", "breakdown", "raw"})
+VALID_GAME_FITS = frozenset({"full", "balanced"})
+VALID_TRANSFORMATION_MODES = frozenset({"auto", "narrative", "story", "breakdown", "raw", "top3"})
 
 
 @dataclass(frozen=True)
@@ -304,6 +305,12 @@ class Config:
             )
         ):
             raise ValueError("video.resolution must be [width, height] of positive integers")
+
+        game_fit = self.get("video.game_fit", "full")
+        if not isinstance(game_fit, str) or game_fit.strip().lower() not in VALID_GAME_FITS:
+            raise ValueError(
+                f"video.game_fit must be one of {sorted(VALID_GAME_FITS)}, got {game_fit!r}"
+            )
 
         batch_size = self.get("transcription.batch_size", 4)
         if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
