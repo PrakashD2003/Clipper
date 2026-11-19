@@ -23,6 +23,7 @@ discovery:
   proxy: ""              # Optional HTTP/SOCKS5 proxy for yt-dlp discovery
   max_age_days: 30       # Skip streams older than N days
   require_title_match: true  # Require a game keyword in the stream title
+  blocked_streamers: []      # Channel/uploader names (case-insensitive) to never clip
 
 download:
   retries: 3             # Retry count for transient download failures
@@ -38,12 +39,13 @@ transcription:
 analysis:
   chunk_minutes: 12
   min_clip_seconds: 15
-  max_clip_seconds: 90
+  max_clip_seconds: 35
   hard_max_clip_seconds: 180          # Ranges longer than this are rejected outright (Shorts limit)
   adjust_clip_bounds: true            # Widen short / trim long moments instead of rejecting them
   max_clips_per_stream: 5
   min_highlight_score: 7.0
-  skip_high_music: false               # Skip (instead of penalize) highlights flagged HIGH_MUSIC_DETECTED
+  skip_intro_minutes: 5                # Ignore the first N minutes of a stream (intro / starting screen)
+  skip_high_music: true                # Skip (instead of penalize) highlights flagged HIGH_MUSIC_DETECTED
   copyright_check: true                # Pre-flight acoustic music risk check on speech gaps
   music_risk_threshold: 0.65           # Harmonic-percussive music confidence threshold
   music_penalty_factor: 0.80           # Score multiplier for clips flagged with high music
@@ -82,6 +84,7 @@ video:
   fps: 30
   codec: "auto"             # auto (h264_nvenc if CUDA+NVENC else libx264) | h264_nvenc | libx264
   audio_codec: "aac"
+  game_fit: "full"          # full (16:9 game area) | balanced (4:3 centre crop, taller game area)
   crf: 23                   # quality (libx264 -crf / h264_nvenc -cq, lower = better, 18-28 range)
 
 captions:
@@ -116,11 +119,24 @@ output:
   filename_template: "clip_{index:02d}"
   save_metadata_json: true
   save_transcript_txt: true
+  max_final_seconds: 59                # Hard cap on final clip length (Shorts)
+  max_clips_per_streamer_per_day: 3    # Extra clips are routed to queued_dir
+  queued_dir: "queued"                 # Sub-folder for clips over the daily cap
+  write_post_file: true                # Write a ready-to-paste post .txt next to each clip
+  min_commentary_ratio: 0.35           # Minimum share of narration vs. stream audio (YPP transformative)
 
 facecam:
   min_area_ratio: 0.002
   max_area_ratio: 0.25
-  min_detection_ratio: 0.30
+  min_detection_ratio: 0.6             # Share of sampled frames that must contain a face
+  max_center_jitter: 0.05              # Max std of face centre / frame size (stable facecam overlay)
+  overrides: {}                        # {streamer: [x, y, w, h]} normalized 0-1 manual facecam boxes
+  profiles_path: ""                    # "" = <general.cache_dir>/facecam_profiles.json
+
+content_gate:
+  enabled: true
+  letterbox_ratio: 0.10                # Black rows (top+bottom) as share of height
+  static_threshold: 2.0                # Mean abs frame diff (0-255) below this = static scene
 
 transformation:
   enabled: true                        # Enable YPP anti-reused-content transformation
@@ -136,10 +152,24 @@ transformation:
     freeze_zoom: 1.35
   narration_style: "intro_and_breakdown" # intro_and_breakdown | breakdown_only
   tts_engine: "auto"                   # auto (kokoro -> edge-tts) | kokoro | edge-tts | elevenlabs | none
-  tts_voice: "af_heart"                # Kokoro voice ID (used when engine is kokoro)
-  edge_tts_voice: "en-US-GuyNeural"    # Edge-TTS voice ID (used when engine is edge-tts or auto fallback)
+  tts_voice: "am_puck"                 # Energetic Kokoro voice ID (fallback: am_fenrir)
+  edge_tts_voice: "en-US-AndrewMultilingualNeural" # Edge-TTS voice ID (used when engine is edge-tts or auto fallback)
   elevenlabs_voice_id: ""              # Optional ElevenLabs voice/clone ID (uses ELEVENLABS_API_KEY env var)
   elevenlabs_model_id: "eleven_multilingual_v2"
+  tts_engines: [chatterbox, kokoro, edge-tts]  # Fallback chain, tried in order
+  tts_external_python: ".venv-tts/Scripts/python.exe"  # Separate venv for engines with conflicting deps
+  tts_reference_wav: ""                # Voice-clone reference WAV ("" = engine default voice)
+  tts_speed: 1.1
+  edge_tts_rate: "+10%"
+  target_lufs: -14                     # Final loudness normalization target
+  narration_gain_db: 3                 # Narration level above the ducked stream bed
+  crossfade_seconds: 0.25              # Ramp at every duck transition
+  callout_enabled: true                # Short spoken callout over the key moment
+  persona: "hyped, witty gaming commentator who reacts like a friend watching live"
+  enable_top3: true                    # Allow top-3 compilation clips (mode: top3)
+  top3_item_seconds: 14
+  format_rotation: [narrative, story, breakdown]
+  hook_styles: [question, hot_take, countdown, nobody_noticed]
   duck_stream_volume: 0.18             # Duck original stream audio to 18% during narrator voiceover
   punch_in_zoom: 1.20                  # 1.20x center zoom around peak_time (1.0 = disabled)
   zoom_duration_seconds: 3.5           # Duration of punch-in zoom at peak moment

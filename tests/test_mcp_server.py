@@ -1197,8 +1197,8 @@ async def test_edge_cases_validation_and_cache_hydration(
             "render_clip",
             {
                 "url": url,
-                "start": 1795.0,
-                "end": 1845.0,
+                "start": 1800.0,
+                "end": 1835.0,
                 "hook_title": "HYDRATED CLIP",
             },
         )
@@ -3125,3 +3125,58 @@ async def test_G11_submit_highlights_dedupes_overlaps_and_caps_to_max_clips(
     assert res["accepted_count"] == 2
     assert res["dropped_count"] == 2
     assert [h["title"] for h in res["highlights"]] == ["Best", "Second"]
+
+
+@pytest.mark.asyncio
+async def test_F3_F4_render_clip_callout_layout_and_post_file(
+    mcp_env: tuple[Config, StepCache, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, _, tmp_path = mcp_env
+    url = "https://www.youtube.com/watch?v=f3f4clip123"
+    seg = tmp_path / "temp" / "segments" / "f3f4clip123.mp4"
+    seg.parent.mkdir(parents=True, exist_ok=True)
+    seg.write_bytes(b"mp4")
+    monkeypatch.setattr(mcp_server, "download_segment", lambda *a, **k: seg)
+
+    captured: list[dict[str, Any]] = []
+
+    def fake_assemble(self, highlight, metadata, segment_paths, clip_index, mode,
+                      voice_intro_path, voice_outro_path, **kwargs):
+        captured.append({"kwargs": kwargs, "callout": getattr(highlight, "callout", None)})
+        out = tmp_path / "output" / f"clip_{clip_index:02d}.mp4"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(b"rendered")
+        return ClipResult(video_path=out, metadata_path=out.with_suffix(".json"),
+                          metadata=metadata, duration_seconds=30.0)
+
+    monkeypatch.setattr(mcp_server.Pipeline, "_assemble_highlight", fake_assemble)
+
+    post_calls: list[Path] = []
+    import sys
+    import types
+
+    fake_mod = types.ModuleType("streamclipper.output.post_writer")
+    fake_mod.write_post_file = lambda video_path, metadata, stream_info: post_calls.append(video_path)
+    monkeypatch.setitem(sys.modules, "streamclipper.output.post_writer", fake_mod)
+
+    args = {"url": url, "start": 100.0, "end": 125.0, "hook_title": "Wow", "mode": "narrative",
+            "callout": "Look at that!", "moment_type": "reaction"}
+    data = _extract_json(await mcp.call_tool("render_clip", {**args, "layout": "reaction"}))
+    assert "error" not in data
+    assert captured[0]["kwargs"].get("layout_kind") == "reaction"
+    assert captured[0]["callout"] == "Look at that!"
+    assert len(post_calls) == 1
+
+    # Auto layout: no layout_kind kwarg passed; post file disabled by config.
+    config._data.setdefault("output", {})["write_post_file"] = False
+    data = _extract_json(await mcp.call_tool("render_clip", args))
+    assert "error" not in data
+    assert "layout_kind" not in captured[1]["kwargs"]
+    assert len(post_calls) == 1
+
+    bad = _extract_json(await mcp.call_tool("render_clip", {**args, "layout": "diagonal"}))
+    assert "Invalid layout" in bad["error"]
+
+    sub = _extract_json(await mcp.call_tool("submit_highlights", {"url": url, "highlights": json.dumps(
+        [{"start": 100.0, "end": 130.0, "score": 9.0, "title": "T", "callout": "Hey!"}])}))
+    assert sub["accepted_count"] == 1
