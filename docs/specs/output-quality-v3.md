@@ -218,9 +218,11 @@ Keep `_assemble_highlight` backward compatible (MCP server calls it): new params
 - E3 Layout: `layout_kind="reaction"` when `moment_type == "reaction"`; pass `composed._layout` into
   the exporter → `generate_ass(layout=...)` and `add_hook(layout=...)`.
 - E4 Structure: hook intro → moment → callout (if `transformation.callout_enabled` and metadata has
-  one, voiced at ~40% of the moment, shown as on-screen card) → instant replay + breakdown →
-  reaction outro. Freeze-frame only when the rotated format says `breakdown` and
-  `transformation.breakdown_style == "freeze_frame"`.
+  one, voiced at ~40% of the moment, shown as on-screen card) → [replay + breakdown] →
+  reaction outro. The replay + breakdown section runs **only when the rotated format is
+  `breakdown`** (decided 2026-11-19: keeps clip structure varied for the inauthentic-content
+  policy); narrative/story clips play the moment uncut with no replay. Within breakdown, freeze-frame
+  when `transformation.breakdown_style == "freeze_frame"`, else instant replay.
 - E5 59 s budget: before rendering, budget = `output.max_final_seconds`; shrink the replay window
   first, then trim the moment around `peak_time`; after export, probe and hard-trim (`-t`) if still
   over. Compute commentary coverage (narration + callout + replay seconds / total) into the clip JSON;
@@ -257,3 +259,22 @@ Files: `config.default.yaml` (repo root) + `src/streamclipper/config.default.yam
   `output.write_post_file` (import lazily; skip silently if the module is missing pre-merge).
 - F5 `discovery/youtube.py`: drop results whose channel/uploader is in `discovery.blocked_streamers`
   (case-insensitive).
+
+## Build log — 2026-11-19
+
+| Batch | Merge | Scope | Status |
+| :--- | :--- | :--- | :--- |
+| D | `ac8ba70` | content gate, prompt rewrite (persona, grounding, banned phrases, callout), `reaction` type, intro skip | ✅ D1–D7 |
+| F | `8952793` | §2 config keys, `game_fit` / `top3` validation, MCP `callout`/`layout`, blocked streamers | ✅ F1–F5 |
+| A | `c29aed2` | `assembly/layout.py`, stacked / blur_fill / reaction layouts, zoom in `game_box`, banded captions + hooks | ✅ A1–A8 |
+| C | `de27ea5` | TTS engine chain (Kokoro, Edge, ElevenLabs, Chatterbox worker), loudnorm, callout track, `duck_full` | ✅ C1–C5 |
+| B | `13ca819` + `041ebf7` | YuNet whole-frame facecam, stability filters, webcam rect expansion, per-streamer profiles; model + MIT notice shipped as package data | ✅ B1–B4 |
+| E | `0c255ad` | pipeline wiring, 59 s budget, variety rotation + daily cap, top-3 compilation, post file | ✅ E1–E11 (E4 per decision above; E9 unit-tested via helpers, not end to end) |
+| — | `9d411ae` | 14 tests aligned with the new defaults/integration (tests only, no code changes) | ✅ |
+
+Full suite at `9d411ae`: **789 passed, 0 failed**.
+
+Open items:
+- Visual check of a real rendered clip from the CarryisLive VOD (layouts, facecam pick, caption bands, loudness).
+- Chatterbox Turbo (`.venv-tts`) crashed with an access violation while loading weights under memory pressure; retry after the paging-file increase. Kokoro/Edge remain the working chain meanwhile.
+- E9 top-3 has no end-to-end render test.
