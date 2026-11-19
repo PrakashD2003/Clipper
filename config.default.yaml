@@ -205,3 +205,10 @@ transformation:
   punch_in_zoom: 1.20                  # 1.20x center zoom around peak_time (1.0 = disabled)
   zoom_duration_seconds: 3.5           # Duration of punch-in zoom at peak moment
   show_chat_ticker: true               # Render real live_chat burst overlay during spike
+
+library:
+  db_path: ""                      # "" = <general.cache_dir>/library.sqlite
+  window_seconds: 30
+  window_step_seconds: 20
+  max_chat_chars_per_window: 600
+  heat_boost: 0.3

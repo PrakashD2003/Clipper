@@ -520,6 +520,80 @@ class Pipeline:
 
         return state.clips
 
+    async def prepare_stream(
+        self,
+        url: str,
+        *,
+        game: str | None = None,
+        streamer: str | None = None,
+        force: bool = False,
+    ) -> PipelineState:
+        """Run download-audio, transcribe, and analyze steps, stopping before scoring."""
+        if not isinstance(url, str) or not url.strip():
+            raise ValueError("Invalid URL: stream URL must be a non-empty string.")
+        clean_url = url.strip()
+
+        if force:
+            self.cache.clear(clean_url)
+
+        state = self.cache.load_state(clean_url) or PipelineState(
+            stream_info=StreamInfo(
+                url=clean_url,
+                title="",
+                platform=Platform.YOUTUBE,
+                streamer=streamer or "",
+                game=game or "",
+                duration_seconds=0,
+            )
+        )
+        if game:
+            state.stream_info.game = game
+        if streamer:
+            state.stream_info.streamer = streamer
+
+        if self._is_blocked_streamer(state.stream_info.streamer):
+            logger.warning(
+                "Streamer %r is listed in discovery.blocked_streamers; refusing to process %s.",
+                state.stream_info.streamer,
+                clean_url,
+            )
+            return state
+
+        state = self._recover_failed_state(state)
+
+        try:
+            # Step 2: Download audio (skip if cached)
+            if state.status < PipelineStatus.TRANSCRIBING:
+                state = await self._step_download_audio(state)
+                self.cache.save_state(state)
+                if self._is_blocked_streamer(state.stream_info.streamer):
+                    logger.warning(
+                        "Streamer %r is listed in discovery.blocked_streamers; "
+                        "stopping after audio download.",
+                        state.stream_info.streamer,
+                    )
+                    return state
+
+            # Step 3: Transcribe (skip if cached; serialized on GPU lock)
+            if state.status < PipelineStatus.ANALYZING:
+                async with self._gpu_guard():
+                    state = await self._step_transcribe(state)
+                self.cache.save_state(state)
+
+            # Step 4: Analyze signals (skip if cached; re-download missing WAV while preserving transcript)
+            if state.status < PipelineStatus.SCORING:
+                if state.audio_path is None or not Path(state.audio_path).exists():
+                    state = await self._step_download_audio(state)
+                    self.cache.save_state(state)
+                state = await self._step_analyze(state)
+                self.cache.save_state(state)
+
+            return state
+        except Exception:
+            state.status = PipelineStatus.FAILED
+            self.cache.save_state(state)
+            raise
+
     async def process_streams_parallel(
         self,
         urls: list[str],
