@@ -1390,6 +1390,96 @@ async def test_gpu_lock_serializes_concurrent_transcribe_and_render(
 
 
 @pytest.mark.asyncio
+async def test_gpu_guard_acquires_cross_process_file_lock_when_enabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """_gpu_guard acquires <cache_dir>/gpu.lock when cross_process_gpu_lock is True."""
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(
+        "\n".join(
+            [
+                "general:",
+                f"  output_dir: '{(tmp_path / 'output').as_posix()}'",
+                f"  temp_dir: '{(tmp_path / 'temp').as_posix()}'",
+                f"  cache_dir: '{(tmp_path / '.cache').as_posix()}'",
+                "  cross_process_gpu_lock: true",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    cfg = Config(user_config_path=cfg_file, hardware_profile=_cpu_profile())
+
+    lock_file = tmp_path / ".cache" / "gpu.lock"
+    assert not lock_file.exists()
+
+    async with mcp_server._gpu_guard(cfg):
+        assert lock_file.is_file()
+        acquired_simultaneously = False
+
+        def _try_second_lock() -> None:
+            nonlocal acquired_simultaneously
+            import msvcrt
+            import os
+            try:
+                fh = open(lock_file, "a+b")
+                try:
+                    if os.name == "nt":
+                        fh.seek(0)
+                        msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+                        acquired_simultaneously = True
+                        msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+                finally:
+                    fh.close()
+            except OSError:
+                pass
+
+        await asyncio.to_thread(_try_second_lock)
+        assert not acquired_simultaneously
+
+    # After exit, another thread can acquire and release the lock cleanly
+    post_acquired = False
+
+    def _acquire_after_exit() -> None:
+        nonlocal post_acquired
+        from streamclipper import pipeline as pipeline_mod
+        fh = pipeline_mod._acquire_file_lock(tmp_path / ".cache", timeout=2.0)
+        try:
+            post_acquired = True
+        finally:
+            pipeline_mod._release_file_lock(fh)
+
+    await asyncio.to_thread(_acquire_after_exit)
+    assert post_acquired
+
+
+@pytest.mark.asyncio
+async def test_gpu_guard_skips_cross_process_file_lock_when_disabled(
+    tmp_path: Path,
+) -> None:
+    """_gpu_guard skips creating/locking gpu.lock when cross_process_gpu_lock is False."""
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(
+        "\n".join(
+            [
+                "general:",
+                f"  output_dir: '{(tmp_path / 'output').as_posix()}'",
+                f"  temp_dir: '{(tmp_path / 'temp').as_posix()}'",
+                f"  cache_dir: '{(tmp_path / '.cache').as_posix()}'",
+                "  cross_process_gpu_lock: false",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    cfg = Config(user_config_path=cfg_file, hardware_profile=_cpu_profile())
+
+    lock_file = tmp_path / ".cache" / "gpu.lock"
+    assert not lock_file.exists()
+
+    async with mcp_server._gpu_guard(cfg):
+        assert not lock_file.exists()
+
+
+@pytest.mark.asyncio
 async def test_cleanup_temp_blocks_glob_injection_and_path_traversal(
     mcp_env: tuple[Config, StepCache, Path],
 ) -> None:

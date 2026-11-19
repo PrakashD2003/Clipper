@@ -669,6 +669,28 @@ def test_M5_truncated_state_returns_none_and_quarantines(tmp_path: Path) -> None
     assert not list(cache.cache_dir.glob("*.tmp"))
 
 
+def test_concurrent_atomic_write_never_clashes_and_leaves_no_tmp(tmp_path: Path) -> None:
+    """Concurrent multi-threaded cache writes use unique temp files and leave no stray .tmp."""
+    import concurrent.futures
+    cache = StepCache(_make_config(tmp_path))
+    url = "https://youtube.com/watch?v=concurrent_test"
+
+    def _worker(idx: int) -> None:
+        st = _make_full_pipeline_state(url=url, include_transcript=False)
+        st.stream_info.title = f"Title {idx}"
+        cache.save_state(st)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+        futures = [ex.submit(_worker, i) for i in range(40)]
+        for f in concurrent.futures.as_completed(futures):
+            f.result()
+
+    loaded = cache.load_state(url)
+    assert loaded is not None
+    assert loaded.stream_info.title.startswith("Title ")
+    assert not list(cache.cache_dir.glob("*.tmp"))
+
+
 def test_L14_auto_exits_nonzero_on_failure_and_clip_wraps_valueerror(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

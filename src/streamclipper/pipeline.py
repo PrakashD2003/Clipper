@@ -90,6 +90,68 @@ def _sanitize_path_segment(name: str, fallback: str = "unknown") -> str:
     return cleaned
 
 
+def _acquire_file_lock(lock_dir: Path, timeout: float | None = 600.0) -> Any:
+    """Blocking exclusive lock on <lock_dir>/gpu.lock (run via asyncio.to_thread)."""
+    import time
+
+    target_dir = Path(lock_dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = target_dir / "gpu.lock"
+
+    if not lock_path.is_file() or lock_path.stat().st_size == 0:
+        try:
+            with open(lock_path, "a+b") as init_fh:
+                if init_fh.tell() == 0:
+                    init_fh.write(b"0")
+                    init_fh.flush()
+        except OSError:
+            pass
+
+    fh = open(lock_path, "a+b")
+    start_time = time.monotonic()
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            while True:
+                fh.seek(0)
+                try:
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    if timeout is not None and (time.monotonic() - start_time) > timeout:
+                        raise TimeoutError(
+                            f"Timed out after {timeout:.1f}s waiting for GPU cross-process lock at {lock_path}"
+                        )
+                    time.sleep(0.1)
+        else:
+            import fcntl
+
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+    except BaseException:
+        fh.close()
+        raise
+    return fh
+
+
+def _release_file_lock(fh: Any) -> None:
+    """Release exclusive byte-range / advisory lock on gpu.lock."""
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    except OSError as exc:
+        logger.debug("Ignoring error releasing GPU file lock: %s", exc)
+    finally:
+        fh.close()
+
+
 class _AsyncNull:
     """No-op async context manager (assembly that cannot touch the GPU runs unlocked)."""
 
@@ -111,53 +173,14 @@ class Pipeline:
         self.output_dir = Path(config.get("general.output_dir", "./output"))
         self._gpu_lock = asyncio.Lock()
 
-    def _acquire_file_lock(self) -> Any:
+    def _acquire_file_lock(self, timeout: float | None = 600.0) -> Any:
         """Blocking exclusive lock on <cache_dir>/gpu.lock (run via asyncio.to_thread)."""
-        import time
-
         lock_dir = Path(self.config.get("general.cache_dir", "./.cache"))
-        lock_dir.mkdir(parents=True, exist_ok=True)
-        fh = open(lock_dir / "gpu.lock", "a+b")
-        try:
-            if os.name == "nt":
-                import msvcrt
-
-                fh.seek(0, os.SEEK_END)
-                if fh.tell() == 0:
-                    fh.write(b"0")
-                    fh.flush()
-                while True:
-                    fh.seek(0)
-                    try:
-                        msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
-                        break
-                    except OSError:
-                        time.sleep(0.25)
-            else:
-                import fcntl
-
-                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-        except BaseException:
-            fh.close()
-            raise
-        return fh
+        return _acquire_file_lock(lock_dir, timeout=timeout)
 
     @staticmethod
     def _release_file_lock(fh: Any) -> None:
-        try:
-            if os.name == "nt":
-                import msvcrt
-
-                fh.seek(0)
-                msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-        except OSError as exc:
-            logger.debug("Ignoring error releasing GPU file lock: %s", exc)
-        finally:
-            fh.close()
+        _release_file_lock(fh)
 
     @contextlib.asynccontextmanager
     async def _gpu_guard(self) -> AsyncIterator[None]:
@@ -166,11 +189,12 @@ class Pipeline:
             if not bool(self.config.get("general.cross_process_gpu_lock", False)):
                 yield
                 return
-            fh = await asyncio.to_thread(self._acquire_file_lock)
+            lock_dir = Path(self.config.get("general.cache_dir", "./.cache"))
+            fh = await asyncio.to_thread(_acquire_file_lock, lock_dir)
             try:
                 yield
             finally:
-                await asyncio.to_thread(self._release_file_lock, fh)
+                await asyncio.to_thread(_release_file_lock, fh)
 
     def _narration_may_use_gpu(self, clip_mode: str) -> bool:
         """True when narration synthesis for this clip may load Kokoro on the GPU."""

@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import math
 from pathlib import Path
 import re
-from typing import Any
+from typing import Any, AsyncIterator
 import weakref
 
 from mcp.server.mcpserver import MCPServer
@@ -32,7 +33,12 @@ from ..models import (
     TimeRange,
 )
 from ..output.organizer import FileOrganizer
-from ..pipeline import Pipeline, _sanitize_path_segment
+from ..pipeline import (
+    Pipeline,
+    _acquire_file_lock,
+    _release_file_lock,
+    _sanitize_path_segment,
+)
 from ..scoring.ollama_scorer import (
     VALID_MOMENT_TYPES,
     OllamaScorer,
@@ -63,6 +69,21 @@ def _get_gpu_lock() -> asyncio.Lock:
         lock = asyncio.Lock()
         _LOOP_GPU_LOCKS[loop] = lock
     return lock
+
+
+@contextlib.asynccontextmanager
+async def _gpu_guard(config: Config) -> AsyncIterator[None]:
+    """Hold the in-process GPU lock and (when enabled) cross-process file lock."""
+    async with _get_gpu_lock():
+        if not bool(config.get("general.cross_process_gpu_lock", False)):
+            yield
+            return
+        lock_dir = Path(config.get("general.cache_dir", "./.cache"))
+        fh = await asyncio.to_thread(_acquire_file_lock, lock_dir)
+        try:
+            yield
+        finally:
+            await asyncio.to_thread(_release_file_lock, fh)
 
 
 def _get_url_lock(cache_key: str) -> asyncio.Lock:
@@ -523,7 +544,7 @@ async def _render_single_highlight(
         music_confidence=highlight.music_confidence,
     )
 
-    async with _get_gpu_lock():
+    async with _gpu_guard(config):
         effective_index = (
             clip_index
             if clip_index is not None
@@ -692,7 +713,7 @@ async def transcribe_audio(url: str = "", audio_path: str = "") -> str:
             return _json_error(f"Audio file not found: {target_audio}")
 
         transcriber = Transcriber(config)
-        async with _get_gpu_lock():
+        async with _gpu_guard(config):
             transcript = await asyncio.to_thread(transcriber.transcribe, target_audio)
 
         resolved_url = (
@@ -1564,7 +1585,7 @@ async def generate_post_metadata(
             title=clean_hook,
             reason=clean_desc,
         )
-        async with _get_gpu_lock():
+        async with _gpu_guard(config):
             caption, hashtags = await asyncio.to_thread(
                 scorer._generate_caption_and_hashtags,
                 synthetic,

@@ -9,7 +9,7 @@ general:
   cache_dir: "./.cache"
   max_concurrent_streams: 2
   log_level: "INFO"
-  cross_process_gpu_lock: false         # Serialize GPU work across processes with a file lock
+  cross_process_gpu_lock: true         # Serialize GPU work across processes with a file lock (.cache/gpu.lock)
 
 discovery:
   platform: "youtube"

@@ -5,6 +5,8 @@ import logging
 import os
 from datetime import datetime
 from pathlib import Path
+import time
+import uuid
 
 from .config import Config
 from .download.audio import _extract_youtube_id_from_url
@@ -22,11 +24,26 @@ logger = logging.getLogger(__name__)
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
-    """Write text to ``path`` atomically via a same-directory temp file and os.replace."""
-    tmp = path.with_name(path.name + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(text)
-    os.replace(tmp, path)
+    """Write text to ``path`` atomically via a unique temp file and os.replace."""
+    tmp = path.with_name(f"{path.name}.{os.getpid()}_{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+        for attempt in range(5):
+            try:
+                os.replace(tmp, path)
+                break
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.05)
+    except BaseException:
+        try:
+            if tmp.is_file():
+                tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 
 def _quarantine(path: Path) -> None:
