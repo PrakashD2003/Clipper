@@ -390,6 +390,60 @@ class TransformativeNarrator:
         outro_d = float(outro_dur)  # type: ignore[arg-type]
         return None, min(outro_d, clip_dur * 0.75)
 
+    @staticmethod
+    def compute_breakdown_windows(
+        intro_dur: float | None,
+        outro_dur: float | None,
+        breakdown_dur: float | None,
+        clip_duration: float,
+        replay_start_time: float | None = None,
+    ) -> dict[str, float | None]:
+        """Single source of truth for breakdown-mode cue placement (audio AND captions).
+
+        Returns ``eff_intro``, ``breakdown_start``, ``breakdown_end``, ``eff_outro`` and
+        ``outro_start`` in clip-relative seconds (None when that cue is absent).
+        """
+        clip_dur = max(float(clip_duration), 0.1)
+        has_intro = intro_dur is not None and float(intro_dur) > 0.01
+        has_outro = outro_dur is not None and float(outro_dur) > 0.01
+        has_breakdown = breakdown_dur is not None and float(breakdown_dur) > 0.01
+
+        eff_intro: float | None = None
+        if has_intro:
+            limit = (
+                float(replay_start_time) if replay_start_time is not None else clip_dur * 0.5
+            )
+            eff_intro = min(float(intro_dur), max(0.01, limit))  # type: ignore[arg-type]
+
+        breakdown_start: float | None = None
+        breakdown_end: float | None = None
+        if has_breakdown:
+            rep_start = (
+                float(replay_start_time)
+                if replay_start_time is not None
+                else (eff_intro if eff_intro is not None else 0.0)
+            )
+            breakdown_start = max(0.0, min(clip_dur, rep_start))
+            avail = max(0.01, clip_dur - breakdown_start)
+            breakdown_end = min(
+                clip_dur, breakdown_start + min(float(breakdown_dur), avail)  # type: ignore[arg-type]
+            )
+
+        eff_outro: float | None = None
+        outro_start: float | None = None
+        if has_outro:
+            floor = breakdown_end if breakdown_end is not None else (eff_intro or 0.0)
+            eff_outro = min(float(outro_dur), max(0.01, clip_dur - floor))  # type: ignore[arg-type]
+            outro_start = max(floor, clip_dur - eff_outro)
+
+        return {
+            "eff_intro": eff_intro,
+            "breakdown_start": breakdown_start,
+            "breakdown_end": breakdown_end,
+            "eff_outro": eff_outro,
+            "outro_start": outro_start,
+        }
+
     def _build_ducking_filtergraph(
         self,
         intro_dur: float | None,
@@ -444,40 +498,31 @@ class TransformativeNarrator:
 
         # Multi-cue breakdown mode ducking branch
         if has_breakdown:
-            eff_intro: float | None = None
+            win = self.compute_breakdown_windows(
+                intro_dur, outro_dur, breakdown_dur, clip_dur, replay_start_time
+            )
+            eff_intro = win["eff_intro"]
+            rep_start = win["breakdown_start"]
+            breakdown_end = win["breakdown_end"]
+            eff_outro = win["eff_outro"]
+
             intro_trim = ""
-            if has_intro:
-                intro_d = float(intro_dur)  # type: ignore[arg-type]
-                limit = float(replay_start_time) if replay_start_time is not None else (clip_dur * 0.5)
-                eff_intro = min(intro_d, max(0.01, limit))
-                if eff_intro < intro_d - 1e-6:
-                    intro_trim = f",atrim=0:{max(0.01, eff_intro):.2f},asetpts=PTS-STARTPTS"
+            if eff_intro is not None and eff_intro < float(intro_dur) - 1e-6:  # type: ignore[arg-type]
+                intro_trim = f",atrim=0:{max(0.01, eff_intro):.2f},asetpts=PTS-STARTPTS"
 
             breakdown_d = float(breakdown_dur)  # type: ignore[arg-type]
-            rep_start = (
-                float(replay_start_time)
-                if replay_start_time is not None
-                else (eff_intro if eff_intro is not None else 0.0)
-            )
-            rep_start = max(0.0, min(clip_dur, rep_start))
-            avail_breakdown = max(0.01, clip_dur - rep_start)
-            eff_breakdown = min(breakdown_d, avail_breakdown)
-            breakdown_end = min(clip_dur, rep_start + eff_breakdown)
+            eff_breakdown = breakdown_end - rep_start
             breakdown_delay_ms = int(round(rep_start * 1000))
             breakdown_trim = ""
             if eff_breakdown < breakdown_d - 1e-6:
                 breakdown_trim = f",atrim=0:{max(0.01, eff_breakdown):.2f},asetpts=PTS-STARTPTS"
 
-            eff_outro: float | None = None
             outro_trim = ""
-            if has_outro:
-                outro_d = float(outro_dur)  # type: ignore[arg-type]
-                avail_outro = max(0.01, clip_dur - breakdown_end)
-                eff_outro = min(outro_d, avail_outro)
-                outro_start = max(breakdown_end, clip_dur - eff_outro)
+            if eff_outro is not None:
+                outro_start = win["outro_start"]
                 outro_end = clip_dur
                 outro_delay_ms = int(round(outro_start * 1000))
-                if eff_outro < outro_d - 1e-6:
+                if eff_outro < float(outro_dur) - 1e-6:  # type: ignore[arg-type]
                     outro_trim = f",atrim=0:{max(0.01, eff_outro):.2f},asetpts=PTS-STARTPTS"
 
             conditions: list[str] = []

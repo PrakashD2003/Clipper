@@ -1169,6 +1169,7 @@ class TestExporter:
             clip_start_offset: float,
             ass_path: Path,
             chat_burst: list[dict[str, Any]] | None,
+            **_narration_kwargs: Any,
         ) -> Path:
             events.append("captions:generate_ass")
             gen_ass_calls.append(
@@ -1292,7 +1293,7 @@ class TestExporter:
             patch.object(
                 exporter.narrator,
                 "_probe_audio_duration",
-                side_effect=[4.0, 4.0],
+                side_effect=lambda p: 4.0 if p is not None else None,
             ),
             patch.object(
                 exporter.narrator,

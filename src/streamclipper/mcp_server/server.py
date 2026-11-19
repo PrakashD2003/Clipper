@@ -518,38 +518,19 @@ async def _render_single_highlight(
                 config, game_name, streamer_name, min_index=min_clip_index
             )
         )
-        assemble_kwargs: dict[str, Any] = {
-            "valid_beats": valid_beats,
-            "buffer_seconds": buffer_seconds,
-        }
-        if voice_breakdown_path is not None:
-            assemble_kwargs["voice_breakdown_path"] = voice_breakdown_path
-
-        try:
-            clip_result = await asyncio.to_thread(
-                pipeline._assemble_highlight,
-                highlight,
-                metadata,
-                segment_paths,
-                effective_index,
-                clip_mode,
-                voice_intro_path,
-                voice_outro_path,
-                **assemble_kwargs,
-            )
-        except TypeError:
-            assemble_kwargs.pop("voice_breakdown_path", None)
-            clip_result = await asyncio.to_thread(
-                pipeline._assemble_highlight,
-                highlight,
-                metadata,
-                segment_paths,
-                effective_index,
-                clip_mode,
-                voice_intro_path,
-                voice_outro_path,
-                **assemble_kwargs,
-            )
+        clip_result = await asyncio.to_thread(
+            pipeline._assemble_highlight,
+            highlight,
+            metadata,
+            segment_paths,
+            effective_index,
+            clip_mode,
+            voice_intro_path,
+            voice_outro_path,
+            valid_beats=valid_beats,
+            buffer_seconds=buffer_seconds,
+            voice_breakdown_path=voice_breakdown_path,
+        )
     return clip_result, clip_mode
 
 

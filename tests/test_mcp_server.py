@@ -581,6 +581,7 @@ async def test_render_clip_story_narrative_raw_and_voice_overrides(
         *,
         valid_beats=None,
         buffer_seconds=3.0,
+        voice_breakdown_path=None,
     ):
         assemble_calls.append(
             {

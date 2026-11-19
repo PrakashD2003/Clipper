@@ -203,6 +203,8 @@ class AssCaptionBurner:
         intro_dur: float | None = None,
         outro_dur: float | None = None,
         clip_duration: float | None = None,
+        breakdown_callout: str = "",
+        breakdown_window: tuple[float | None, float | None] | None = None,
     ) -> Path:
         """Write an .ass subtitle file honoring captions.style, optional ChatTicker events, and narration windows."""
         target_path = Path(ass_path)
@@ -318,6 +320,16 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 line_text = " ".join(rendered_tokens)
                 events.append(
                     f"Dialogue: 0,{start_ts},{end_ts},Hormozi,,0,0,0,,{line_text}"
+                )
+
+        # Emit on-screen breakdown callout while the breakdown commentary plays
+        if breakdown_callout and str(breakdown_callout).strip() and breakdown_window:
+            b_start, b_end = breakdown_window
+            if b_start is not None and b_end is not None and float(b_end) > float(b_start):
+                safe_callout = _escape_ass_text(str(breakdown_callout).strip().upper())
+                events.append(
+                    f"Dialogue: 0,{_sec_to_ass_time(float(b_start))},{_sec_to_ass_time(float(b_end))},"
+                    f"Hormozi,,0,0,0,,{{\\c{self.highlight_bgr}}}{safe_callout}"
                 )
 
         # Emit tone-matched narration outro card during ducked outro window

@@ -276,6 +276,8 @@ def _install_mock_stage_deps(
             transcript: TranscriptionResult,
             loudness_spikes: list[TimeRange],
             chat_spikes: list[TimeRange],
+            max_clips: int | None = None,
+            audio_path: Path | str | None = None,
         ) -> list[Highlight]:
             call_log.append("score_and_select")
             return list(hl_list)
@@ -359,7 +361,7 @@ def _install_mock_stage_deps(
     monkeypatch.setattr(
         composer_mod.VideoComposer,
         "compose",
-        lambda self, video_path, facecam, peak_offset=None: {"kind": "single"},
+        lambda self, video_path, facecam, peak_offset=None, trim_range=None, face_center_x=None: {"kind": "single"},
     )
     monkeypatch.setattr(
         composer_mod.VideoComposer,
@@ -931,7 +933,13 @@ class TestPipelineEndToEnd:
                         "trim_range": trim_range,
                     }
                 )
-                return {"kind": "single"}
+                # Mirror VideoComposer.compose(): expose the trim actually applied
+                class _ComposedStub(dict):
+                    pass
+
+                result = _ComposedStub(kind="single")
+                result._trim_start = trim_range[0] if trim_range else 0.0
+                return result
 
         composer_mod.remap_timeline_for_beats = stub_remap  # type: ignore[attr-defined]
         composer_mod.VideoComposer = StubVideoComposer  # type: ignore[attr-defined]

@@ -65,11 +65,30 @@ class TestPipelineBreakdownModeResolution:
 
     def test_auto_resolves_breakdown_for_moment_types(self, tmp_path: Path) -> None:
         pipeline = Pipeline(_make_config(tmp_path))
-        for m_type in ("analysis", "fail", "graphics_detail", "lore_secret"):
+        for m_type in ("analysis", "graphics_detail", "lore_secret"):
             h = _make_highlight(moment_type=m_type)
             mode, beats = pipeline._resolve_highlight_mode("auto", h)
             assert mode == "breakdown"
             assert beats == []
+
+    def test_auto_keeps_funny_fail_on_narrative(self, tmp_path: Path) -> None:
+        pipeline = Pipeline(_make_config(tmp_path))
+        h = _make_highlight(moment_type="fail")
+        mode, _ = pipeline._resolve_highlight_mode("auto", h)
+        assert mode == "narrative"
+
+    def test_auto_prefers_story_beats_over_moment_type_breakdown(
+        self, tmp_path: Path
+    ) -> None:
+        pipeline = Pipeline(_make_config(tmp_path))
+        beats_data = [
+            {"start": 100.0, "end": 115.0, "label": "Setup"},
+            {"start": 130.0, "end": 145.0, "label": "Payoff"},
+        ]
+        h = _make_highlight(moment_type="analysis", sub_clips=beats_data)
+        mode, beats = pipeline._resolve_highlight_mode("auto", h)
+        assert mode == "story"
+        assert len(beats) == 2
 
     def test_auto_resolves_breakdown_when_commentary_present(self, tmp_path: Path) -> None:
         pipeline = Pipeline(_make_config(tmp_path))
@@ -169,6 +188,7 @@ class TestPipelineBreakdownAssembly:
 
         fake_clip = MagicMock()
         fake_clip.duration = 45.0
+        fake_clip._trim_start = 3.0
         fake_replay_clip = MagicMock()
         fake_replay_clip.duration = 55.0
 
@@ -485,3 +505,67 @@ class TestCLIBreakdownIntegration:
             assert meta.breakdown_commentary != ""
 
 
+
+
+class TestBreakdownReviewRegressions:
+    """Regressions for freeze-frame sync, cue windows, and source dedup."""
+
+    def test_shift_timeline_after_freeze_moves_only_post_peak_events(self) -> None:
+        words = [
+            WordTimestamp(text="before", start=405.0, end=405.5, confidence=0.9),
+            WordTimestamp(text="after", start=412.0, end=412.5, confidence=0.9),
+        ]
+        chat = [{"message": "early", "offset_seconds": 404.0}, {"message": "late", "time": 415.0}]
+        new_words, new_chat = Pipeline._shift_timeline_after(
+            words, chat, clip_start_offset=400.0, at=10.0, delta=4.0
+        )
+        assert [w.start for w in new_words] == [405.0, 416.0]
+        assert new_chat[0]["offset_seconds"] == 404.0
+        assert new_chat[1]["time"] == 419.0
+        assert words[1].start == 412.0  # inputs not mutated
+
+    def test_breakdown_windows_place_commentary_at_freeze_point(self) -> None:
+        from streamclipper.assembly.narrator import TransformativeNarrator
+
+        win = TransformativeNarrator.compute_breakdown_windows(
+            intro_dur=3.0, outro_dur=3.0, breakdown_dur=4.0, clip_duration=30.0,
+            replay_start_time=12.0,
+        )
+        assert win["eff_intro"] == 3.0
+        assert win["breakdown_start"] == 12.0
+        assert win["breakdown_end"] == 16.0
+        assert win["outro_start"] == 27.0
+
+    def test_breakdown_windows_outro_never_overlaps_breakdown(self) -> None:
+        from streamclipper.assembly.narrator import TransformativeNarrator
+
+        win = TransformativeNarrator.compute_breakdown_windows(
+            intro_dur=None, outro_dur=6.0, breakdown_dur=5.0, clip_duration=20.0,
+            replay_start_time=16.0,
+        )
+        assert win["breakdown_end"] == 20.0
+        assert win["outro_start"] >= win["breakdown_end"]
+
+    def test_instant_replay_source_dedup_never_calls_clip_eq(self) -> None:
+        from streamclipper.assembly import composer as composer_mod
+
+        class NoEq:
+            def __eq__(self, other):  # pragma: no cover - must not be called
+                raise AssertionError("Clip.__eq__ must not be used for dedup")
+
+            __hash__ = object.__hash__
+
+        a, b = NoEq(), NoEq()
+        main = MagicMock(duration=10.0, w=1080, h=1920)
+        main._source_clips = [a, b]
+        main._source_clip = a
+        with (
+            patch.object(composer_mod, "CompositeVideoClip", return_value=MagicMock(audio=None)),
+            patch.object(composer_mod, "concatenate_videoclips", return_value=MagicMock()),
+        ):
+            combined, _ = composer_mod.compose_instant_replay(
+                main, peak_offset=5.0, badge_clip=MagicMock()
+            )
+        assert combined._source_clips[0] is a
+        assert combined._source_clips[1] is b
+        assert sum(1 for s in combined._source_clips if s is a) == 1

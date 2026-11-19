@@ -178,6 +178,7 @@ class VideoComposer:
         opened_by_us = isinstance(video_path, (str, Path))
         clip = VideoFileClip(str(video_path)) if opened_by_us else video_path
         all_sources = [clip]
+        applied_trim_start = 0.0
         try:
             effective_peak_offset = peak_offset
             if trim_range is not None:
@@ -190,6 +191,7 @@ class VideoComposer:
                 )
                 if t_end > t_start:
                     clip = clip.subclipped(t_start, t_end)
+                    applied_trim_start = t_start
                     if effective_peak_offset is not None:
                         effective_peak_offset = max(0.0, effective_peak_offset - t_start)
             if facecam is not None:
@@ -210,6 +212,9 @@ class VideoComposer:
             raise
         result._source_clip = all_sources[0]  # ensure Windows file handles can be closed cleanly
         result._source_clips = all_sources
+        # Seconds actually trimmed from the source head (0.0 when trim_range was skipped),
+        # so callers can map stream timestamps onto the composed timeline exactly.
+        result._trim_start = applied_trim_start
         return result
 
     @staticmethod
@@ -453,6 +458,14 @@ class VideoComposer:
                     if is_in_this_beat:
                         beat_peak = peak_offset - cum_beat_offset
 
+                if facecam is None and face_center_x is None:
+                    # Detect once on the first beat and reuse for every beat so the
+                    # 9:16 crop window stays horizontally stable across jump cuts.
+                    # When no face is found, lock to the frame center instead of re-detecting.
+                    face_center_x = self._detect_face_center_x(trimmed)
+                    if face_center_x is None:
+                        face_center_x = float(getattr(trimmed, "w", 0) or 0) / 2.0 or None
+
                 composed_beat = (
                     self._compose_with_facecam(trimmed, facecam, peak_offset=beat_peak)
                     if facecam is not None
@@ -622,16 +635,18 @@ def compose_instant_replay(
     combined = concatenate_videoclips([main_clip, replay_comp], method="compose")
 
     # Propagate source clips for Windows resource cleanup in Exporter
+    # Dedupe by identity: MoviePy 2's Clip.__eq__ decodes and compares every frame.
     sources: list[Any] = []
+    seen_ids: set[int] = set()
     for c in (main_clip, replay_comp):
-        sc_list = getattr(c, "_source_clips", None)
-        if sc_list:
-            for s in sc_list:
-                if s not in sources:
-                    sources.append(s)
+        candidates = list(getattr(c, "_source_clips", None) or [])
         sc = getattr(c, "_source_clip", None)
-        if sc and sc not in sources:
-            sources.append(sc)
+        if sc is not None:
+            candidates.append(sc)
+        for s in candidates:
+            if id(s) not in seen_ids:
+                seen_ids.add(id(s))
+                sources.append(s)
     if not sources:
         sources = [main_clip]
 
@@ -711,6 +726,10 @@ def compose_freeze_breakdown(
         slices.append(main_clip.subclipped(peak, clip_dur))
 
     combined = concatenate_videoclips(slices, method="compose")
+    # Expose where the freeze was inserted so callers can shift captions/chat after it
+    # and align the breakdown voiceover with the frozen callout.
+    combined._freeze_start = peak if peak > 0.01 else 0.0
+    combined._freeze_duration = freeze_dur
 
     # Propagate source clips for Windows resource cleanup in Exporter
     sources = getattr(main_clip, "_source_clips", None)
