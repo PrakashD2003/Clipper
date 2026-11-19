@@ -32,7 +32,7 @@ from ..models import (
     TimeRange,
 )
 from ..output.organizer import FileOrganizer
-from ..pipeline import Pipeline
+from ..pipeline import Pipeline, _sanitize_path_segment
 from ..scoring.ollama_scorer import (
     VALID_MOMENT_TYPES,
     OllamaScorer,
@@ -401,6 +401,15 @@ def _collect_temp_files_for_stream(
     return unique
 
 
+def _duration_bound_error(duration: float, min_s: Any, max_s: Any) -> str:
+    """Return a rejection reason if duration is outside [min_s, max_s], else an empty string."""
+    if duration < float(min_s):
+        return f"duration {duration:.2f}s is below analysis.min_clip_seconds ({float(min_s):g}s)"
+    if duration > float(max_s):
+        return f"duration {duration:.2f}s is above analysis.max_clip_seconds ({float(max_s):g}s)"
+    return ""
+
+
 def _next_available_clip_index(
     config: Config, game: str, streamer: str, min_index: int = 1
 ) -> int:
@@ -419,6 +428,19 @@ def _next_available_clip_index(
         idx = next_idx
         path = next_path
     return idx
+
+
+def _has_rendered_clip(clips: list[ClipResult], highlight: Highlight) -> bool:
+    """True if a clip with matching start/end (+-0.01s) already exists on disk."""
+    for clip in clips:
+        meta = clip.metadata
+        if (
+            abs(float(meta.clip_start) - highlight.start) <= 0.01
+            and abs(float(meta.clip_end) - highlight.end) <= 0.01
+            and Path(clip.video_path).is_file()
+        ):
+            return True
+    return False
 
 
 def _merge_clip_results(
@@ -603,6 +625,7 @@ async def download_stream_audio(url: str) -> str:
                         or (_extract_youtube_id_from_url(clean_url) or "")
                     ),
                 )
+                Pipeline._recover_failed_state(existing)
                 existing.audio_path = Path(audio_path)
                 if (
                     existing.status < PipelineStatus.TRANSCRIBING
@@ -705,6 +728,7 @@ async def transcribe_audio(url: str = "", audio_path: str = "") -> str:
                         transcript=transcript,
                     )
                 else:
+                    Pipeline._recover_failed_state(fresh_state)
                     fresh_state.transcript = transcript
                     if fresh_state.audio_path is None or (
                         clean_audio and not Path(fresh_state.audio_path).is_file()
@@ -786,7 +810,9 @@ async def analyze_signals(url: str = "", audio_path: str = "") -> str:
                 else (_extract_youtube_id_from_url(target_url) or "")
             )
             video_id = (
-                raw_video_id
+                _sanitize_path_segment(
+                    raw_video_id, fallback=cache.get_cache_key(target_url)
+                )
                 if _is_safe_id_prefix(raw_video_id)
                 else cache.get_cache_key(target_url)
             )
@@ -799,11 +825,17 @@ async def analyze_signals(url: str = "", audio_path: str = "") -> str:
                 if cached is not None:
                     return cached
                 df = scraper.scrape(target_url, temp_dir)
-                if not df.empty:
-                    scraper.save_cache(df, chat_cache_path)
+                # Header-only CSV marks "no chat" so later runs do not re-scrape
+                scraper.save_cache(df, chat_cache_path)
                 return df
 
-            chat_df = await asyncio.to_thread(_fetch_chat)
+            try:
+                chat_df = await asyncio.to_thread(_fetch_chat)
+            except Exception as chat_exc:
+                logger.exception("analyze_signals chat scrape failed")
+                return _json_error(
+                    f"Chat scrape failed; analysis not marked complete, retry later: {chat_exc}"
+                )
             chat_analyzer = ChatVelocityAnalyzer(config)
             chat_spikes = await asyncio.to_thread(chat_analyzer.analyze, chat_df)
 
@@ -830,6 +862,7 @@ async def analyze_signals(url: str = "", audio_path: str = "") -> str:
                         analysis_complete=True,
                     )
                 else:
+                    Pipeline._recover_failed_state(fresh_state)
                     fresh_state.loudness_spikes = loudness_spikes
                     fresh_state.chat_spikes = chat_spikes
                     fresh_state.analysis_complete = True
@@ -1006,6 +1039,7 @@ async def submit_highlights(url: str, highlights: str) -> str:
 
             accepted: list[Highlight] = []
             rejected_count = 0
+            rejected_reasons: list[dict[str, Any]] = []
 
             for item in raw_items:
                 if not isinstance(item, dict):
@@ -1016,6 +1050,16 @@ async def submit_highlights(url: str, highlights: str) -> str:
                 end = _parse_seconds(item.get("end"))
                 if start is None or end is None or end <= start:
                     rejected_count += 1
+                    continue
+
+                duration_error = _duration_bound_error(
+                    end - start, scorer.min_clip_seconds, scorer.max_clip_seconds
+                )
+                if duration_error:
+                    rejected_count += 1
+                    rejected_reasons.append(
+                        {"start": start, "end": end, "reason": duration_error}
+                    )
                     continue
 
                 score = _parse_score(item.get("score"))
@@ -1063,11 +1107,15 @@ async def submit_highlights(url: str, highlights: str) -> str:
                         detector = CopyrightRiskDetector(config)
                         if detector.enabled:
                             highlight.word_timestamps = scorer._extract_words_for_range(state.transcript, highlight.start, highlight.end) if state.transcript is not None else []
-                            risk, conf = detector.detect_highlight(state.audio_path, highlight)
+                            risk, conf = await asyncio.to_thread(
+                                detector.detect_highlight, state.audio_path, highlight
+                            )
                             highlight.music_risk = risk
                             highlight.music_confidence = conf
-                    except Exception:
-                        pass
+                    except Exception as det_exc:
+                        logger.warning("Copyright risk detection failed: %s", det_exc)
+                        highlight.music_risk = "UNKNOWN"
+                        highlight.music_confidence = 0.0
                 highlight.final_score = scorer._compute_weighted_score(
                     highlight, state.loudness_spikes, state.chat_spikes
                 )
@@ -1108,7 +1156,11 @@ async def submit_highlights(url: str, highlights: str) -> str:
                     "No valid highlights found in payload (check start/end timestamps)."
                 )
 
+            pre_filter_count = len(accepted)
+            accepted = Scorer._deduplicate(accepted)
             accepted.sort(key=lambda h: h.final_score, reverse=True)
+            accepted = accepted[: max(0, int(scorer.max_clips))]
+            dropped_count = pre_filter_count - len(accepted)
             state.highlights = list(accepted)
             state.selected_highlights = list(accepted)
             if accepted:
@@ -1132,6 +1184,8 @@ async def submit_highlights(url: str, highlights: str) -> str:
                 "url": clean_url,
                 "accepted_count": len(accepted),
                 "rejected_count": rejected_count,
+                "rejected": rejected_reasons,
+                "dropped_count": dropped_count,
                 "status": state.status.name.lower(),
                 "highlights": [h.to_dict() for h in accepted],
             }
@@ -1154,7 +1208,7 @@ async def render_clip(
     narration_outro: str = "",
     context_badge: str = "",
     sub_clips_json: str = "[]",
-    mode: str = "auto",
+    mode: str | None = None,
     voice_intro_path: str = "",
     voice_outro_path: str = "",
     breakdown_commentary: str = "",
@@ -1182,6 +1236,12 @@ async def render_clip(
         cache = _get_cache(config)
         pipeline = Pipeline(config)
         scorer = _MCPScorer(config)
+
+        duration_error = _duration_bound_error(
+            float(end) - float(start), scorer.min_clip_seconds, scorer.max_clip_seconds
+        )
+        if duration_error:
+            return _json_error(f"Rejected clip range: {duration_error}.")
 
         base_mode = pipeline._resolve_base_mode(mode)
 
@@ -1312,7 +1372,9 @@ async def render_clip(
 
 
 @mcp.tool()
-async def render_all_selected(url: str, mode: str = "auto") -> str:
+async def render_all_selected(
+    url: str, mode: str | None = None, force: bool = False
+) -> str:
     """Render all selected highlights stored in StepCache for a stream."""
     rendered: list[ClipResult] = []
     clean_url = ""
@@ -1344,9 +1406,14 @@ async def render_all_selected(url: str, mode: str = "auto") -> str:
             existing_clips = list(state.clips)
             base_index = len(existing_clips)
 
+            skipped_count = 0
+            rendered_modes: list[str] = []
             try:
                 for idx, highlight in enumerate(selected_highlights, start=1):
-                    clip_result, _ = await _render_single_highlight(
+                    if not force and _has_rendered_clip(existing_clips + rendered, highlight):
+                        skipped_count += 1
+                        continue
+                    clip_result, clip_mode = await _render_single_highlight(
                         pipeline=pipeline,
                         config=config,
                         url=clean_url,
@@ -1358,6 +1425,7 @@ async def render_all_selected(url: str, mode: str = "auto") -> str:
                         min_clip_index=base_index + idx,
                     )
                     rendered.append(clip_result)
+                    rendered_modes.append(clip_mode)
                     # Persist incremental clip progress so mid-batch failures never orphan rendered files
                     state.clips = _merge_clip_results(existing_clips, rendered)
                     state.status = PipelineStatus.ASSEMBLING
@@ -1392,8 +1460,12 @@ async def render_all_selected(url: str, mode: str = "auto") -> str:
                 "url": clean_url,
                 "mode": base_mode,
                 "rendered_count": len(rendered),
+                "skipped_count": skipped_count,
                 "status": state.status.name.lower(),
-                "clips": [c.to_dict() for c in rendered],
+                "clips": [
+                    {**c.to_dict(), "mode": m}
+                    for c, m in zip(rendered, rendered_modes)
+                ],
             }
         )
     except Exception as exc:
@@ -1521,9 +1593,12 @@ async def cleanup_temp(url: str = "") -> str:
                     failed_files.append({"path": str(path), "error": str(err)})
 
         if clean_url:
-            state = cache.load_state(clean_url)
-            targets = _collect_temp_files_for_stream(temp_dir, cache, clean_url, state)
-            _delete_paths(targets)
+            async with _get_url_lock(cache.get_cache_key(clean_url)):
+                state = cache.load_state(clean_url)
+                targets = _collect_temp_files_for_stream(
+                    temp_dir, cache, clean_url, state
+                )
+                _delete_paths(targets)
             payload: dict[str, Any] = {
                 "scope": "stream",
                 "url": clean_url,
