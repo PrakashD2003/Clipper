@@ -1748,7 +1748,10 @@ async def _execute_render_clip(p: dict[str, Any], progress: JobProgress) -> dict
 
         if state is not None:
             highlight.final_score = scorer._compute_weighted_score(
-                highlight, state.loudness_spikes, state.chat_spikes
+                highlight,
+                state.loudness_spikes,
+                state.chat_spikes,
+                heatmap_spikes=getattr(state, "heatmap_spikes", None) or [],
             )
             if state.transcript is not None:
                 highlight.word_timestamps = scorer._extract_words_for_range(
