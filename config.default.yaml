@@ -55,11 +55,21 @@ analysis:
     high_risk_threshold: 0.65
     low_risk_threshold: 0.35
 
-  # Signal weights (must sum to 1.0)
+  # Signal weights (must sum to 1.0). A modality with no data for the stream (no chat replay,
+  # no most-replayed heatmap) is dropped and the remaining weights renormalize.
   weights:
-    loudness: 0.25
-    chat_velocity: 0.25
-    llm_score: 0.50
+    loudness: 0.20
+    chat_velocity: 0.20
+    heatmap: 0.20         # YouTube 'Most replayed' viewer-rewatch heatmap
+    llm_score: 0.40
+
+  # YouTube 'Most replayed' heatmap (free via yt-dlp). Bins are coarse (~1/100 of the video), so
+  # peaks are regional boosts, not exact clip boundaries.
+  heatmap:
+    enabled: true
+    threshold_std: 1.0          # peak = value >= mean + N*std ...
+    min_value: 0.5              # ... and >= this absolute heat (0..1)
+    quiet_boost_min_heat: 0.7   # heat >= this + LLM score >= 7 -> quiet-moment score floor
 
   loudness:
     threshold_std: 2.5     # std deviations above mean

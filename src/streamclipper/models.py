@@ -15,6 +15,7 @@ class Platform(str, Enum):
 class SignalType(str, Enum):
     LOUDNESS = "loudness"
     CHAT_VELOCITY = "chat_velocity"
+    HEATMAP = "heatmap"
     LLM_PICK = "llm_pick"
 
 
@@ -328,6 +329,7 @@ class PipelineState(SerializableModel):
     transcript: Optional[TranscriptionResult] = None
     loudness_spikes: list[TimeRange] = field(default_factory=list)
     chat_spikes: list[TimeRange] = field(default_factory=list)
+    heatmap_spikes: list[TimeRange] = field(default_factory=list)
     highlights: list[Highlight] = field(default_factory=list)
     selected_highlights: list[Highlight] = field(default_factory=list)
     clips: list[ClipResult] = field(default_factory=list)
@@ -353,6 +355,9 @@ class PipelineState(SerializableModel):
             ],
             chat_spikes=[
                 TimeRange.from_dict(s) for s in (data.get("chat_spikes") or [])
+            ],
+            heatmap_spikes=[
+                TimeRange.from_dict(s) for s in (data.get("heatmap_spikes") or [])
             ],
             highlights=[
                 Highlight.from_dict(h) for h in (data.get("highlights") or [])

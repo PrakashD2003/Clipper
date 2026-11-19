@@ -14,6 +14,7 @@ import weakref
 from mcp.server.mcpserver import MCPServer
 
 from ..analysis.chat_velocity import ChatVelocityAnalyzer
+from ..analysis.heatmap import HeatmapAnalyzer
 from ..analysis.loudness import LoudnessDetector
 from ..analysis.transcriber import Transcriber
 from ..cache import StepCache
@@ -23,6 +24,7 @@ from ..narration_style import check_narration, narration_guide
 from ..discovery.youtube import YouTubeDiscovery
 from ..download.audio import _extract_youtube_id_from_url, download_audio
 from ..download.chat import ChatScraper
+from ..download.heatmap import get_heatmap
 from ..download.video import download_multiple_segments, download_segment
 from ..models import (
     ClipMetadata,
@@ -926,6 +928,7 @@ async def analyze_signals(url: str = "", audio_path: str = "") -> str:
         )
 
         chat_spikes: list[TimeRange] = []
+        heatmap_spikes: list[TimeRange] = []
         if target_url:
             temp_dir = Path(config.get("general.temp_dir", "./temp"))
             temp_dir.mkdir(parents=True, exist_ok=True)
@@ -965,6 +968,17 @@ async def analyze_signals(url: str = "", audio_path: str = "") -> str:
             chat_analyzer = ChatVelocityAnalyzer(config)
             chat_spikes = await asyncio.to_thread(chat_analyzer.analyze, chat_df)
 
+            # YouTube "Most replayed" heatmap: optional signal; failure -> empty + debug log.
+            try:
+                if config.get("analysis.heatmap.enabled", True):
+                    heat_segments = await asyncio.to_thread(
+                        get_heatmap, target_url, temp_dir, video_id
+                    )
+                    heatmap_spikes = HeatmapAnalyzer(config).detect(heat_segments)
+            except Exception as heat_exc:
+                logger.debug("analyze_signals heatmap skipped: %s", heat_exc)
+                heatmap_spikes = []
+
         state: PipelineState | None = None
         if target_url:
             async with _get_url_lock(cache.get_cache_key(target_url)):
@@ -985,12 +999,14 @@ async def analyze_signals(url: str = "", audio_path: str = "") -> str:
                         audio_path=target_audio,
                         loudness_spikes=loudness_spikes,
                         chat_spikes=chat_spikes,
+                        heatmap_spikes=heatmap_spikes,
                         analysis_complete=True,
                     )
                 else:
                     Pipeline._recover_failed_state(fresh_state)
                     fresh_state.loudness_spikes = loudness_spikes
                     fresh_state.chat_spikes = chat_spikes
+                    fresh_state.heatmap_spikes = heatmap_spikes
                     fresh_state.analysis_complete = True
                     if fresh_state.audio_path is None or (
                         clean_audio and not Path(fresh_state.audio_path).is_file()
@@ -1015,9 +1031,11 @@ async def analyze_signals(url: str = "", audio_path: str = "") -> str:
                 "audio_path": str(target_audio),
                 "loudness_spike_count": len(loudness_spikes),
                 "chat_spike_count": len(chat_spikes),
+                "heatmap_peak_count": len(heatmap_spikes),
                 "overlap_count": len(overlaps),
                 "loudness_spikes": [s.to_dict() for s in loudness_spikes],
                 "chat_spikes": [s.to_dict() for s in chat_spikes],
+                "heatmap_peaks": [s.to_dict() for s in heatmap_spikes],
                 "overlap_moments": overlaps,
                 "cached": state is not None,
                 "status": state.status.name.lower() if state is not None else "transcribing",
@@ -1039,7 +1057,10 @@ async def get_transcript_chunks(
 
     Resolves cached PipelineState via `url` or `StepCache.find_by_audio_path(audio_path)`.
     When only_with_signals=True (default), returns only chunks overlapping at least one
-    loudness or chat spike (reduces token usage by 60-80%).
+    loudness, chat, or YouTube "Most replayed" heatmap spike (reduces token usage by 60-80%).
+    Each chunk carries `heat` (0..1, max replay heat overlapping it; 0.0 = no heatmap data).
+    High heat + calm speech often means an exploration / graphics / lore moment worth
+    narrating (moment types graphics_detail / lore_secret) even with no loudness or chat spike.
     The response includes narration_guide + avoid_phrases: write narration following
     narration_guide (energetic, interactive gamer voice, grounded in the transcript).
     """
@@ -1072,7 +1093,15 @@ async def get_transcript_chunks(
             state.chat_spikes,
             chunk_minutes=chunk_minutes,
             only_with_signals=only_with_signals,
+            heatmap_spikes=state.heatmap_spikes,
         )
+
+        def _chunk_heat(chunk: TranscriptChunk) -> float:
+            heats = [
+                float(s.metadata.get("heat", s.score / 10.0))
+                for s in scorer._find_overlapping(state.heatmap_spikes, chunk)
+            ]
+            return round(max(heats), 4) if heats else 0.0
 
         chunks_payload = [
             {
@@ -1080,6 +1109,7 @@ async def get_transcript_chunks(
                 "start": chunk.start,
                 "end": chunk.end,
                 "text": chunk.text,
+                "heat": _chunk_heat(chunk),
                 "loudness_spikes": [s.to_dict() for s in loud],
                 "chat_spikes": [s.to_dict() for s in chat],
             }
@@ -1109,6 +1139,7 @@ async def get_transcript_chunks(
             and not state.analysis_complete
             and not state.loudness_spikes
             and not state.chat_spikes
+            and not state.heatmap_spikes
         ):
             payload["hint"] = (
                 "Signal analysis has not been run yet; call analyze_signals first "
@@ -1343,7 +1374,10 @@ async def submit_highlights(
                         highlight.music_risk = "UNKNOWN"
                         highlight.music_confidence = 0.0
                 highlight.final_score = scorer._compute_weighted_score(
-                    highlight, state.loudness_spikes, state.chat_spikes
+                    highlight,
+                    state.loudness_spikes,
+                    state.chat_spikes,
+                    heatmap_spikes=state.heatmap_spikes,
                 )
 
                 if state.transcript is not None:

@@ -16,6 +16,7 @@ from rich.console import Console
 from rich.table import Table
 
 from .analysis.chat_velocity import ChatVelocityAnalyzer
+from .analysis.heatmap import HeatmapAnalyzer
 from .analysis.loudness import LoudnessDetector
 from .analysis.transcriber import Transcriber
 from .cache import StepCache
@@ -23,6 +24,7 @@ from .config import Config, VALID_TRANSFORMATION_MODES
 from .language import resolve_narration_language
 from .download.audio import download_audio
 from .download.chat import ChatScraper
+from .download.heatmap import get_heatmap
 from .download.video import download_multiple_segments, download_segment
 from .models import (
     ClipMetadata,
@@ -609,6 +611,17 @@ class Pipeline:
         )
         return state
 
+    def _compute_heatmap_spikes(self, state: PipelineState, video_id: str) -> list[TimeRange]:
+        """YouTube 'Most replayed' peaks; any failure yields [] (optional signal)."""
+        try:
+            if not self.config.get("analysis.heatmap.enabled", True):
+                return []
+            segments = get_heatmap(state.stream_info.url, self.temp_dir, video_id)
+            return HeatmapAnalyzer(self.config).detect(segments)
+        except Exception as exc:
+            logger.debug("Heatmap analysis skipped: %s", exc)
+            return []
+
     async def _step_analyze(self, state: PipelineState) -> PipelineState:
         """Run streamed loudness spike detection and live chat velocity analysis atomically."""
         if state.audio_path is None:
@@ -648,9 +661,12 @@ class Pipeline:
         chat_analyzer = ChatVelocityAnalyzer(self.config)
         chat_spikes = await asyncio.to_thread(chat_analyzer.analyze, chat_df)
 
-        # Commit both signal lists atomically so partial failure never skips chat analysis on retry
+        heatmap_spikes = await asyncio.to_thread(self._compute_heatmap_spikes, state, video_id)
+
+        # Commit all signal lists atomically so partial failure never skips chat analysis on retry
         state.loudness_spikes = loudness_spikes
         state.chat_spikes = chat_spikes
+        state.heatmap_spikes = heatmap_spikes
         state.analysis_complete = True
         state.status = PipelineStatus.SCORING
         return state
@@ -672,6 +688,7 @@ class Pipeline:
             state.loudness_spikes,
             state.chat_spikes,
             audio_path=state.audio_path,
+            **({"heatmap_spikes": state.heatmap_spikes} if state.heatmap_spikes else {}),
         )
         state.requested_max_clips = (
             int(max_clips)

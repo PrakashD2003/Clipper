@@ -277,9 +277,10 @@ class TestConfigSystem:
 
         cfg = Config(hardware_profile=profile)
 
-        assert cfg.get("analysis.weights.loudness") == 0.25
-        assert cfg.get("analysis.weights.chat_velocity") == 0.25
-        assert cfg.get("analysis.weights.llm_score") == 0.50
+        assert cfg.get("analysis.weights.loudness") == 0.20
+        assert cfg.get("analysis.weights.chat_velocity") == 0.20
+        assert cfg.get("analysis.weights.heatmap") == 0.20
+        assert cfg.get("analysis.weights.llm_score") == 0.40
         assert cfg.get("video.resolution") == [1080, 1920]
         assert cfg.get("captions.highlight_color") == "#FFD700"
         assert cfg.get("nonexistent.nested.key", "fallback") == "fallback"

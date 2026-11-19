@@ -89,6 +89,7 @@ class StepCache:
             "requested_max_clips": state.requested_max_clips,
             "loudness_spikes": [s.to_dict() for s in state.loudness_spikes],
             "chat_spikes": [s.to_dict() for s in state.chat_spikes],
+            "heatmap_spikes": [s.to_dict() for s in state.heatmap_spikes],
             "highlights": [h.to_dict() for h in state.highlights],
             "selected_highlights": [h.to_dict() for h in state.selected_highlights],
             "clips": [c.to_dict() for c in state.clips],
@@ -124,6 +125,9 @@ class StepCache:
                 ],
                 chat_spikes=[
                     TimeRange.from_dict(s) for s in (data.get("chat_spikes") or [])
+                ],
+                heatmap_spikes=[
+                    TimeRange.from_dict(s) for s in (data.get("heatmap_spikes") or [])
                 ],
                 highlights=[
                     Highlight.from_dict(h) for h in (data.get("highlights") or [])

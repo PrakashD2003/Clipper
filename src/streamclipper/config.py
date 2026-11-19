@@ -65,7 +65,9 @@ def load_env_files(paths: list[Path] | None = None) -> list[str]:
                 loaded.append(key)
     return loaded
 
-VALID_WEIGHT_KEYS = frozenset({"loudness", "chat_velocity", "llm_score"})
+VALID_WEIGHT_KEYS = frozenset({"loudness", "chat_velocity", "heatmap", "llm_score"})
+# Keys a user override may omit (backward compat: pre-heatmap configs list only three weights).
+OPTIONAL_WEIGHT_KEYS = frozenset({"heatmap"})
 VALID_GAME_FITS = frozenset({"full", "balanced"})
 VALID_TRANSFORMATION_MODES = frozenset({"auto", "narrative", "story", "breakdown", "raw", "top3"})
 
@@ -265,6 +267,11 @@ class Config:
                     f"got {type(loaded_user).__name__}"
                 )
             self._data = self._deep_merge(self._data, user_data)
+            _analysis = user_data.get("analysis")
+            _user_weights = _analysis.get("weights") if isinstance(_analysis, dict) else None
+            if isinstance(_user_weights, dict) and "heatmap" not in _user_weights:
+                # Pre-heatmap user override: keep their weights summing to 1.0 (heatmap off).
+                self._data["analysis"]["weights"]["heatmap"] = 0.0
 
         self._raw_auto_keys = {
             key: self.get(key) == "auto"
@@ -319,7 +326,7 @@ class Config:
                 f"Unknown analysis.weights keys: {sorted(unknown_keys)}; "
                 f"expected subset of {sorted(VALID_WEIGHT_KEYS)}"
             )
-        missing_keys = VALID_WEIGHT_KEYS - set(weights.keys())
+        missing_keys = VALID_WEIGHT_KEYS - OPTIONAL_WEIGHT_KEYS - set(weights.keys())
         if missing_keys:
             raise ValueError(
                 f"Missing required analysis.weights keys: {sorted(missing_keys)}"
