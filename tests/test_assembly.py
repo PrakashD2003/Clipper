@@ -1915,105 +1915,17 @@ def _v3_exporter(tmp_path: Path):
 
 
 def _v3_clip():
-    from unittest.mock import MagicMock
+    class _Clip:  # plain object: MagicMock would recurse forever in _close_clip_handles
+        duration = 20.0
+        audio = object()
 
-    clip = MagicMock()
-    clip.duration = 20.0
-    clip.audio = object()
-    clip.write_videofile.side_effect = lambda path, **kw: Path(path).write_bytes(b"v")
-    return clip
+        def write_videofile(self, path, **kw):
+            Path(path).write_bytes(b"v")
 
+        def close(self):
+            pass
 
-def test_E7_normalize_audio_called_when_no_mix_ran(tmp_path: Path) -> None:
-    exporter, narrator = _v3_exporter(tmp_path)
-
-    def _norm(src, dst):
-        Path(dst).write_bytes(b"n")
-        return Path(dst)
-
-    narrator.normalize_audio.side_effect = _norm
-    seen = {}
-
-    def _finalize(src, dst):
-        seen["src"] = Path(src).name
-        Path(dst).write_bytes(b"f")
-        return Path(dst)
-
-    exporter._finalize_without_captions = _finalize  # type: ignore[method-assign]
-    exporter.export(
-        _v3_clip(), [], 0.0, tmp_path / "o.mp4", mode="narrative"
-    )
-    assert narrator.normalize_audio.called
-    assert seen["src"] == "intermediate_norm.mp4"
-    assert not narrator.mix_narration_with_ducking.called
-
-
-def test_E4_E6_callout_and_duck_full_reach_the_mix(tmp_path: Path) -> None:
-    exporter, narrator = _v3_exporter(tmp_path)
-    narrator.prepare_callout_track.return_value = tmp_path / "callout.wav"
-
-    def _mix(**kw):
-        Path(kw["output_video"]).write_bytes(b"m")
-        return Path(kw["output_video"])
-
-    narrator.mix_narration_with_ducking.side_effect = _mix
-    exporter._finalize_without_captions = lambda s, d: Path(d).write_bytes(b"f") or Path(d)  # type: ignore[method-assign]
-    exporter.export(
-        _v3_clip(),
-        [],
-        0.0,
-        tmp_path / "o.mp4",
-        mode="narrative",
-        callout="Watch the tire",
-        callout_start=8.0,
-        duck_full=True,
-        layout="LAYOUT",
-    )
-    kw = narrator.mix_narration_with_ducking.call_args[1]
-    assert kw["callout_wav"] == tmp_path / "callout.wav"
-    assert kw["callout_start"] == 8.0
-    assert kw["duck_full"] is True
-    ass_kw = exporter.caption_burner.generate_ass.call_args[1]
-    assert ass_kw["layout"] == "LAYOUT"
-    assert ass_kw["callout"] == "Watch the tire"
-    assert ass_kw["callout_window"][0] == 8.0
-
-
-
-# ---------------------------------------------------------------------------
-# Output Quality v3 - Batch E exporter wiring (E4 / E6 / E7)
-# ---------------------------------------------------------------------------
-
-
-def _v3_exporter(tmp_path: Path):
-    from unittest.mock import MagicMock
-
-    from streamclipper.output.exporter import Exporter
-
-    cfg = _make_config(
-        tmp_path,
-        overrides={"general": {"temp_dir": str(tmp_path / "temp")}},
-        video_codec="libx264",
-    )
-    exporter = Exporter(cfg)
-    narrator = MagicMock()
-    narrator.enabled = True
-    narrator.mode = "narrative"
-    narrator.prepare_narration_tracks.return_value = (None, None)
-    narrator._probe_audio_duration.return_value = 2.0
-    exporter.narrator = narrator
-    exporter.caption_burner = MagicMock()
-    return exporter, narrator
-
-
-def _v3_clip():
-    from unittest.mock import MagicMock
-
-    clip = MagicMock()
-    clip.duration = 20.0
-    clip.audio = object()
-    clip.write_videofile.side_effect = lambda path, **kw: Path(path).write_bytes(b"v")
-    return clip
+    return _Clip()
 
 
 def test_E7_normalize_audio_called_when_no_mix_ran(tmp_path: Path) -> None:
@@ -2099,13 +2011,113 @@ def _v3_exporter(tmp_path: Path):
 
 
 def _v3_clip():
+    class _Clip:  # plain object: MagicMock would recurse forever in _close_clip_handles
+        duration = 20.0
+        audio = object()
+
+        def write_videofile(self, path, **kw):
+            Path(path).write_bytes(b"v")
+
+        def close(self):
+            pass
+
+    return _Clip()
+
+
+def test_E7_normalize_audio_called_when_no_mix_ran(tmp_path: Path) -> None:
+    exporter, narrator = _v3_exporter(tmp_path)
+
+    def _norm(src, dst):
+        Path(dst).write_bytes(b"n")
+        return Path(dst)
+
+    narrator.normalize_audio.side_effect = _norm
+    seen = {}
+
+    def _finalize(src, dst):
+        seen["src"] = Path(src).name
+        Path(dst).write_bytes(b"f")
+        return Path(dst)
+
+    exporter._finalize_without_captions = _finalize  # type: ignore[method-assign]
+    exporter.export(
+        _v3_clip(), [], 0.0, tmp_path / "o.mp4", mode="narrative"
+    )
+    assert narrator.normalize_audio.called
+    assert seen["src"] == "intermediate_norm.mp4"
+    assert not narrator.mix_narration_with_ducking.called
+
+
+def test_E4_E6_callout_and_duck_full_reach_the_mix(tmp_path: Path) -> None:
+    exporter, narrator = _v3_exporter(tmp_path)
+    narrator.prepare_callout_track.return_value = tmp_path / "callout.wav"
+
+    def _mix(**kw):
+        Path(kw["output_video"]).write_bytes(b"m")
+        return Path(kw["output_video"])
+
+    narrator.mix_narration_with_ducking.side_effect = _mix
+    exporter._finalize_without_captions = lambda s, d: Path(d).write_bytes(b"f") or Path(d)  # type: ignore[method-assign]
+    exporter.export(
+        _v3_clip(),
+        [],
+        0.0,
+        tmp_path / "o.mp4",
+        mode="narrative",
+        callout="Watch the tire",
+        callout_start=8.0,
+        duck_full=True,
+        layout="LAYOUT",
+    )
+    kw = narrator.mix_narration_with_ducking.call_args[1]
+    assert kw["callout_wav"] == tmp_path / "callout.wav"
+    assert kw["callout_start"] == 8.0
+    assert kw["duck_full"] is True
+    ass_kw = exporter.caption_burner.generate_ass.call_args[1]
+    assert ass_kw["layout"] == "LAYOUT"
+    assert ass_kw["callout"] == "Watch the tire"
+    assert ass_kw["callout_window"][0] == 8.0
+
+
+
+# ---------------------------------------------------------------------------
+# Output Quality v3 - Batch E exporter wiring (E4 / E6 / E7)
+# ---------------------------------------------------------------------------
+
+
+def _v3_exporter(tmp_path: Path):
     from unittest.mock import MagicMock
 
-    clip = MagicMock()
-    clip.duration = 20.0
-    clip.audio = object()
-    clip.write_videofile.side_effect = lambda path, **kw: Path(path).write_bytes(b"v")
-    return clip
+    from streamclipper.output.exporter import Exporter
+
+    cfg = _make_config(
+        tmp_path,
+        overrides={"general": {"temp_dir": str(tmp_path / "temp")}},
+        video_codec="libx264",
+    )
+    exporter = Exporter(cfg)
+    narrator = MagicMock()
+    narrator.enabled = True
+    narrator.mode = "narrative"
+    narrator.prepare_narration_tracks.return_value = (None, None)
+    narrator._probe_audio_duration.return_value = 2.0
+    exporter.narrator = narrator
+    exporter.caption_burner = MagicMock()
+    return exporter, narrator
+
+
+def _v3_clip():
+    class _Clip:  # plain object: MagicMock would recurse forever in _close_clip_handles
+        duration = 20.0
+        audio = object()
+
+        def write_videofile(self, path, **kw):
+            Path(path).write_bytes(b"v")
+
+        def close(self):
+            pass
+
+    return _Clip()
 
 
 def test_E7_normalize_audio_called_when_no_mix_ran(tmp_path: Path) -> None:
