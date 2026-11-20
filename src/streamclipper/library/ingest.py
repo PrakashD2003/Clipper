@@ -1,4 +1,5 @@
 """Ingestion logic for registering and indexing sources into the library."""
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -32,6 +33,10 @@ async def add_source(
         streamer=channel,
         force=force,
     )
+    if state.transcript is None:
+        raise RuntimeError(
+            f"Source not processed (blocked streamer or incomplete analysis): {url}"
+        )
 
     # Locate chat cache if available
     temp_dir = Path(config.get("general.temp_dir", "./temp"))
@@ -53,7 +58,7 @@ async def add_source(
                 break
 
     index = LibraryIndex(config)
-    return index.index_state(state, kind=clean_kind, chat_df=chat_df)
+    return await asyncio.to_thread(index.index_state, state, kind=clean_kind, chat_df=chat_df)
 
 
 def index_cached_states(
@@ -108,7 +113,10 @@ def index_cached_states(
                     if chat_df is not None and not chat_df.empty:
                         break
 
-            source = index.index_state(state, kind="stream", chat_df=chat_df)
+            # Keep the kind a source was added with (gameplay/official must survive re-import).
+            existing = index.get_source(cache_key)
+            kind = existing.kind if existing is not None and existing.kind else "stream"
+            source = index.index_state(state, kind=kind, chat_df=chat_df)
             indexed_sources.append(source)
         except Exception as exc:
             logger.warning("Error indexing cached state %s: %s", cache_file, exc)

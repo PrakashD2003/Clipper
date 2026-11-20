@@ -717,3 +717,54 @@ def test_T1_kind_case_normalization(tmp_path: Path) -> None:
     hit = SearchHit.from_dict({"source_id": "s1", "kind": "GAMEPLAY"})
     assert hit.kind == "gameplay"
 
+
+
+def test_T1_review_import_cache_keeps_existing_kind(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    cache = StepCache(config)
+    s = _build_test_state(
+        url="https://youtube.com/watch?v=official1",
+        game="GTA6",
+        segments=[TranscriptSegment(start=5.0, end=15.0, text="Official trailer reveal", words=[])],
+    )
+    cache.save_state(s)
+    index = LibraryIndex(config)
+    index.index_state(s, kind="official")
+    reimported = index_cached_states(config)
+    assert [src.kind for src in reimported] == ["official"]
+    assert index.get_source(cache.get_cache_key(s.stream_info.url)).kind == "official"
+
+
+def test_T1_review_multiword_query_falls_back_to_any_term(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    s = _build_test_state(
+        url="https://youtube.com/watch?v=orq1",
+        game="GTA6",
+        segments=[TranscriptSegment(start=5.0, end=15.0, text="we found the casino entrance", words=[])],
+    )
+    index = LibraryIndex(config)
+    index.index_state(s, kind="stream")
+    hits = index.search("secret casino heist")
+    assert hits and "casino" in hits[0].snippet.lower()
+
+
+@pytest.mark.asyncio
+async def test_T1_review_add_source_rejects_unprocessed_state(tmp_path: Path, monkeypatch) -> None:
+    from streamclipper.pipeline import Pipeline
+
+    config = _make_config(tmp_path)
+    blocked = PipelineState(
+        stream_info=StreamInfo(
+            url="https://youtube.com/watch?v=blocked1", title="", platform=Platform.YOUTUBE,
+            streamer="Blocked", game="GTA6", duration_seconds=0,
+        ),
+        transcript=None,
+    )
+
+    async def _fake_prepare(self, url, **kw):
+        return blocked
+
+    monkeypatch.setattr(Pipeline, "prepare_stream", _fake_prepare)
+    with pytest.raises(RuntimeError, match="not processed"):
+        await add_source(config, blocked.stream_info.url, game="GTA6")
+    assert LibraryIndex(config).list_sources() == []

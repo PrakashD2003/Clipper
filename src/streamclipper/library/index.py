@@ -14,7 +14,7 @@ from streamclipper.models import PipelineState
 logger = logging.getLogger(__name__)
 
 
-def _escape_fts5_query(query: str) -> str:
+def _escape_fts5_query(query: str, joiner: str = " ") -> str:
     """Safely format and quote user terms for FTS5 queries."""
     cleaned = str(query or "").strip()
     if not cleaned:
@@ -27,7 +27,7 @@ def _escape_fts5_query(query: str) -> str:
             continue
         t_escaped = t.replace('"', '""')
         escaped_tokens.append(f'"{t_escaped}"')
-    return " ".join(escaped_tokens)
+    return joiner.join(escaped_tokens)
 
 
 class LibraryIndex:
@@ -47,11 +47,11 @@ class LibraryIndex:
         """Open, yield, and reliably close SQLite connection in WAL mode."""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(self.db_path))
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode = WAL;")
-        conn.execute("PRAGMA synchronous = NORMAL;")
-        self._ensure_schema(conn)
         try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode = WAL;")
+            conn.execute("PRAGMA synchronous = NORMAL;")
+            self._ensure_schema(conn)
             with conn:
                 yield conn
         finally:
@@ -157,7 +157,7 @@ class LibraryIndex:
             """
         )
         conn.execute(
-            "INSERT INTO schema_version (version, applied_at) VALUES (1, ?);",
+            "INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (1, ?);",
             (datetime.now(timezone.utc).isoformat(),),
         )
         conn.commit()
@@ -379,7 +379,7 @@ class LibraryIndex:
                 src.channel,
                 src.kind,
                 src.game,
-                bm25(segments_fts) AS bm25_val,
+                bm25(segments_fts, 1.0, 0.4) AS bm25_val,
                 snippet(segments_fts, -1, '', '', '...', 15) AS snippet_text
             FROM segments_fts f
             JOIN segments s ON f.rowid = s.id
@@ -407,6 +407,11 @@ class LibraryIndex:
         with self._get_connection() as conn:
             try:
                 rows = conn.execute(sql, params).fetchall()
+                if not rows and len(query.split()) > 1:
+                    # All-terms (AND) found nothing: fall back to any-term (OR);
+                    # bm25 still ranks windows matching more terms higher.
+                    params[0] = _escape_fts5_query(query, joiner=" OR ")
+                    rows = conn.execute(sql, params).fetchall()
             except sqlite3.OperationalError as exc:
                 logger.warning("FTS5 query failed for %r: %s", query, exc)
                 return []
