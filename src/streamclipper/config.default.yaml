@@ -212,3 +212,12 @@ library:
   window_step_seconds: 20
   max_chat_chars_per_window: 600
   heat_boost: 0.3
+  frames:
+    sheet_seconds: 90
+    grid: 3
+    sheet_width: 1152
+    proxy_height: 360
+    note_weight: 0.8
+  vision:
+    model: "qwen2.5vl:3b"
+

@@ -595,5 +595,79 @@ def library_remove(ctx: click.Context, source_id: str) -> None:
         console.print(f"[yellow]Source {source_id} not found.[/yellow]")
 
 
+@library_group.command(name="frames")
+@click.argument("source_id")
+@click.pass_context
+def library_frames(ctx: click.Context, source_id: str) -> None:
+    """Download low-res proxy and build frame contact sheets."""
+    from streamclipper.library.frames import build_contact_sheets, download_proxy_video
+    from streamclipper.library.index import LibraryIndex
+
+    cfg: Config = ctx.obj["config"]
+    index = LibraryIndex(cfg)
+    source = index.get_source(source_id)
+    if not source:
+        raise click.ClickException(f"Source '{source_id}' not found in library.")
+
+    temp_dir = Path(cfg.get("general.temp_dir", "./temp"))
+    frames_dir = temp_dir / "frames" / source_id
+    frames_dir.mkdir(parents=True, exist_ok=True)
+
+    proxy_height = int(cfg.get("library.frames.proxy_height", 360))
+    console.print(f"[cyan]Downloading {proxy_height}p proxy video for {source.title or source_id}...[/cyan]")
+    download_proxy_video(source.url, frames_dir, height=proxy_height)
+
+    console.print("[cyan]Generating contact sheets...[/cyan]")
+    sheets = build_contact_sheets(cfg, source_id)
+    console.print(f"[green]Built {len(sheets)} contact sheets in {frames_dir}[/green]")
+
+
+@library_group.command(name="describe")
+@click.argument("source_id")
+@click.option("--limit", "-l", default=None, type=int, help="Limit number of sheets to describe")
+@click.pass_context
+def library_describe(ctx: click.Context, source_id: str, limit: int | None) -> None:
+    """Run local vision model over contact sheets and store notes."""
+    from streamclipper.library.frames import build_contact_sheets
+    from streamclipper.library.index import LibraryIndex
+    from streamclipper.library.vision import VisionUnavailable, describe_sheet_ollama
+
+    cfg: Config = ctx.obj["config"]
+    index = LibraryIndex(cfg)
+    source = index.get_source(source_id)
+    if not source:
+        raise click.ClickException(f"Source '{source_id}' not found in library.")
+
+    sheets = build_contact_sheets(cfg, source_id)
+    if not sheets:
+        console.print(f"[yellow]No contact sheets found for {source_id}. Run 'library frames {source_id}' first.[/yellow]")
+        return
+
+    if limit is not None and limit > 0:
+        sheets = sheets[:limit]
+
+    vision_model = str(cfg.get("library.vision.model", "qwen2.5vl:3b") or "")
+    console.print(f"[cyan]Describing {len(sheets)} sheets using vision model '{vision_model}'...[/cyan]")
+
+    total_notes = 0
+    try:
+        for idx, sheet in enumerate(sheets, start=1):
+            console.print(f"Describing sheet {idx}/{len(sheets)} ({sheet.start:.0f}s - {sheet.end:.0f}s)...")
+            notes = describe_sheet_ollama(cfg, sheet)
+            if notes:
+                added = index.add_frame_notes(source_id, notes)
+                total_notes += added
+    except VisionUnavailable as exc:
+        console.print(f"[red]{exc}[/red]")
+        if vision_model:
+            console.print(f"[yellow]To enable local vision, install Ollama and run: ollama pull {vision_model}[/yellow]")
+        else:
+            console.print("[yellow]To enable local vision, set library.vision.model in config.yaml and run: ollama pull <model>[/yellow]")
+        return
+
+    console.print(f"[green]Successfully stored {total_notes} frame notes for {source_id}.[/green]")
+
+
+
 if __name__ == "__main__":
     cli()

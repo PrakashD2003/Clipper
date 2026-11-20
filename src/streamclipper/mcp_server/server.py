@@ -12,7 +12,7 @@ import time
 from typing import Any, AsyncIterator
 import weakref
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Image, MCPServer
 
 from . import jobs
 from .jobs import JobProgress
@@ -29,6 +29,8 @@ from ..download.audio import _extract_youtube_id_from_url, download_audio
 from ..download.chat import ChatScraper
 from ..download.heatmap import get_heatmap
 from ..download.video import download_multiple_segments, download_segment
+from ..library.frames import build_contact_sheets, download_proxy_video
+from ..library.index import LibraryIndex
 from ..models import (
     ClipMetadata,
     ClipResult,
@@ -78,7 +80,8 @@ SERVER_INSTRUCTIONS = (
     "submit_highlights requires a transcript (run transcribe_audio first) and rejects "
     "highlights that start before analysis.skip_intro_minutes. Use mode 'breakdown' (instant "
     "replay) ONLY for moment_type clutch, fail, graphics_detail or analysis with a "
-    "breakdown_commentary; reactions (hype, funny, chat_chaos, lore_secret) get narrative/story."
+    "breakdown_commentary; reactions (hype, funny, chat_chaos, lore_secret) get narrative/story. "
+    "No-commentary sources need index_frames -> get_frame_sheets -> submit_frame_notes before topic planning."
 )
 
 mcp = MCPServer("streamclipper", instructions=SERVER_INSTRUCTIONS)
@@ -2460,3 +2463,163 @@ async def cleanup_temp(url: str = "") -> str:
     except Exception as exc:
         logger.exception("cleanup_temp failed")
         return _json_error(str(exc))
+
+
+@mcp.tool()
+async def index_frames(source_id: str) -> str:
+    """Download low-resolution proxy video and generate frame contact sheets for no-commentary sources.
+
+    Runs asynchronously in the background. Poll get_render_status(job_id) until complete.
+    """
+    try:
+        clean_sid = str(source_id or "").strip()
+        if not clean_sid:
+            return _json_error("source_id is required")
+
+        config = Config()
+        index = LibraryIndex(config)
+        source = index.get_source(clean_sid)
+        if not source:
+            return _json_error(f"Source not found in library: {clean_sid}")
+
+        url = source.url
+
+        async def _execute_index_frames(progress: JobProgress) -> dict[str, Any]:
+            progress.set_stage("downloading_proxy")
+            temp_dir = Path(config.get("general.temp_dir", "./temp"))
+            frames_dir = temp_dir / "frames" / clean_sid
+            proxy_h = int(config.get("library.frames.proxy_height", 360))
+            download_proxy_video(url, frames_dir, height=proxy_h)
+
+            progress.set_stage("building_sheets")
+            sheets = build_contact_sheets(config, clean_sid)
+            return {
+                "status": "done",
+                "source_id": clean_sid,
+                "sheets_count": len(sheets),
+            }
+
+        return _start_render_job(
+            "index_frames",
+            config,
+            url,
+            1,
+            _execute_index_frames,
+        )
+    except Exception as exc:
+        logger.exception("index_frames failed")
+        return _json_error(str(exc))
+
+
+@mcp.tool()
+def get_frame_sheets(
+    source_id: str,
+    start: float = 0.0,
+    count: int = 6,
+) -> list[Any]:
+    """Retrieve frame contact sheets as MCP image content with timestamps and tagging instructions.
+
+    Returns images for up to count contact sheets starting at or after start seconds,
+    accompanied by a JSON metadata block with sheet timestamps.
+    """
+    try:
+        clean_sid = str(source_id or "").strip()
+        if not clean_sid:
+            return [_json_error("source_id is required")]
+
+        config = Config()
+        sheets = build_contact_sheets(config, clean_sid)
+        eligible = [s for s in sheets if s.end > float(start)]
+        selected = eligible[: max(0, int(count))]
+
+        meta = {
+            "source_id": clean_sid,
+            "instruction": "write one short factual note per tile: location, action, notable objects",
+            "sheets": [
+                {
+                    "start": s.start,
+                    "end": s.end,
+                    "timestamps": s.timestamps,
+                    "path": str(s.path),
+                }
+                for s in selected
+            ],
+        }
+
+        contents: list[Any] = []
+        for s in selected:
+            if s.path.is_file():
+                contents.append(Image(path=s.path))
+        contents.append(json.dumps(meta, indent=2))
+        return contents
+    except Exception as exc:
+        logger.exception("get_frame_sheets failed")
+        return [_json_error(str(exc))]
+
+
+@mcp.tool()
+def submit_frame_notes(source_id: str, notes: Any) -> str:
+    """Validate and store visual frame notes describing scenes in no-commentary video frames.
+
+    Each note must contain 't' (within source duration) and 'note' (up to 200 characters).
+    """
+    try:
+        clean_sid = str(source_id or "").strip()
+        if not clean_sid:
+            return _json_error("source_id is required")
+
+        if isinstance(notes, str):
+            try:
+                notes_list = json.loads(notes)
+            except Exception as exc:
+                return _json_error(f"Invalid JSON for notes: {exc}")
+        elif isinstance(notes, list):
+            notes_list = notes
+        else:
+            return _json_error("notes must be a JSON list of {t, note}")
+
+        if not isinstance(notes_list, list):
+            return _json_error("notes must be a list of {t, note}")
+
+        config = Config()
+        index = LibraryIndex(config)
+        source = index.get_source(clean_sid)
+        if not source:
+            return _json_error(f"Source not found in library: {clean_sid}")
+
+        duration = float(source.duration_seconds or 0.0)
+
+        validated_notes: list[dict[str, Any]] = []
+        for idx, item in enumerate(notes_list):
+            if not isinstance(item, dict):
+                return _json_error(f"Note item {idx} must be an object with 't' and 'note'")
+            if "t" not in item or "note" not in item:
+                return _json_error(f"Note item {idx} missing required 't' or 'note'")
+            try:
+                t_val = float(item["t"])
+            except (ValueError, TypeError):
+                return _json_error(f"Note item {idx} 't' must be numeric, got {item['t']!r}")
+
+            if duration > 0.0 and (t_val < 0.0 or t_val > duration + 1.0):
+                return _json_error(
+                    f"Note item {idx} timestamp {t_val} is outside source duration [0.0, {duration}]"
+                )
+            elif t_val < 0.0:
+                return _json_error(f"Note item {idx} timestamp {t_val} cannot be negative")
+
+            note_str = str(item["note"]).strip()
+            if not note_str:
+                return _json_error(f"Note item {idx} 'note' cannot be empty")
+            if len(note_str) > 200:
+                return _json_error(
+                    f"Note item {idx} exceeds 200 characters ({len(note_str)} chars): '{note_str[:30]}...'"
+                )
+
+            validated_notes.append({"t": round(t_val, 2), "note": note_str})
+
+        count = index.add_frame_notes(clean_sid, validated_notes)
+        return _json_ok({"source_id": clean_sid, "count": count, "notes_added": count})
+    except Exception as exc:
+        logger.exception("submit_frame_notes failed")
+        return _json_error(str(exc))
+
