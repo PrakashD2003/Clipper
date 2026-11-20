@@ -57,6 +57,11 @@ EXPECTED_TOOLS = {
     "get_topic_material",
     "record_topic_candidates",
     "suggest_topics",
+    "start_topic_plan",
+    "submit_topic_plan",
+    "get_topic_plan",
+    "update_topic_plan",
+    "approve_topic_plan",
 }
 
 

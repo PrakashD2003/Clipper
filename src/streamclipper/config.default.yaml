@@ -226,4 +226,11 @@ topics:
   min_sources: 2
   max_evidence: 12
   similarity_threshold: 0.5
+  long_min_seconds: 480
+  long_max_seconds: 600
+  min_narration_ratio: 0.40
+  max_clip_seconds: 20
+  max_official_clip_seconds: 10
+  short_min_seconds: 35
+  short_max_seconds: 60
 

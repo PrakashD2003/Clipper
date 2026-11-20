@@ -82,7 +82,8 @@ SERVER_INSTRUCTIONS = (
     "replay) ONLY for moment_type clutch, fail, graphics_detail or analysis with a "
     "breakdown_commentary; reactions (hype, funny, chat_chaos, lore_secret) get narrative/story. "
     "Topic workflow: library_add_source -> (no-commentary: index_frames -> get_frame_sheets -> submit_frame_notes) -> "
-    "get_topic_material -> record_topic_candidates -> user picks -> start_topic_plan (T4)."
+    "get_topic_material -> record_topic_candidates -> user picks a topic -> start_topic_plan -> submit_topic_plan -> "
+    "show outline, script and clips to the user for approval -> approve_topic_plan -> render_topic_video (T5)."
 )
 
 mcp = MCPServer("streamclipper", instructions=SERVER_INSTRUCTIONS)
@@ -2861,6 +2862,250 @@ def suggest_topics(game: str, limit: int = 10) -> str:
         })
     except Exception as exc:
         logger.exception("suggest_topics failed")
+        return _json_error(str(exc))
+
+
+@mcp.tool()
+def start_topic_plan(game: str, topic: str) -> str:
+    """Start planning a topic video by generating writing material, shape, and instructions.
+
+    Returns the assembled planning_material, a fresh plan_id, and prompt instructions.
+    The client or host LLM must draft a TopicPlan JSON following the schema and submit it
+    using submit_topic_plan.
+    NOTE: The client must show the complete outline, script, and clip list to the user and call
+    approve_topic_plan only after the user explicitly agrees.
+    """
+    try:
+        clean_game = str(game or "").strip()
+        clean_topic = str(topic or "").strip()
+        if not clean_game:
+            return _json_error("game is required")
+        if not clean_topic:
+            return _json_error("topic is required")
+
+        import uuid
+        from ..topics.discover import _slugify
+        from ..topics.planner import planning_material
+
+        config = Config()
+        material = planning_material(config, clean_game, clean_topic)
+        fresh_plan_id = f"plan_{_slugify(clean_topic)}_{uuid.uuid4().hex[:8]}"
+
+        instructions = (
+            "Write a TopicPlan JSON matching the provided schema and rules. "
+            "Include 5–7 points (or 4–6 points if story shape), 1–2 evidence clips per point, "
+            "and exactly 3 Shorts (teaser, short_a, short_b). Submit the completed JSON with "
+            "submit_topic_plan. The user must review and approve the outline, script, and clip list "
+            "before you call approve_topic_plan."
+        )
+
+        return _json_ok({
+            "plan_id": fresh_plan_id,
+            "game": clean_game,
+            "topic": clean_topic,
+            "material": material,
+            "instructions": instructions,
+        })
+    except Exception as exc:
+        logger.exception("start_topic_plan failed")
+        return _json_error(str(exc))
+
+
+@mcp.tool()
+def submit_topic_plan(plan_json: str | dict[str, Any]) -> str:
+    """Submit a drafted TopicPlan JSON for validation, clip normalization, and persistence.
+
+    Normalizes evidence clips from the library (fills url/channel/kind) and validates against
+    all topic video contracts.
+    If validation issues exist, saves the draft and returns the problems list so the client can fix
+    them with update_topic_plan.
+    If valid, saves the plan and returns a human-readable outline.
+    NOTE: The user approves the plan: the client must show the outline, script, and clip list to the
+    user and call approve_topic_plan only after the user agrees.
+    """
+    try:
+        if isinstance(plan_json, str):
+            try:
+                data = json.loads(plan_json)
+            except Exception as parse_exc:
+                return _json_error(f"Invalid JSON in plan_json: {parse_exc}")
+        elif isinstance(plan_json, dict):
+            data = plan_json
+        else:
+            return _json_error("plan_json must be a JSON string or dict")
+
+        from datetime import datetime, timezone
+        from ..topics.models import TopicPlan
+        from ..topics.planner import format_plan_outline, normalize_plan_clips, save_plan
+        from ..topics.validate import validate_plan
+
+        config = Config()
+        plan = TopicPlan.from_dict(data)
+        normalize_plan_clips(config, plan)
+        if not plan.created_at:
+            plan.created_at = datetime.now(timezone.utc).isoformat()
+
+        problems = validate_plan(config, plan)
+        plan.problems = problems
+        plan.status = "draft"
+        save_plan(config, plan)
+
+        outline = format_plan_outline(plan)
+        return _json_ok({
+            "status": "draft",
+            "plan_id": plan.plan_id,
+            "valid": len(problems) == 0,
+            "problems": problems,
+            "outline": outline,
+            "plan": plan.to_dict(),
+        })
+    except Exception as exc:
+        logger.exception("submit_topic_plan failed")
+        return _json_error(str(exc))
+
+
+@mcp.tool()
+def get_topic_plan(plan_id: str) -> str:
+    """Retrieve an existing TopicPlan by plan_id with validation status and human-readable outline.
+
+    NOTE: The user approves the plan: the client must show the outline, script, and clip list to the
+    user and call approve_topic_plan only after the user agrees.
+    """
+    try:
+        clean_id = str(plan_id or "").strip()
+        if not clean_id:
+            return _json_error("plan_id is required")
+
+        from ..topics.planner import format_plan_outline, load_plan
+        from ..topics.validate import validate_plan
+
+        config = Config()
+        plan = load_plan(config, clean_id)
+        if plan is None:
+            return _json_error(f"Topic plan '{clean_id}' not found.")
+
+        problems = validate_plan(config, plan)
+        outline = format_plan_outline(plan)
+        return _json_ok({
+            "plan_id": plan.plan_id,
+            "valid": len(problems) == 0,
+            "problems": problems,
+            "outline": outline,
+            "plan": plan.to_dict(),
+        })
+    except Exception as exc:
+        logger.exception("get_topic_plan failed")
+        return _json_error(str(exc))
+
+
+@mcp.tool()
+def update_topic_plan(plan_id: str, patch_json: str | dict[str, Any]) -> str:
+    """Apply a JSON merge-patch to a draft TopicPlan, re-validate, and persist updates.
+
+    Modifications are rejected if the plan has already been approved.
+    NOTE: The user approves the plan: the client must show the outline, script, and clip list to the
+    user and call approve_topic_plan only after the user agrees.
+    """
+    try:
+        clean_id = str(plan_id or "").strip()
+        if not clean_id:
+            return _json_error("plan_id is required")
+
+        if isinstance(patch_json, str):
+            try:
+                patch = json.loads(patch_json)
+            except Exception as parse_exc:
+                return _json_error(f"Invalid JSON in patch_json: {parse_exc}")
+        elif isinstance(patch_json, dict):
+            patch = patch_json
+        else:
+            return _json_error("patch_json must be a JSON string or dict")
+
+        from ..topics.models import TopicPlan
+        from ..topics.planner import (
+            apply_merge_patch,
+            format_plan_outline,
+            load_plan,
+            normalize_plan_clips,
+            save_plan,
+        )
+        from ..topics.validate import validate_plan
+
+        config = Config()
+        plan = load_plan(config, clean_id)
+        if plan is None:
+            return _json_error(f"Topic plan '{clean_id}' not found.")
+        if plan.status == "approved":
+            return _json_error(f"Topic plan '{clean_id}' is already approved and locked against modifications.")
+
+        merged_data = apply_merge_patch(plan.to_dict(), patch)
+        updated_plan = TopicPlan.from_dict(merged_data)
+        normalize_plan_clips(config, updated_plan)
+
+        problems = validate_plan(config, updated_plan)
+        updated_plan.problems = problems
+        save_plan(config, updated_plan)
+
+        outline = format_plan_outline(updated_plan)
+        return _json_ok({
+            "plan_id": updated_plan.plan_id,
+            "valid": len(problems) == 0,
+            "problems": problems,
+            "outline": outline,
+            "plan": updated_plan.to_dict(),
+        })
+    except Exception as exc:
+        logger.exception("update_topic_plan failed")
+        return _json_error(str(exc))
+
+
+@mcp.tool()
+def approve_topic_plan(plan_id: str) -> str:
+    """Approve a fully-valid TopicPlan and record it in the ledger to lock it for rendering.
+
+    Approve is refused if validate_plan reports any problems.
+    NOTE: The user approves the plan: the client must show the outline, script, and clip list to the
+    user and call approve_topic_plan only after the user explicitly agrees.
+    """
+    try:
+        clean_id = str(plan_id or "").strip()
+        if not clean_id:
+            return _json_error("plan_id is required")
+
+        from datetime import datetime, timezone
+        from ..topics.ledger import TopicLedger
+        from ..topics.planner import load_plan, save_plan
+        from ..topics.validate import validate_plan
+
+        config = Config()
+        plan = load_plan(config, clean_id)
+        if plan is None:
+            return _json_error(f"Topic plan '{clean_id}' not found.")
+
+        problems = validate_plan(config, plan)
+        if problems:
+            return _json_error(f"Cannot approve topic plan with validation problems: {'; '.join(problems)}")
+
+        plan.status = "approved"
+        plan.approved_at = datetime.now(timezone.utc).isoformat()
+        save_plan(config, plan)
+
+        ledger = TopicLedger(config)
+        ledger.record(
+            topic_id=plan.topic_id,
+            title=plan.topic_title or plan.video_title,
+            game=plan.game,
+            shape=plan.shape,
+            plan_id=plan.plan_id,
+        )
+
+        return _json_ok({
+            "status": "approved",
+            "plan_id": plan.plan_id,
+            "approved_at": plan.approved_at,
+        })
+    except Exception as exc:
+        logger.exception("approve_topic_plan failed")
         return _json_error(str(exc))
 
 

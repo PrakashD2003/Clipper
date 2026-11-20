@@ -740,5 +740,121 @@ def topics_ledger(ctx: click.Context, game: str | None) -> None:
     console.print(table)
 
 
+@topics_group.command(name="plan")
+@click.option("--game", "-g", required=True, help="Game name")
+@click.option("--topic", "-t", required=True, help="Topic title or idea")
+@click.pass_context
+def topics_plan(ctx: click.Context, game: str, topic: str) -> None:
+    """Draft a topic plan with outline, script, clips, and validation."""
+    from streamclipper.topics.planner import format_plan_outline, plan_topic_local
+
+    cfg: Config = ctx.obj["config"]
+    with console.status(f"[bold cyan]Drafting topic plan for '{topic}'...[/bold cyan]"):
+        plan = plan_topic_local(cfg, game, topic)
+
+    console.print(format_plan_outline(plan))
+    if plan.problems:
+        console.print("\n[yellow]Validation Problems to Resolve:[/yellow]")
+        for pb in plan.problems:
+            console.print(f"  [red]•[/red] {pb}")
+        console.print(f"\n[dim]Draft saved with ID [bold]{plan.plan_id}[/bold]. Edit plan.json and run 'streamclipper topics validate {plan.plan_id}'.[/dim]")
+    else:
+        console.print(f"\n[green]Plan is completely valid! Saved with ID [bold]{plan.plan_id}[/bold].[/green]")
+        console.print(f"[dim]Run 'streamclipper topics approve {plan.plan_id}' after reviewing outline with the user.[/dim]")
+
+
+@topics_group.command(name="show")
+@click.argument("plan_id")
+@click.pass_context
+def topics_show(ctx: click.Context, plan_id: str) -> None:
+    """Display rich outline, script, clips, Shorts slots, and timings for a topic plan."""
+    from streamclipper.topics.planner import format_plan_outline, load_plan
+    from streamclipper.topics.validate import validate_plan
+
+    cfg: Config = ctx.obj["config"]
+    plan = load_plan(cfg, plan_id)
+    if not plan:
+        console.print(f"[red]Topic plan '{plan_id}' not found.[/red]")
+        ctx.exit(1)
+
+    problems = validate_plan(cfg, plan)
+    console.print(format_plan_outline(plan))
+    if problems:
+        console.print("\n[yellow]Validation Problems:[/yellow]")
+        for pb in problems:
+            console.print(f"  [red]•[/red] {pb}")
+    else:
+        console.print("\n[green]Status: Valid and ready for approval.[/green]")
+
+
+@topics_group.command(name="validate")
+@click.argument("plan_id")
+@click.pass_context
+def topics_validate(ctx: click.Context, plan_id: str) -> None:
+    """Re-validate a topic plan (e.g. after editing plan.json) and update calculated timings."""
+    from streamclipper.topics.discover import _format_time
+    from streamclipper.topics.planner import load_plan, save_plan
+    from streamclipper.topics.validate import validate_plan
+
+    cfg: Config = ctx.obj["config"]
+    plan = load_plan(cfg, plan_id)
+    if not plan:
+        console.print(f"[red]Topic plan '{plan_id}' not found.[/red]")
+        ctx.exit(1)
+
+    problems = validate_plan(cfg, plan)
+    plan.problems = problems
+    save_plan(cfg, plan)
+
+    if problems:
+        console.print(f"[yellow]Plan '{plan_id}' has {len(problems)} validation problems:[/yellow]")
+        for pb in problems:
+            console.print(f"  [red]•[/red] {pb}")
+        ctx.exit(1)
+    else:
+        ratio = (plan.narration_seconds / plan.estimated_seconds) if plan.estimated_seconds > 0 else 0.0
+        console.print(f"[green]Plan '{plan_id}' is valid![/green]")
+        console.print(f"Estimated Length: {_format_time(plan.estimated_seconds)} ({plan.estimated_seconds:.1f}s)")
+        console.print(f"Narration Length: {_format_time(plan.narration_seconds)} ({plan.narration_seconds:.1f}s, {ratio:.1%})")
+
+
+@topics_group.command(name="approve")
+@click.argument("plan_id")
+@click.pass_context
+def topics_approve(ctx: click.Context, plan_id: str) -> None:
+    """Approve a valid topic plan and record it in the ledger."""
+    from datetime import datetime, timezone
+    from streamclipper.topics.ledger import TopicLedger
+    from streamclipper.topics.planner import load_plan, save_plan
+    from streamclipper.topics.validate import validate_plan
+
+    cfg: Config = ctx.obj["config"]
+    plan = load_plan(cfg, plan_id)
+    if not plan:
+        console.print(f"[red]Topic plan '{plan_id}' not found.[/red]")
+        ctx.exit(1)
+
+    problems = validate_plan(cfg, plan)
+    if problems:
+        console.print(f"[red]Cannot approve plan '{plan_id}' with validation problems:[/red]")
+        for pb in problems:
+            console.print(f"  [red]•[/red] {pb}")
+        ctx.exit(1)
+
+    plan.status = "approved"
+    plan.approved_at = datetime.now(timezone.utc).isoformat()
+    save_plan(cfg, plan)
+
+    ledger = TopicLedger(cfg)
+    ledger.record(
+        topic_id=plan.topic_id,
+        title=plan.topic_title or plan.video_title,
+        game=plan.game,
+        shape=plan.shape,
+        plan_id=plan.plan_id,
+    )
+    console.print(f"[green]Plan '{plan_id}' approved successfully at {plan.approved_at} and recorded in ledger![/green]")
+
+
 if __name__ == "__main__":
     cli()
