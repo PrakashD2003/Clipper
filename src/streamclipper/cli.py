@@ -417,5 +417,183 @@ def _render_hardware_profile(config: Config) -> None:
     console.print(table)
 
 
+@cli.group(name="library")
+def library_group() -> None:
+    """Manage local source library and search index for topic videos."""
+    pass
+
+
+@library_group.command(name="add")
+@click.argument("url")
+@click.option("--game", "-g", required=True, help="Game name")
+@click.option(
+    "--kind",
+    "-k",
+    type=click.Choice(["stream", "gameplay", "official"], case_sensitive=False),
+    default="stream",
+    help="Source kind",
+)
+@click.option("--channel", "-s", default=None, help="Channel / streamer name")
+@click.option("--force", "-f", is_flag=True, default=False, help="Force re-download / re-index")
+@click.pass_context
+def library_add(
+    ctx: click.Context,
+    url: str,
+    game: str,
+    kind: str,
+    channel: str | None,
+    force: bool,
+) -> None:
+    """Add and index a source video."""
+    from streamclipper.library import add_source
+
+    cfg: Config = ctx.obj["config"]
+    try:
+        source = asyncio.run(
+            add_source(cfg, url, game=game, kind=kind, channel=channel, force=force)
+        )
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    console.print(
+        f"[green]Indexed source {source.source_id}: {source.title or source.url} ({source.segment_count} segments)[/green]"
+    )
+
+
+@library_group.command(name="import-cache")
+@click.option("--game", "-g", default=None, help="Filter cached states by game")
+@click.pass_context
+def library_import_cache(ctx: click.Context, game: str | None) -> None:
+    """Index already analyzed cached streams into the library."""
+    from streamclipper.library import index_cached_states
+
+    cfg: Config = ctx.obj["config"]
+    sources = index_cached_states(cfg, game=game)
+    console.print(f"[green]Imported {len(sources)} sources from cache into library.[/green]")
+
+
+@library_group.command(name="list")
+@click.option("--game", "-g", default=None, help="Filter sources by game")
+@click.pass_context
+def library_list(ctx: click.Context, game: str | None) -> None:
+    """List indexed source videos."""
+    from streamclipper.library import LibraryIndex
+
+    cfg: Config = ctx.obj["config"]
+    index = LibraryIndex(cfg)
+    sources = index.list_sources(game=game)
+    if not sources:
+        console.print("No sources found.")
+        return
+
+    table = Table(title="Library Sources")
+    table.add_column("Channel")
+    table.add_column("Kind")
+    table.add_column("Title")
+    table.add_column("Duration")
+    table.add_column("Segments", justify="right")
+    table.add_column("Indexed")
+    for s in sources:
+        if s.duration_seconds >= 3600:
+            dur_h, rem = divmod(s.duration_seconds, 3600)
+            dur_m, dur_s = divmod(rem, 60)
+            dur_str = f"{dur_h:d}:{dur_m:02d}:{dur_s:02d}"
+        else:
+            dur_m, dur_s = divmod(s.duration_seconds, 60)
+            dur_str = f"{dur_m:02d}:{dur_s:02d}"
+        table.add_row(
+            s.channel,
+            s.kind,
+            s.title or s.url,
+            dur_str,
+            str(s.segment_count),
+            s.indexed_at[:19].replace("T", " ") if s.indexed_at else "",
+        )
+    console.print(table)
+
+
+@library_group.command(name="search")
+@click.argument("query")
+@click.option("--game", "-g", default=None, help="Filter by game")
+@click.option(
+    "--kind",
+    "-k",
+    "kinds",
+    multiple=True,
+    default=None,
+    help="Filter by kind (repeatable)",
+)
+@click.option(
+    "--channel",
+    "-s",
+    "channels",
+    multiple=True,
+    default=None,
+    help="Filter by channel (repeatable)",
+)
+@click.option("--limit", "-l", default=20, type=int, help="Max results to return")
+@click.pass_context
+def library_search(
+    ctx: click.Context,
+    query: str,
+    game: str | None,
+    kinds: tuple[str, ...],
+    channels: tuple[str, ...],
+    limit: int,
+) -> None:
+    """Search indexed library for speech, chat, and signal moments."""
+    from streamclipper.library import LibraryIndex
+
+    cfg: Config = ctx.obj["config"]
+    index = LibraryIndex(cfg)
+    hits = index.search(
+        query,
+        game=game,
+        kinds=list(kinds) if kinds else None,
+        channels=list(channels) if channels else None,
+        limit=limit,
+    )
+    if not hits:
+        console.print("No matching segments found.")
+        return
+
+    table = Table(title=f"Search Results: {query}")
+    table.add_column("Score", justify="right")
+    table.add_column("Channel")
+    table.add_column("Kind")
+    table.add_column("Time")
+    table.add_column("Snippet")
+    table.add_column("Heat", justify="right")
+    for hit in hits:
+        start_m, start_s = divmod(int(hit.start), 60)
+        end_m, end_s = divmod(int(hit.end), 60)
+        time_span = f"{start_m:02d}:{start_s:02d}–{end_m:02d}:{end_s:02d}"
+        table.add_row(
+            f"{hit.score:.2f}",
+            hit.channel,
+            hit.kind,
+            time_span,
+            hit.snippet,
+            f"{hit.heat:.2f}",
+        )
+    console.print(table)
+
+
+@library_group.command(name="remove")
+@click.argument("source_id")
+@click.pass_context
+def library_remove(ctx: click.Context, source_id: str) -> None:
+    """Remove a source video and its indexed segments from the library."""
+    from streamclipper.library import LibraryIndex
+
+    cfg: Config = ctx.obj["config"]
+    index = LibraryIndex(cfg)
+    removed = index.remove_source(source_id)
+    if removed:
+        console.print(f"[green]Removed source {source_id} from library.[/green]")
+    else:
+        console.print(f"[yellow]Source {source_id} not found.[/yellow]")
+
+
 if __name__ == "__main__":
     cli()
