@@ -81,7 +81,8 @@ SERVER_INSTRUCTIONS = (
     "highlights that start before analysis.skip_intro_minutes. Use mode 'breakdown' (instant "
     "replay) ONLY for moment_type clutch, fail, graphics_detail or analysis with a "
     "breakdown_commentary; reactions (hype, funny, chat_chaos, lore_secret) get narrative/story. "
-    "No-commentary sources need index_frames -> get_frame_sheets -> submit_frame_notes before topic planning."
+    "Topic workflow: library_add_source -> (no-commentary: index_frames -> get_frame_sheets -> submit_frame_notes) -> "
+    "get_topic_material -> record_topic_candidates -> user picks -> start_topic_plan (T4)."
 )
 
 mcp = MCPServer("streamclipper", instructions=SERVER_INSTRUCTIONS)
@@ -2622,4 +2623,244 @@ def submit_frame_notes(source_id: str, notes: Any) -> str:
     except Exception as exc:
         logger.exception("submit_frame_notes failed")
         return _json_error(str(exc))
+
+
+@mcp.tool()
+async def library_add_source(
+    url: str,
+    game: str,
+    kind: str = "stream",
+    channel: str = "",
+) -> str:
+    """Register and ingest a source video into the topic library in the background.
+
+    Runs download, transcription, and signal analysis, then indexes segments into SQLite FTS5.
+    Allowed kinds: 'stream', 'gameplay', 'official'.
+    Runs asynchronously as a background job. Poll get_render_status(job_id) until complete.
+    """
+    try:
+        clean_url = str(url or "").strip()
+        if not clean_url:
+            return _json_error("url is required")
+        clean_game = str(game or "").strip()
+        if not clean_game:
+            return _json_error("game is required")
+        clean_kind = str(kind or "stream").strip().lower()
+        if clean_kind not in {"stream", "gameplay", "official"}:
+            return _json_error(f"Invalid kind '{kind}'. Allowed kinds: 'stream', 'gameplay', 'official'")
+
+        config = Config()
+
+        async def _execute_add_source(progress: JobProgress) -> dict[str, Any]:
+            progress.set_stage("ingesting")
+            from ..library.ingest import add_source
+            src = await add_source(
+                config,
+                clean_url,
+                game=clean_game,
+                kind=clean_kind,
+                channel=channel.strip() or None,
+            )
+            return {
+                "status": "done",
+                "source_id": src.source_id,
+                "source": src.to_dict(),
+            }
+
+        return _start_render_job(
+            "library_add_source",
+            config,
+            clean_url,
+            1,
+            _execute_add_source,
+        )
+    except Exception as exc:
+        logger.exception("library_add_source failed")
+        return _json_error(str(exc))
+
+
+@mcp.tool()
+def search_library(
+    query: str,
+    game: str = "",
+    kinds: str = "",
+    channels: str = "",
+    limit: int = 20,
+) -> str:
+    """Search indexed library segments and frame notes for speech, chat, and visual evidence.
+
+    Returns JSON hits with timestamps, channel, relevance scores, and matching snippets.
+    """
+    try:
+        clean_q = str(query or "").strip()
+        if not clean_q:
+            return _json_error("query is required")
+
+        config = Config()
+        index = LibraryIndex(config)
+
+        kinds_arg: list[str] | None = None
+        if kinds:
+            kinds_arg = [k.strip() for k in kinds.split(",") if k.strip()]
+
+        channels_arg: list[str] | None = None
+        if channels:
+            channels_arg = [c.strip() for c in channels.split(",") if c.strip()]
+
+        hits = index.search(
+            clean_q,
+            game=game.strip() if game else None,
+            kinds=kinds_arg,
+            channels=channels_arg,
+            limit=max(1, limit),
+        )
+        return _json_ok({
+            "query": clean_q,
+            "game": game,
+            "hits": [h.to_dict() for h in hits],
+            "total": len(hits),
+        })
+    except Exception as exc:
+        logger.exception("search_library failed")
+        return _json_error(str(exc))
+
+
+@mcp.tool()
+def list_library(game: str = "") -> str:
+    """List all registered and indexed source videos in the library, optionally filtered by game."""
+    try:
+        config = Config()
+        index = LibraryIndex(config)
+        sources = index.list_sources(game=game.strip() if game else None)
+        return _json_ok({
+            "game": game,
+            "sources": [s.to_dict() for s in sources],
+            "total": len(sources),
+        })
+    except Exception as exc:
+        logger.exception("list_library failed")
+        return _json_error(str(exc))
+
+
+@mcp.tool()
+def get_topic_material(game: str, max_terms: int = 40) -> str:
+    """Extract salient library evidence, terms, snippets, and stats for proposing topic videos.
+
+    MCP host LLMs should review the returned terms and snippets, brainstorm 5-10 specific,
+    curiosity-driven topics with search keywords, and submit them to record_topic_candidates.
+    """
+    try:
+        clean_game = str(game or "").strip()
+        if not clean_game:
+            return _json_error("game is required")
+
+        from ..topics.discover import topic_material
+        config = Config()
+        mat = topic_material(config, clean_game, max_terms=max_terms)
+        mat["instructions"] = (
+            "Propose 5–10 specific topic videos this evidence supports. "
+            "Return them with record_topic_candidates."
+        )
+        return _json_ok(mat)
+    except Exception as exc:
+        logger.exception("get_topic_material failed")
+        return _json_error(str(exc))
+
+
+@mcp.tool()
+def record_topic_candidates(game: str, candidates: Any) -> str:
+    """Evaluate topic proposals against the library and ledger.
+
+    Accepts a JSON string or list of {title, keywords} candidate objects.
+    Evaluates evidence viability and flags topics already made or too similar to ledger entries.
+    Returns evaluated TopicCandidate objects (viable first, already-made flagged).
+    """
+    try:
+        clean_game = str(game or "").strip()
+        if not clean_game:
+            return _json_error("game is required")
+
+        from ..topics.discover import _extract_json, _slugify, evaluate_topic
+
+        if isinstance(candidates, str):
+            parsed = _extract_json(candidates)
+        else:
+            parsed = candidates
+
+        if isinstance(parsed, dict) and "candidates" in parsed:
+            parsed = parsed["candidates"]
+        elif isinstance(parsed, dict) and "topics" in parsed:
+            parsed = parsed["topics"]
+        elif isinstance(parsed, dict) and "title" in parsed:
+            parsed = [parsed]
+
+        if not isinstance(parsed, list):
+            return _json_error("candidates must be a list of objects with 'title' and 'keywords'")
+
+        config = Config()
+        evaluated = []
+        seen_slugs = set()
+
+        for item in parsed:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title", "")).strip()
+            if not title:
+                continue
+            slug = _slugify(title)
+            if slug in seen_slugs:
+                continue
+            seen_slugs.add(slug)
+
+            raw_kw = item.get("keywords") or []
+            if isinstance(raw_kw, str):
+                kw_list = [k.strip() for k in raw_kw.split(",") if k.strip()]
+            else:
+                kw_list = [str(k).strip() for k in raw_kw if str(k).strip()]
+            candidate = evaluate_topic(config, clean_game, title, kw_list)
+            if item.get("angle"):
+                candidate.description = str(item["angle"])
+            evaluated.append(candidate)
+
+        evaluated.sort(
+            key=lambda c: (
+                0 if (c.is_viable and not c.already_made) else (1 if c.is_viable else 2),
+                -len(c.evidence),
+                -sum(e.score for e in c.evidence),
+            )
+        )
+
+        return _json_ok({
+            "game": clean_game,
+            "candidates": [c.to_dict() for c in evaluated],
+            "count": len(evaluated),
+        })
+    except Exception as exc:
+        logger.exception("record_topic_candidates failed")
+        return _json_error(str(exc))
+
+
+@mcp.tool()
+def suggest_topics(game: str, limit: int = 10) -> str:
+    """Propose viable topic video ideas using the local Ollama LLM or library term clusters.
+
+    Returns evaluated TopicCandidate objects with evidence counts, source diversity, and ledger flags.
+    """
+    try:
+        clean_game = str(game or "").strip()
+        if not clean_game:
+            return _json_error("game is required")
+
+        from ..topics.discover import suggest_topics_local
+        config = Config()
+        candidates = suggest_topics_local(config, clean_game, limit=limit)
+        return _json_ok({
+            "game": clean_game,
+            "candidates": [c.to_dict() for c in candidates],
+            "count": len(candidates),
+        })
+    except Exception as exc:
+        logger.exception("suggest_topics failed")
+        return _json_error(str(exc))
+
 

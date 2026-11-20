@@ -51,6 +51,12 @@ EXPECTED_TOOLS = {
     "index_frames",
     "get_frame_sheets",
     "submit_frame_notes",
+    "library_add_source",
+    "search_library",
+    "list_library",
+    "get_topic_material",
+    "record_topic_candidates",
+    "suggest_topics",
 }
 
 

@@ -221,3 +221,9 @@ library:
   vision:
     model: "qwen2.5vl:3b"
 
+topics:
+  min_evidence: 6
+  min_sources: 2
+  max_evidence: 12
+  similarity_threshold: 0.5
+

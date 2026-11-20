@@ -668,6 +668,77 @@ def library_describe(ctx: click.Context, source_id: str, limit: int | None) -> N
     console.print(f"[green]Successfully stored {total_notes} frame notes for {source_id}.[/green]")
 
 
+@cli.group(name="topics")
+def topics_group() -> None:
+    """Discover, evaluate, and manage topic video ideas."""
+    pass
+
+
+@topics_group.command(name="suggest")
+@click.option("--game", "-g", required=True, help="Game name")
+@click.option("--limit", "-l", default=10, type=int, help="Maximum topics to suggest")
+@click.pass_context
+def topics_suggest(ctx: click.Context, game: str, limit: int) -> None:
+    """Suggest topic video ideas with evidence counts and source diversity."""
+    from streamclipper.topics.discover import suggest_topics_local
+
+    cfg: Config = ctx.obj["config"]
+    candidates = suggest_topics_local(cfg, game, limit=limit)
+    if not candidates:
+        console.print(f"[yellow]No viable topic candidates found for '{game}'.[/yellow]")
+        return
+
+    table = Table(title=f"Suggested Topic Videos — {game}")
+    table.add_column("Title", style="cyan")
+    table.add_column("Evidence", justify="right")
+    table.add_column("Sources", justify="right")
+    table.add_column("Channels", justify="right")
+    table.add_column("Already Made", justify="center")
+
+    for c in candidates:
+        made_str = "[yellow]Yes[/yellow]" if c.already_made else "[green]No[/green]"
+        table.add_row(
+            c.title,
+            str(len(c.evidence)),
+            str(c.source_count),
+            str(c.channel_count),
+            made_str,
+        )
+    console.print(table)
+
+
+@topics_group.command(name="ledger")
+@click.option("--game", "-g", default=None, help="Filter ledger entries by game")
+@click.pass_context
+def topics_ledger(ctx: click.Context, game: str | None) -> None:
+    """View produced topic videos recorded in the ledger."""
+    from streamclipper.topics.ledger import TopicLedger
+
+    cfg: Config = ctx.obj["config"]
+    ledger = TopicLedger(cfg)
+    entries = ledger.entries(game or "")
+    if not entries:
+        console.print("No ledger entries found.")
+        return
+
+    title_str = f"Topic Ledger — {game}" if game else "Topic Ledger"
+    table = Table(title=title_str)
+    table.add_column("Topic ID", style="dim")
+    table.add_column("Title", style="cyan")
+    table.add_column("Game", style="green")
+    table.add_column("Shape", style="magenta")
+    table.add_column("Plan ID", style="dim")
+
+    for e in entries:
+        table.add_row(
+            str(e.get("topic_id", "")),
+            str(e.get("title", "")),
+            str(e.get("game", "")),
+            str(e.get("shape", "")),
+            str(e.get("plan_id", "")),
+        )
+    console.print(table)
+
 
 if __name__ == "__main__":
     cli()
