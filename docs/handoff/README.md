@@ -37,3 +37,18 @@ assumes these rules; they are repeated at the top of each brief.
    changed (one line each), decisions you made, and anything left undone.
 
 The lead session reviews the diff, runs the full suite, and merges.
+
+## Queue (run in order; start each only after the lead confirms the previous merge)
+
+| # | Brief | Builds |
+| :--- | :--- | :--- |
+| 01 | `01-ytdlp-auth-opts.md` | shared yt-dlp cookie/JS helper — merged |
+| 02 | `02-T1-source-library.md` | source library + FTS5 index — merged |
+| 03 | `03-T2-frame-notes.md` | frame contact sheets + frame notes |
+| 04 | `04-T3-topic-discovery.md` | topic discovery + library MCP tools |
+| 05 | `05-T4-topic-planner.md` | topic plans, validation, approval |
+| 06 | `06-T5-longform-render.md` | long 16:9 renderer, chapters, thumbnail |
+| 07 | `07-T6-topic-shorts.md` | topic Shorts + user guide |
+
+Report hygiene: if you amend after writing the REPORT, the hash inside it goes stale — give the
+final `git rev-parse HEAD` in your chat reply as well.
