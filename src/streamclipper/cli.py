@@ -675,20 +675,25 @@ def topics_group() -> None:
 
 
 @topics_group.command(name="suggest")
-@click.option("--game", "-g", required=True, help="Game name")
+@click.argument("game_arg", required=False, default=None, metavar="[GAME]")
+@click.option("--game", "-g", default=None, help="Game name")
 @click.option("--limit", "-l", default=10, type=int, help="Maximum topics to suggest")
 @click.pass_context
-def topics_suggest(ctx: click.Context, game: str, limit: int) -> None:
+def topics_suggest(ctx: click.Context, game_arg: str | None, game: str | None, limit: int) -> None:
     """Suggest topic video ideas with evidence counts and source diversity."""
     from streamclipper.topics.discover import suggest_topics_local
 
+    resolved_game = (game or game_arg or "").strip()
+    if not resolved_game:
+        raise click.UsageError("Missing required game name. Provide either [GAME] argument or --game/-g option.")
+
     cfg: Config = ctx.obj["config"]
-    candidates = suggest_topics_local(cfg, game, limit=limit)
+    candidates = suggest_topics_local(cfg, resolved_game, limit=limit)
     if not candidates:
-        console.print(f"[yellow]No viable topic candidates found for '{game}'.[/yellow]")
+        console.print(f"[yellow]No viable topic candidates found for '{resolved_game}'.[/yellow]")
         return
 
-    table = Table(title=f"Suggested Topic Videos — {game}")
+    table = Table(title=f"Suggested Topic Videos — {resolved_game}")
     table.add_column("Title", style="cyan")
     table.add_column("Evidence", justify="right")
     table.add_column("Sources", justify="right")
@@ -708,20 +713,22 @@ def topics_suggest(ctx: click.Context, game: str, limit: int) -> None:
 
 
 @topics_group.command(name="ledger")
+@click.argument("game_arg", required=False, default=None, metavar="[GAME]")
 @click.option("--game", "-g", default=None, help="Filter ledger entries by game")
 @click.pass_context
-def topics_ledger(ctx: click.Context, game: str | None) -> None:
+def topics_ledger(ctx: click.Context, game_arg: str | None, game: str | None) -> None:
     """View produced topic videos recorded in the ledger."""
     from streamclipper.topics.ledger import TopicLedger
 
+    resolved_game = (game or game_arg or "").strip()
     cfg: Config = ctx.obj["config"]
     ledger = TopicLedger(cfg)
-    entries = ledger.entries(game or "")
+    entries = ledger.entries(resolved_game)
     if not entries:
         console.print("No ledger entries found.")
         return
 
-    title_str = f"Topic Ledger — {game}" if game else "Topic Ledger"
+    title_str = f"Topic Ledger — {resolved_game}" if resolved_game else "Topic Ledger"
     table = Table(title=title_str)
     table.add_column("Topic ID", style="dim")
     table.add_column("Title", style="cyan")
@@ -741,16 +748,31 @@ def topics_ledger(ctx: click.Context, game: str | None) -> None:
 
 
 @topics_group.command(name="plan")
-@click.option("--game", "-g", required=True, help="Game name")
-@click.option("--topic", "-t", required=True, help="Topic title or idea")
+@click.argument("game_arg", required=False, default=None, metavar="[GAME]")
+@click.argument("topic_arg", required=False, default=None, metavar="[TOPIC]")
+@click.option("--game", "-g", default=None, help="Game name")
+@click.option("--topic", "-t", default=None, help="Topic title or idea")
 @click.pass_context
-def topics_plan(ctx: click.Context, game: str, topic: str) -> None:
+def topics_plan(
+    ctx: click.Context,
+    game_arg: str | None,
+    topic_arg: str | None,
+    game: str | None,
+    topic: str | None,
+) -> None:
     """Draft a topic plan with outline, script, clips, and validation."""
     from streamclipper.topics.planner import format_plan_outline, plan_topic_local
 
+    resolved_game = (game or game_arg or "").strip()
+    resolved_topic = (topic or topic_arg or "").strip()
+    if not resolved_game or not resolved_topic:
+        raise click.UsageError(
+            "Missing required game or topic. Provide either '[GAME] [TOPIC]' arguments or '--game/-g' and '--topic/-t' options."
+        )
+
     cfg: Config = ctx.obj["config"]
-    with console.status(f"[bold cyan]Drafting topic plan for '{topic}'...[/bold cyan]"):
-        plan = plan_topic_local(cfg, game, topic)
+    with console.status(f"[bold cyan]Drafting topic plan for '{resolved_topic}'...[/bold cyan]"):
+        plan = plan_topic_local(cfg, resolved_game, resolved_topic)
 
     console.print(format_plan_outline(plan))
     if plan.problems:

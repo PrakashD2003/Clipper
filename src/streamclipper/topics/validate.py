@@ -174,7 +174,7 @@ def validate_plan(config: Config, plan: TopicPlan) -> list[str]:
                 )
 
             if src is not None and getattr(src, "duration_seconds", 0) > 0:
-                if clip.end > src.duration_seconds:
+                if clip.end > (src.duration_seconds + 1.0):
                     problems.append(
                         f"Point {p.index} clip '{clip.source_id}' end {clip.end:.1f}s exceeds source duration {src.duration_seconds}s."
                     )

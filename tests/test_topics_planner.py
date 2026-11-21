@@ -949,6 +949,17 @@ def test_T4_cli_subcommands(sample_library: tuple[Config, LibraryIndex]) -> None
     res_missing = runner.invoke(cli, ["--config", str(cfg_file), "topics", "validate", "missing_plan_id"])
     assert res_missing.exit_code != 0
 
+    # 5. plan command supports both positional and option arguments
+    with patch("streamclipper.topics.planner.plan_topic_local", return_value=valid_plan) as mock_plan:
+        res_plan_pos = runner.invoke(cli, ["--config", str(cfg_file), "topics", "plan", "GTA6", "Secret Vault"])
+        assert res_plan_pos.exit_code == 0, f"res_plan_pos failed: {res_plan_pos.output}"
+        assert mock_plan.called
+
+        mock_plan.reset_mock()
+        res_plan_opt = runner.invoke(cli, ["--config", str(cfg_file), "topics", "plan", "--game", "GTA6", "--topic", "Secret Vault"])
+        assert res_plan_opt.exit_code == 0, f"res_plan_opt failed: {res_plan_opt.output}"
+        assert mock_plan.called
+
 
 # ---------------------------------------------------------------------------
 # 11. Additional Edge Cases & Contract Safeguards

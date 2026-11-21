@@ -539,14 +539,18 @@ def test_T3_cli_topics_suggest_and_ledger(sample_library: tuple[Config, LibraryI
         plan_id="plan-123",
     )
 
-    # 2. topics ledger
+    # 2. topics ledger (option and positional)
     res_ledger = runner.invoke(cli, ["--config", str(cfg_file), "topics", "ledger", "--game", "GTA6"])
     assert res_ledger.exit_code == 0
     assert "vice-city-docks" in res_ledger.output
     assert "Vice City Docks Secrets" in res_ledger.output
     assert "numbered" in res_ledger.output
 
-    # 3. topics suggest (mocking Ollama to return the viable topic)
+    res_ledger_pos = runner.invoke(cli, ["--config", str(cfg_file), "topics", "ledger", "GTA6"])
+    assert res_ledger_pos.exit_code == 0
+    assert "vice-city-docks" in res_ledger_pos.output
+
+    # 3. topics suggest (mocking Ollama to return the viable topic, option and positional)
     with patch("ollama.Client") as mock_client_cls:
         mock_instance = MagicMock()
         mock_instance.chat.return_value = {
@@ -563,6 +567,10 @@ def test_T3_cli_topics_suggest_and_ledger(sample_library: tuple[Config, LibraryI
         assert res_suggest.exit_code == 0
         assert "Vice City Docks" in res_suggest.output
         assert "Suggested Topic Videos" in res_suggest.output
+
+        res_suggest_pos = runner.invoke(cli, ["--config", str(cfg_file), "topics", "suggest", "GTA6"])
+        assert res_suggest_pos.exit_code == 0
+        assert "Vice City Docks" in res_suggest_pos.output
 
 
 def test_T3_evidence_source_diversity_starvation(tmp_path: Path) -> None:
