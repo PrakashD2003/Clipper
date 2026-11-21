@@ -63,6 +63,7 @@ EXPECTED_TOOLS = {
     "update_topic_plan",
     "approve_topic_plan",
     "render_topic_video",
+    "render_topic_shorts",
 }
 
 

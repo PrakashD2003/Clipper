@@ -81,9 +81,8 @@ SERVER_INSTRUCTIONS = (
     "highlights that start before analysis.skip_intro_minutes. Use mode 'breakdown' (instant "
     "replay) ONLY for moment_type clutch, fail, graphics_detail or analysis with a "
     "breakdown_commentary; reactions (hype, funny, chat_chaos, lore_secret) get narrative/story. "
-    "Topic workflow: library_add_source -> (no-commentary: index_frames -> get_frame_sheets -> submit_frame_notes) -> "
-    "get_topic_material -> record_topic_candidates -> user picks a topic -> start_topic_plan -> submit_topic_plan -> "
-    "show outline, script and clips to the user for approval -> approve_topic_plan -> render_topic_video (T5)."
+    "Topic workflow: add sources -> frame notes for no-commentary -> material -> candidates -> user picks -> plan -> user approves -> "
+    "render_topic_video -> render_topic_shorts -> poll get_render_status."
 )
 
 mcp = MCPServer("streamclipper", instructions=SERVER_INSTRUCTIONS)
@@ -3152,5 +3151,53 @@ def render_topic_video(plan_id: str) -> str:
     except Exception as exc:
         logger.exception("render_topic_video failed")
         return _json_error(str(exc))
+
+
+@mcp.tool()
+def render_topic_shorts(plan_id: str, slots: str = "") -> str:
+    """Render 9:16 vertical topic Shorts (teaser and/or standalone) from an approved TopicPlan as a background job.
+
+    Composes evidence clips in blur_fill layout, applies persistent hook title, @channel credit tags,
+    voices and mixes commentary intro, callout, and outro with ducking, validates the narration gate,
+    burns ASS captions, normalizes loudness (-14 LUFS), and writes post files.
+    Refuses unapproved plans synchronously. Clients poll get_render_status(job_id).
+    NOTE: The user approves the plan: this tool must be called only after approve_topic_plan has succeeded.
+    """
+    try:
+        clean_id = str(plan_id or "").strip()
+        if not clean_id:
+            return _json_error("plan_id is required")
+
+        from ..topics.planner import load_plan
+        config = Config()
+        plan = load_plan(config, clean_id)
+        if plan is None:
+            return _json_error(f"Topic plan '{clean_id}' not found.")
+
+        if plan.status != "approved":
+            return _json_error(
+                f"Topic plan '{clean_id}' is not approved (status: '{plan.status}'). "
+                "Must be approved via approve_topic_plan before rendering."
+            )
+
+        target_slots = [s.strip().lower() for s in slots.split(",") if s.strip()] if slots else ["teaser", "short_a", "short_b"]
+        shorts_to_render = [s for s in plan.shorts if s.slot in target_slots] or plan.shorts
+        clips_planned = len(shorts_to_render) or 1
+
+        async def _execute_render_topic_shorts(progress: Any) -> dict[str, Any]:
+            from ..assembly.topic_shorts import render_topic_shorts as _render_shorts
+            return await asyncio.to_thread(_render_shorts, config, plan, slots=tuple(target_slots), progress=progress)
+
+        return _start_render_job(
+            "topic_shorts",
+            config,
+            f"topic://{plan.topic_id}",
+            clips_planned,
+            _execute_render_topic_shorts,
+        )
+    except Exception as exc:
+        logger.exception("render_topic_shorts failed")
+        return _json_error(str(exc))
+
 
 

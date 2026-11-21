@@ -904,5 +904,74 @@ def topics_render(ctx: click.Context, plan_id: str) -> None:
     )
 
 
+@topics_group.command("shorts")
+@click.argument("plan_id")
+@click.option(
+    "--slot",
+    type=click.Choice(["teaser", "short_a", "short_b"], case_sensitive=False),
+    default=None,
+    help="Render only a specific Short slot (teaser, short_a, short_b). Defaults to all.",
+)
+@click.pass_context
+def topics_shorts(ctx: click.Context, plan_id: str, slot: str | None) -> None:
+    """Render 9:16 vertical topic Shorts (teaser and/or standalone) from an approved topic plan."""
+    from streamclipper.assembly.topic_shorts import render_topic_shorts
+    from streamclipper.topics.planner import load_plan
+
+    cfg: Config = ctx.obj["config"]
+    plan = load_plan(cfg, plan_id)
+    if not plan:
+        console.print(f"[red]Topic plan '{plan_id}' not found.[/red]")
+        ctx.exit(1)
+
+    if plan.status != "approved":
+        console.print(
+            f"[red]Topic plan '{plan_id}' must be 'approved' to render (current: '{plan.status}').[/red]\n"
+            f"[yellow]Run 'streamclipper topics approve {plan_id}' first after user review.[/yellow]"
+        )
+        ctx.exit(1)
+
+    class CLIProgress:
+        def stage(self, text: str) -> None:
+            console.print(f"  [cyan]•[/cyan] {text}")
+
+    progress = CLIProgress()
+    target_slots = (slot,) if slot else ("teaser", "short_a", "short_b")
+    try:
+        with console.status(f"[bold cyan]Rendering topic shorts for '{plan.topic_title}'...[/bold cyan]") as status:
+            def update_stage(text: str) -> None:
+                status.update(f"[bold cyan]{text}...[/bold cyan]")
+                console.print(f"  [cyan]•[/cyan] {text}")
+
+            progress.stage = update_stage
+            result = render_topic_shorts(cfg, plan, slots=target_slots, progress=progress)
+    except Exception as exc:
+        console.print(f"[bold red]Render failed:[/bold red] {exc}")
+        ctx.exit(1)
+
+    rendered = result.get("rendered") or []
+    quarantined = result.get("quarantined") or []
+
+    if rendered:
+        console.print(f"\n[bold green]Rendered {len(rendered)} Short(s) successfully![/bold green]")
+        for item in rendered:
+            console.print(
+                f"  [bold]Slot:[/bold] {item.get('slot')}\n"
+                f"    [bold]Video:[/bold] {item.get('video_path')}\n"
+                f"    [bold]Duration:[/bold] {item.get('duration', 0.0):.1f}s\n"
+                f"    [bold]Post file:[/bold] {item.get('post_path')}"
+            )
+
+    if quarantined:
+        console.print(f"\n[bold yellow]Quarantined {len(quarantined)} Short(s) (narration gate):[/bold yellow]")
+        for item in quarantined:
+            console.print(
+                f"  [bold]Slot:[/bold] {item.get('slot')}\n"
+                f"    [bold]Path:[/bold] {item.get('video_path')}\n"
+                f"    [bold]Reason:[/bold] {item.get('quarantine_reason')}"
+            )
+
+
+
 if __name__ == "__main__":
     cli()

@@ -376,6 +376,39 @@ Add StreamClipper to your MCP client configuration file:
 
 ---
 
+## Topic Videos (16:9 Long-Form & 9:16 Shorts)
+
+StreamClipper includes a complete **Topic Video Pipeline** that clusters many streams and official gameplay trailers of the same game into original, narrator-led deep dives and vertical Shorts. One approved script produces:
+
+- **1 Long 16:9 Video** (8–10 minutes) with auto-spaced YouTube chapters, Ken-Burns ducked B-roll, on-screen credit pills, auto-generated 1280×720 thumbnail, and ready-to-paste `long_post.txt`.
+- **3 Vertical 9:16 Shorts** (35–60 seconds) with persistent hook title, on-screen channel credits, ducked commentary, and Hormozi captions:
+  - **1 Teaser Short (`short_teaser.mp4`)**: Hooks viewers and points directly to the long video via YouTube Studio's "Related Video" feature.
+  - **2 Standalone Shorts (`short_a.mp4`, `short_b.mp4`)**: Independent spotlight videos built around distinct strong beats, with zero footage repetition between them.
+
+### Quick Workflow
+```bash
+# 1. Ingest sources (streamer VODs + official footage)
+streamclipper library add "https://youtube.com/watch?v=..." --channel "StreamerName" --game "GTA 6"
+
+# 2. Discover candidate topics
+streamclipper topics suggest "GTA 6"
+
+# 3. Plan outline and script (rotates numbered explainer, countdown ranking, or mystery story shape)
+streamclipper topics plan "GTA 6" "hidden-casino-secrets"
+
+# 4. Mandatory review & approval gate
+streamclipper topics show PLAN_ID
+streamclipper topics approve PLAN_ID
+
+# 5. Render 16:9 long video and 9:16 Shorts
+streamclipper topics render PLAN_ID
+streamclipper topics shorts PLAN_ID
+```
+
+For full details on the MCP tools, Ollama CLI workflows, upload checklists, and YouTube Partner Program fair-use policies, see the comprehensive [Topic Videos Guide](docs/topic-videos-guide.md).
+
+---
+
 ## Configuration Reference (`config.yaml`)
 
 StreamClipper loads `config.default.yaml` first and deep-merges your optional `config.yaml` (or `-c /path/to/config.yaml`) on top. You only need to specify keys you want to customize.
