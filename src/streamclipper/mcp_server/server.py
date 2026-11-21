@@ -3109,3 +3109,48 @@ def approve_topic_plan(plan_id: str) -> str:
         return _json_error(str(exc))
 
 
+@mcp.tool()
+def render_topic_video(plan_id: str) -> str:
+    """Render a 16:9 long topic video from an approved TopicPlan as a background job.
+
+    Downloads evidence clips, validates copyright against cached stream audio, records YouTube
+    chapters, generates thumbnail, burns narration captions and lower-third credits, mixes audio,
+    and writes long_post.txt.
+    Refuses unapproved plans synchronously. Clients poll get_render_status(job_id).
+    NOTE: The user approves the plan: this tool must be called only after approve_topic_plan has succeeded.
+    """
+    try:
+        clean_id = str(plan_id or "").strip()
+        if not clean_id:
+            return _json_error("plan_id is required")
+
+        from ..topics.planner import load_plan
+        config = Config()
+        plan = load_plan(config, clean_id)
+        if plan is None:
+            return _json_error(f"Topic plan '{clean_id}' not found.")
+
+        if plan.status != "approved":
+            return _json_error(
+                f"Topic plan '{clean_id}' is not approved (status: '{plan.status}'). "
+                "Must be approved via approve_topic_plan before rendering."
+            )
+
+        clips_planned = sum(len(pt.evidence) for pt in plan.points) or 1
+
+        async def _execute_render_topic_long(progress: Any) -> dict[str, Any]:
+            from ..assembly.longform import render_long_video
+            return await asyncio.to_thread(render_long_video, config, plan, progress=progress)
+
+        return _start_render_job(
+            "topic_long",
+            config,
+            f"topic://{plan.topic_id}",
+            clips_planned,
+            _execute_render_topic_long,
+        )
+    except Exception as exc:
+        logger.exception("render_topic_video failed")
+        return _json_error(str(exc))
+
+

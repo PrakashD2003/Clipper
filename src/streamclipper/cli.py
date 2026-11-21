@@ -856,5 +856,53 @@ def topics_approve(ctx: click.Context, plan_id: str) -> None:
     console.print(f"[green]Plan '{plan_id}' approved successfully at {plan.approved_at} and recorded in ledger![/green]")
 
 
+@topics_group.command(name="render")
+@click.argument("plan_id")
+@click.pass_context
+def topics_render(ctx: click.Context, plan_id: str) -> None:
+    """Render a 16:9 long topic video from an approved topic plan."""
+    from streamclipper.assembly.longform import render_long_video
+    from streamclipper.topics.planner import load_plan
+
+    cfg: Config = ctx.obj["config"]
+    plan = load_plan(cfg, plan_id)
+    if not plan:
+        console.print(f"[red]Topic plan '{plan_id}' not found.[/red]")
+        ctx.exit(1)
+
+    if plan.status != "approved":
+        console.print(
+            f"[red]Topic plan '{plan_id}' must be 'approved' to render (current: '{plan.status}').[/red]\n"
+            f"[yellow]Run 'streamclipper topics approve {plan_id}' first after user review.[/yellow]"
+        )
+        ctx.exit(1)
+
+    class CLIProgress:
+        def stage(self, text: str) -> None:
+            console.print(f"  [cyan]•[/cyan] {text}")
+
+    progress = CLIProgress()
+    try:
+        with console.status(f"[bold cyan]Rendering topic video '{plan.topic_title}'...[/bold cyan]") as status:
+            def update_stage(text: str) -> None:
+                status.update(f"[bold cyan]{text}...[/bold cyan]")
+                console.print(f"  [cyan]•[/cyan] {text}")
+
+            progress.stage = update_stage
+            result = render_long_video(cfg, plan, progress=progress)
+    except Exception as exc:
+        console.print(f"[bold red]Render failed:[/bold red] {exc}")
+        ctx.exit(1)
+
+    console.print(
+        f"\n[bold green]Render completed successfully![/bold green]\n"
+        f"  [bold]Video:[/bold] {result.get('video_path')}\n"
+        f"  [bold]Duration:[/bold] {result.get('duration', 0.0):.1f}s (narration share: {result.get('narration_share', 0.0)*100:.1f}%)\n"
+        f"  [bold]Chapters:[/bold] {result.get('chapters_path')}\n"
+        f"  [bold]Thumbnail:[/bold] {result.get('thumbnail_path')}\n"
+        f"  [bold]Post file:[/bold] {result.get('post_path')}\n"
+    )
+
+
 if __name__ == "__main__":
     cli()

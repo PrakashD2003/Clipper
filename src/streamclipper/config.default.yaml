@@ -234,3 +234,12 @@ topics:
   short_min_seconds: 35
   short_max_seconds: 60
 
+longform:
+  width: 1920
+  height: 1080
+  fps: 30
+  card_seconds: 2.5
+  broll_volume: 0.12
+  credit_seconds: 4.0
+  kenburns_max_zoom: 1.08
+
