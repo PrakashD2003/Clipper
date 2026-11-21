@@ -479,6 +479,24 @@ def test_T2_ollama_vision_unavailable_when_missing(tmp_path: Path) -> None:
         assert "ollama pull qwen2.5vl:3b" in str(exc_info.value)
 
 
+def test_T2_resolve_installed_model() -> None:
+    """Verify Ollama vision model name fuzzy resolution."""
+    from streamclipper.library.vision import resolve_installed_model
+
+    installed = ["qwen2.5-vl:3b-instruct", "llama3:latest", "mistral:7b"]
+
+    # Normalized match (qwen2.5vl:3b -> qwen2.5-vl:3b-instruct prefix/norm)
+    assert resolve_installed_model("qwen2.5vl:3b", installed) is not None
+    # Latest variation
+    assert resolve_installed_model("llama3", installed) == "llama3:latest"
+    # Exact
+    assert resolve_installed_model("mistral:7b", installed) == "mistral:7b"
+    # Not installed
+    assert resolve_installed_model("gemma:2b", installed) is None
+    # Empty
+    assert resolve_installed_model("", installed) is None
+
+
 def test_T2_ollama_vision_disabled(tmp_path: Path) -> None:
     """Verify VisionUnavailable raised when model is configured to empty string (disabled)."""
     config = _make_test_config(tmp_path)

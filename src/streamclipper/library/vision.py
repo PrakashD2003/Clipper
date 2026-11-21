@@ -45,15 +45,50 @@ def _extract_model_names(models_response: Any) -> list[str]:
     return names
 
 
+def resolve_installed_model(target: str, installed: list[str]) -> str | None:
+    """Resolve target model name to an installed model tag in Ollama.
+
+    Handles exact match, :latest suffix variations, and hyphen/underscore normalization
+    (e.g. qwen2.5vl:3b <-> qwen2.5-vl:3b).
+    """
+    clean_target = str(target or "").strip()
+    if not clean_target:
+        return None
+
+    # 1. Exact match
+    for inst in installed:
+        if clean_target == inst:
+            return inst
+
+    # 2. Tag with / without :latest
+    for inst in installed:
+        if clean_target == inst.removesuffix(":latest"):
+            return inst
+        if clean_target.removesuffix(":latest") == inst:
+            return inst
+
+    # 3. Normalized comparison (ignore hyphens, underscores, case)
+    def _norm(name: str) -> str:
+        base = name.removesuffix(":latest").lower()
+        return base.replace("-", "").replace("_", "")
+
+    target_norm = _norm(clean_target)
+    for inst in installed:
+        if _norm(inst) == target_norm:
+            return inst
+
+    # 4. Target base prefix match (e.g. "qwen2.5-vl:3b" matching "qwen2.5-vl:3b-instruct" or similar)
+    for inst in installed:
+        inst_norm = _norm(inst)
+        if target_norm and (inst_norm.startswith(target_norm) or target_norm.startswith(inst_norm)):
+            return inst
+
+    return None
+
+
 def _model_matches(target: str, installed: list[str]) -> bool:
     """Check whether target model matches any installed model name."""
-    if target in installed:
-        return True
-    if ":" not in target and f"{target}:latest" in installed:
-        return True
-    if target.endswith(":latest") and target[:-7] in installed:
-        return True
-    return False
+    return resolve_installed_model(target, installed) is not None
 
 
 def describe_sheet_ollama(config: Config, sheet: ContactSheet) -> list[dict[str, Any]]:
@@ -77,7 +112,8 @@ def describe_sheet_ollama(config: Config, sheet: ContactSheet) -> list[dict[str,
     try:
         models_res = client.list()
         installed_names = _extract_model_names(models_res)
-        if not _model_matches(model, installed_names):
+        resolved_model = resolve_installed_model(model, installed_names)
+        if not resolved_model:
             raise VisionUnavailable(
                 f"Vision model '{model}' not found in Ollama. Pull it with: ollama pull {model}"
             )
@@ -99,7 +135,7 @@ def describe_sheet_ollama(config: Config, sheet: ContactSheet) -> list[dict[str,
 
     try:
         response = client.chat(
-            model=model,
+            model=resolved_model,
             messages=[
                 {
                     "role": "user",
@@ -110,7 +146,7 @@ def describe_sheet_ollama(config: Config, sheet: ContactSheet) -> list[dict[str,
             format="json",
         )
     except Exception as exc:
-        raise VisionUnavailable(f"Ollama vision chat failed for model '{model}': {exc}") from exc
+        raise VisionUnavailable(f"Ollama vision chat failed for model '{resolved_model}': {exc}") from exc
 
     content = ""
     if hasattr(response, "message") and hasattr(response.message, "content"):
