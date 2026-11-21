@@ -595,5 +595,383 @@ def library_remove(ctx: click.Context, source_id: str) -> None:
         console.print(f"[yellow]Source {source_id} not found.[/yellow]")
 
 
+@library_group.command(name="frames")
+@click.argument("source_id")
+@click.pass_context
+def library_frames(ctx: click.Context, source_id: str) -> None:
+    """Download low-res proxy and build frame contact sheets."""
+    from streamclipper.library.frames import build_contact_sheets, download_proxy_video
+    from streamclipper.library.index import LibraryIndex
+
+    cfg: Config = ctx.obj["config"]
+    index = LibraryIndex(cfg)
+    source = index.get_source(source_id)
+    if not source:
+        raise click.ClickException(f"Source '{source_id}' not found in library.")
+
+    temp_dir = Path(cfg.get("general.temp_dir", "./temp"))
+    frames_dir = temp_dir / "frames" / source_id
+    frames_dir.mkdir(parents=True, exist_ok=True)
+
+    proxy_height = int(cfg.get("library.frames.proxy_height", 360))
+    console.print(f"[cyan]Downloading {proxy_height}p proxy video for {source.title or source_id}...[/cyan]")
+    download_proxy_video(source.url, frames_dir, height=proxy_height)
+
+    console.print("[cyan]Generating contact sheets...[/cyan]")
+    sheets = build_contact_sheets(cfg, source_id)
+    console.print(f"[green]Built {len(sheets)} contact sheets in {frames_dir}[/green]")
+
+
+@library_group.command(name="describe")
+@click.argument("source_id")
+@click.option("--limit", "-l", default=None, type=int, help="Limit number of sheets to describe")
+@click.pass_context
+def library_describe(ctx: click.Context, source_id: str, limit: int | None) -> None:
+    """Run local vision model over contact sheets and store notes."""
+    from streamclipper.library.frames import build_contact_sheets
+    from streamclipper.library.index import LibraryIndex
+    from streamclipper.library.vision import VisionUnavailable, describe_sheet_ollama
+
+    cfg: Config = ctx.obj["config"]
+    index = LibraryIndex(cfg)
+    source = index.get_source(source_id)
+    if not source:
+        raise click.ClickException(f"Source '{source_id}' not found in library.")
+
+    sheets = build_contact_sheets(cfg, source_id)
+    if not sheets:
+        console.print(f"[yellow]No contact sheets found for {source_id}. Run 'library frames {source_id}' first.[/yellow]")
+        return
+
+    if limit is not None and limit > 0:
+        sheets = sheets[:limit]
+
+    vision_model = str(cfg.get("library.vision.model", "qwen2.5vl:3b") or "")
+    console.print(f"[cyan]Describing {len(sheets)} sheets using vision model '{vision_model}'...[/cyan]")
+
+    total_notes = 0
+    try:
+        for idx, sheet in enumerate(sheets, start=1):
+            console.print(f"Describing sheet {idx}/{len(sheets)} ({sheet.start:.0f}s - {sheet.end:.0f}s)...")
+            notes = describe_sheet_ollama(cfg, sheet)
+            if notes:
+                added = index.add_frame_notes(source_id, notes)
+                total_notes += added
+    except VisionUnavailable as exc:
+        console.print(f"[red]{exc}[/red]")
+        if vision_model:
+            console.print(f"[yellow]To enable local vision, install Ollama and run: ollama pull {vision_model}[/yellow]")
+        else:
+            console.print("[yellow]To enable local vision, set library.vision.model in config.yaml and run: ollama pull <model>[/yellow]")
+        return
+
+    console.print(f"[green]Successfully stored {total_notes} frame notes for {source_id}.[/green]")
+
+
+@cli.group(name="topics")
+def topics_group() -> None:
+    """Discover, evaluate, and manage topic video ideas."""
+    pass
+
+
+@topics_group.command(name="suggest")
+@click.option("--game", "-g", required=True, help="Game name")
+@click.option("--limit", "-l", default=10, type=int, help="Maximum topics to suggest")
+@click.pass_context
+def topics_suggest(ctx: click.Context, game: str, limit: int) -> None:
+    """Suggest topic video ideas with evidence counts and source diversity."""
+    from streamclipper.topics.discover import suggest_topics_local
+
+    cfg: Config = ctx.obj["config"]
+    candidates = suggest_topics_local(cfg, game, limit=limit)
+    if not candidates:
+        console.print(f"[yellow]No viable topic candidates found for '{game}'.[/yellow]")
+        return
+
+    table = Table(title=f"Suggested Topic Videos — {game}")
+    table.add_column("Title", style="cyan")
+    table.add_column("Evidence", justify="right")
+    table.add_column("Sources", justify="right")
+    table.add_column("Channels", justify="right")
+    table.add_column("Already Made", justify="center")
+
+    for c in candidates:
+        made_str = "[yellow]Yes[/yellow]" if c.already_made else "[green]No[/green]"
+        table.add_row(
+            c.title,
+            str(len(c.evidence)),
+            str(c.source_count),
+            str(c.channel_count),
+            made_str,
+        )
+    console.print(table)
+
+
+@topics_group.command(name="ledger")
+@click.option("--game", "-g", default=None, help="Filter ledger entries by game")
+@click.pass_context
+def topics_ledger(ctx: click.Context, game: str | None) -> None:
+    """View produced topic videos recorded in the ledger."""
+    from streamclipper.topics.ledger import TopicLedger
+
+    cfg: Config = ctx.obj["config"]
+    ledger = TopicLedger(cfg)
+    entries = ledger.entries(game or "")
+    if not entries:
+        console.print("No ledger entries found.")
+        return
+
+    title_str = f"Topic Ledger — {game}" if game else "Topic Ledger"
+    table = Table(title=title_str)
+    table.add_column("Topic ID", style="dim")
+    table.add_column("Title", style="cyan")
+    table.add_column("Game", style="green")
+    table.add_column("Shape", style="magenta")
+    table.add_column("Plan ID", style="dim")
+
+    for e in entries:
+        table.add_row(
+            str(e.get("topic_id", "")),
+            str(e.get("title", "")),
+            str(e.get("game", "")),
+            str(e.get("shape", "")),
+            str(e.get("plan_id", "")),
+        )
+    console.print(table)
+
+
+@topics_group.command(name="plan")
+@click.option("--game", "-g", required=True, help="Game name")
+@click.option("--topic", "-t", required=True, help="Topic title or idea")
+@click.pass_context
+def topics_plan(ctx: click.Context, game: str, topic: str) -> None:
+    """Draft a topic plan with outline, script, clips, and validation."""
+    from streamclipper.topics.planner import format_plan_outline, plan_topic_local
+
+    cfg: Config = ctx.obj["config"]
+    with console.status(f"[bold cyan]Drafting topic plan for '{topic}'...[/bold cyan]"):
+        plan = plan_topic_local(cfg, game, topic)
+
+    console.print(format_plan_outline(plan))
+    if plan.problems:
+        console.print("\n[yellow]Validation Problems to Resolve:[/yellow]")
+        for pb in plan.problems:
+            console.print(f"  [red]•[/red] {pb}")
+        console.print(f"\n[dim]Draft saved with ID [bold]{plan.plan_id}[/bold]. Edit plan.json and run 'streamclipper topics validate {plan.plan_id}'.[/dim]")
+    else:
+        console.print(f"\n[green]Plan is completely valid! Saved with ID [bold]{plan.plan_id}[/bold].[/green]")
+        console.print(f"[dim]Run 'streamclipper topics approve {plan.plan_id}' after reviewing outline with the user.[/dim]")
+
+
+@topics_group.command(name="show")
+@click.argument("plan_id")
+@click.pass_context
+def topics_show(ctx: click.Context, plan_id: str) -> None:
+    """Display rich outline, script, clips, Shorts slots, and timings for a topic plan."""
+    from streamclipper.topics.planner import format_plan_outline, load_plan
+    from streamclipper.topics.validate import validate_plan
+
+    cfg: Config = ctx.obj["config"]
+    plan = load_plan(cfg, plan_id)
+    if not plan:
+        console.print(f"[red]Topic plan '{plan_id}' not found.[/red]")
+        ctx.exit(1)
+
+    problems = validate_plan(cfg, plan)
+    console.print(format_plan_outline(plan))
+    if problems:
+        console.print("\n[yellow]Validation Problems:[/yellow]")
+        for pb in problems:
+            console.print(f"  [red]•[/red] {pb}")
+    else:
+        console.print("\n[green]Status: Valid and ready for approval.[/green]")
+
+
+@topics_group.command(name="validate")
+@click.argument("plan_id")
+@click.pass_context
+def topics_validate(ctx: click.Context, plan_id: str) -> None:
+    """Re-validate a topic plan (e.g. after editing plan.json) and update calculated timings."""
+    from streamclipper.topics.discover import _format_time
+    from streamclipper.topics.planner import load_plan, save_plan
+    from streamclipper.topics.validate import validate_plan
+
+    cfg: Config = ctx.obj["config"]
+    plan = load_plan(cfg, plan_id)
+    if not plan:
+        console.print(f"[red]Topic plan '{plan_id}' not found.[/red]")
+        ctx.exit(1)
+
+    problems = validate_plan(cfg, plan)
+    plan.problems = problems
+    save_plan(cfg, plan)
+
+    if problems:
+        console.print(f"[yellow]Plan '{plan_id}' has {len(problems)} validation problems:[/yellow]")
+        for pb in problems:
+            console.print(f"  [red]•[/red] {pb}")
+        ctx.exit(1)
+    else:
+        ratio = (plan.narration_seconds / plan.estimated_seconds) if plan.estimated_seconds > 0 else 0.0
+        console.print(f"[green]Plan '{plan_id}' is valid![/green]")
+        console.print(f"Estimated Length: {_format_time(plan.estimated_seconds)} ({plan.estimated_seconds:.1f}s)")
+        console.print(f"Narration Length: {_format_time(plan.narration_seconds)} ({plan.narration_seconds:.1f}s, {ratio:.1%})")
+
+
+@topics_group.command(name="approve")
+@click.argument("plan_id")
+@click.pass_context
+def topics_approve(ctx: click.Context, plan_id: str) -> None:
+    """Approve a valid topic plan and record it in the ledger."""
+    from datetime import datetime, timezone
+    from streamclipper.topics.ledger import TopicLedger
+    from streamclipper.topics.planner import load_plan, save_plan
+    from streamclipper.topics.validate import validate_plan
+
+    cfg: Config = ctx.obj["config"]
+    plan = load_plan(cfg, plan_id)
+    if not plan:
+        console.print(f"[red]Topic plan '{plan_id}' not found.[/red]")
+        ctx.exit(1)
+
+    problems = validate_plan(cfg, plan)
+    if problems:
+        console.print(f"[red]Cannot approve plan '{plan_id}' with validation problems:[/red]")
+        for pb in problems:
+            console.print(f"  [red]•[/red] {pb}")
+        ctx.exit(1)
+
+    plan.status = "approved"
+    plan.approved_at = datetime.now(timezone.utc).isoformat()
+    save_plan(cfg, plan)
+
+    ledger = TopicLedger(cfg)
+    ledger.record(
+        topic_id=plan.topic_id,
+        title=plan.topic_title or plan.video_title,
+        game=plan.game,
+        shape=plan.shape,
+        plan_id=plan.plan_id,
+    )
+    console.print(f"[green]Plan '{plan_id}' approved successfully at {plan.approved_at} and recorded in ledger![/green]")
+
+
+@topics_group.command(name="render")
+@click.argument("plan_id")
+@click.pass_context
+def topics_render(ctx: click.Context, plan_id: str) -> None:
+    """Render a 16:9 long topic video from an approved topic plan."""
+    from streamclipper.assembly.longform import render_long_video
+    from streamclipper.topics.planner import load_plan
+
+    cfg: Config = ctx.obj["config"]
+    plan = load_plan(cfg, plan_id)
+    if not plan:
+        console.print(f"[red]Topic plan '{plan_id}' not found.[/red]")
+        ctx.exit(1)
+
+    if plan.status != "approved":
+        console.print(
+            f"[red]Topic plan '{plan_id}' must be 'approved' to render (current: '{plan.status}').[/red]\n"
+            f"[yellow]Run 'streamclipper topics approve {plan_id}' first after user review.[/yellow]"
+        )
+        ctx.exit(1)
+
+    class CLIProgress:
+        def stage(self, text: str) -> None:
+            console.print(f"  [cyan]•[/cyan] {text}")
+
+    progress = CLIProgress()
+    try:
+        with console.status(f"[bold cyan]Rendering topic video '{plan.topic_title}'...[/bold cyan]") as status:
+            def update_stage(text: str) -> None:
+                status.update(f"[bold cyan]{text}...[/bold cyan]")
+                console.print(f"  [cyan]•[/cyan] {text}")
+
+            progress.stage = update_stage
+            result = render_long_video(cfg, plan, progress=progress)
+    except Exception as exc:
+        console.print(f"[bold red]Render failed:[/bold red] {exc}")
+        ctx.exit(1)
+
+    console.print(
+        f"\n[bold green]Render completed successfully![/bold green]\n"
+        f"  [bold]Video:[/bold] {result.get('video_path')}\n"
+        f"  [bold]Duration:[/bold] {result.get('duration', 0.0):.1f}s (narration share: {result.get('narration_share', 0.0)*100:.1f}%)\n"
+        f"  [bold]Chapters:[/bold] {result.get('chapters_path')}\n"
+        f"  [bold]Thumbnail:[/bold] {result.get('thumbnail_path')}\n"
+        f"  [bold]Post file:[/bold] {result.get('post_path')}\n"
+    )
+
+
+@topics_group.command("shorts")
+@click.argument("plan_id")
+@click.option(
+    "--slot",
+    type=click.Choice(["teaser", "short_a", "short_b"], case_sensitive=False),
+    default=None,
+    help="Render only a specific Short slot (teaser, short_a, short_b). Defaults to all.",
+)
+@click.pass_context
+def topics_shorts(ctx: click.Context, plan_id: str, slot: str | None) -> None:
+    """Render 9:16 vertical topic Shorts (teaser and/or standalone) from an approved topic plan."""
+    from streamclipper.assembly.topic_shorts import render_topic_shorts
+    from streamclipper.topics.planner import load_plan
+
+    cfg: Config = ctx.obj["config"]
+    plan = load_plan(cfg, plan_id)
+    if not plan:
+        console.print(f"[red]Topic plan '{plan_id}' not found.[/red]")
+        ctx.exit(1)
+
+    if plan.status != "approved":
+        console.print(
+            f"[red]Topic plan '{plan_id}' must be 'approved' to render (current: '{plan.status}').[/red]\n"
+            f"[yellow]Run 'streamclipper topics approve {plan_id}' first after user review.[/yellow]"
+        )
+        ctx.exit(1)
+
+    class CLIProgress:
+        def stage(self, text: str) -> None:
+            console.print(f"  [cyan]•[/cyan] {text}")
+
+    progress = CLIProgress()
+    target_slots = (slot,) if slot else ("teaser", "short_a", "short_b")
+    try:
+        with console.status(f"[bold cyan]Rendering topic shorts for '{plan.topic_title}'...[/bold cyan]") as status:
+            def update_stage(text: str) -> None:
+                status.update(f"[bold cyan]{text}...[/bold cyan]")
+                console.print(f"  [cyan]•[/cyan] {text}")
+
+            progress.stage = update_stage
+            result = render_topic_shorts(cfg, plan, slots=target_slots, progress=progress)
+    except Exception as exc:
+        console.print(f"[bold red]Render failed:[/bold red] {exc}")
+        ctx.exit(1)
+
+    rendered = result.get("rendered") or []
+    quarantined = result.get("quarantined") or []
+
+    if rendered:
+        console.print(f"\n[bold green]Rendered {len(rendered)} Short(s) successfully![/bold green]")
+        for item in rendered:
+            console.print(
+                f"  [bold]Slot:[/bold] {item.get('slot')}\n"
+                f"    [bold]Video:[/bold] {item.get('video_path')}\n"
+                f"    [bold]Duration:[/bold] {item.get('duration', 0.0):.1f}s\n"
+                f"    [bold]Post file:[/bold] {item.get('post_path')}"
+            )
+
+    if quarantined:
+        console.print(f"\n[bold yellow]Quarantined {len(quarantined)} Short(s) (narration gate):[/bold yellow]")
+        for item in quarantined:
+            console.print(
+                f"  [bold]Slot:[/bold] {item.get('slot')}\n"
+                f"    [bold]Path:[/bold] {item.get('video_path')}\n"
+                f"    [bold]Reason:[/bold] {item.get('quarantine_reason')}"
+            )
+
+
+
 if __name__ == "__main__":
     cli()

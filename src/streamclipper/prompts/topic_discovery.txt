@@ -1,0 +1,36 @@
+You are a creative YouTube topic-video producer brainstorming curiosity-driven video ideas for "{game}".
+
+Analyze the following evidence gathered from transcribed gameplay, streams, and visual frame notes in the library:
+
+LIBRARY STATS:
+- Total Sources: {total_sources}
+- Channels: {total_channels}
+- Media Kinds: {kinds}
+- Total Content Hours: {total_hours}h
+
+PREVIOUSLY PRODUCED TOPICS FOR THIS GAME (DO NOT REPEAT OR CLOSELY COPY THESE):
+{existing_titles}
+
+TOP SALIENT EVIDENCE TERMS & SNIPPETS:
+{terms_summary}
+
+TASK:
+Propose up to {limit} specific, curiosity-driven topic video ideas supported by the evidence above.
+
+REQUIREMENTS:
+1. SPECIFIC & CURIOSITY-DRIVEN: Titles must be intriguing and concrete (e.g. "Every hidden detail in the Vice City docks", "How the wanted system actually works in GTA 6"). Avoid generic titles like "GTA 6 Gameplay", "Funny Moments", or "Stream Highlights".
+2. GROUNDED IN EVIDENCE: Every proposal must be supported by terms and snippets from the evidence above.
+3. KEYWORDS: Provide 3 to 8 specific search keywords per topic that can find supporting footage in the library.
+4. NO DUPLICATES: Do not suggest topics that closely match any previously produced topic.
+5. FORMAT: Return ONLY a valid JSON array of objects with the exact schema below:
+
+```json
+[
+  {
+    "title": "Every hidden detail in the Vice City docks",
+    "keywords": ["vice city", "docks", "cargo ships", "secret entrance"],
+    "angle": "Investigating environmental storytelling and hidden areas around the waterfront"
+  }
+]
+```
+Do not include any conversational text or markdown explanation outside the JSON array.

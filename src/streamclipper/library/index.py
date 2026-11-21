@@ -404,19 +404,62 @@ class LibraryIndex:
             sql += f" AND LOWER(src.channel) IN ({placeholders})"
             params.extend(c.lower() for c in chan_list)
 
+        fn_sql = """
+            SELECT
+                fn.id,
+                fn.source_id,
+                fn.t,
+                fn.note,
+                src.url,
+                src.channel,
+                src.kind,
+                src.game,
+                src.duration_seconds,
+                bm25(frame_notes_fts, 1.0) AS bm25_val,
+                snippet(frame_notes_fts, -1, '', '', '...', 15) AS snippet_text
+            FROM frame_notes_fts f
+            JOIN frame_notes fn ON f.rowid = fn.id
+            JOIN sources src ON fn.source_id = src.source_id
+            WHERE frame_notes_fts MATCH ?
+        """
+        fn_params: list[Any] = [escaped_query]
+
+        if game:
+            fn_sql += " AND LOWER(src.game) = LOWER(?)"
+            fn_params.append(game)
+
+        if kinds:
+            kind_list = [kinds] if isinstance(kinds, str) else list(kinds)
+            placeholders = ", ".join("?" for _ in kind_list)
+            fn_sql += f" AND LOWER(src.kind) IN ({placeholders})"
+            fn_params.extend(k.lower() for k in kind_list)
+
+        if channels:
+            chan_list = [channels] if isinstance(channels, str) else list(channels)
+            placeholders = ", ".join("?" for _ in chan_list)
+            fn_sql += f" AND LOWER(src.channel) IN ({placeholders})"
+            fn_params.extend(c.lower() for c in chan_list)
+
         with self._get_connection() as conn:
             try:
                 rows = conn.execute(sql, params).fetchall()
                 if not rows and len(query.split()) > 1:
-                    # All-terms (AND) found nothing: fall back to any-term (OR);
-                    # bm25 still ranks windows matching more terms higher.
                     params[0] = _escape_fts5_query(query, joiner=" OR ")
                     rows = conn.execute(sql, params).fetchall()
             except sqlite3.OperationalError as exc:
-                logger.warning("FTS5 query failed for %r: %s", query, exc)
-                return []
+                logger.warning("FTS5 query failed for segments %r: %s", query, exc)
+                rows = []
 
-        if not rows:
+            try:
+                fn_rows = conn.execute(fn_sql, fn_params).fetchall()
+                if not fn_rows and len(query.split()) > 1:
+                    fn_params[0] = _escape_fts5_query(query, joiner=" OR ")
+                    fn_rows = conn.execute(fn_sql, fn_params).fetchall()
+            except sqlite3.OperationalError as exc:
+                logger.warning("FTS5 query failed for frame_notes %r: %s", query, exc)
+                fn_rows = []
+
+        if not rows and not fn_rows:
             return []
 
         # SQLite FTS5 bm25 returns negative numbers (more negative = better match)
@@ -456,6 +499,41 @@ class LibraryIndex:
                 chat_rate=round(chat_rate, 4),
             )
             raw_hits.append(hit)
+
+        note_weight = float(self.config.get("library.frames.note_weight", 0.8))
+        fn_max_bm25 = max((-float(r["bm25_val"]) for r in fn_rows), default=1.0)
+
+        for r in fn_rows:
+            pos_bm25 = -float(r["bm25_val"])
+            norm_bm25 = (pos_bm25 / fn_max_bm25) if fn_max_bm25 > 0 else 1.0
+            score = norm_bm25 * note_weight
+
+            t_val = float(r["t"])
+            dur_val = float(r["duration_seconds"] or 0.0)
+            start_val = max(0.0, t_val - 10.0)
+            end_val = min(dur_val, t_val + 10.0) if dur_val > 0.0 else (t_val + 10.0)
+            if end_val <= start_val:
+                end_val = start_val + 10.0
+
+            snippet = str(r["note"] or r["snippet_text"] or "").strip()
+            snippet = snippet.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+
+            hit = SearchHit(
+                source_id=str(r["source_id"]),
+                url=str(r["url"]),
+                channel=str(r["channel"]),
+                kind=str(r["kind"]),
+                start=round(start_val, 2),
+                end=round(end_val, 2),
+                snippet=snippet,
+                score=round(score, 4),
+                bm25=round(norm_bm25 * note_weight, 4),
+                heat=0.0,
+                loudness=0.0,
+                chat_rate=0.0,
+            )
+            raw_hits.append(hit)
+
 
         # Merge overlapping hits within the same source
         hits_by_source: dict[str, list[SearchHit]] = {}
@@ -515,6 +593,64 @@ class LibraryIndex:
                 "SELECT * FROM sources WHERE source_id = ?;", (source_id,)
             ).fetchone()
             return LibrarySource.from_dict(dict(row)) if row else None
+
+    def add_frame_notes(
+        self,
+        source_id: str,
+        notes: list[dict[str, Any]],
+    ) -> int:
+        """Add or replace frame notes for a source within the covered time range.
+
+        Replaces notes where min_t <= t <= max_t for this source_id, and keeps
+        the FTS5 virtual table in sync via SQLite triggers.
+        Returns the number of notes added.
+        """
+        if not notes:
+            return 0
+
+        valid_notes: list[tuple[str, float, str]] = []
+        for item in notes:
+            try:
+                t_val = float(item.get("t") if isinstance(item, dict) else getattr(item, "t", 0.0))
+                note_str = str(item.get("note") if isinstance(item, dict) else getattr(item, "note", "")).strip()
+                if note_str:
+                    valid_notes.append((source_id, round(t_val, 2), note_str))
+            except (ValueError, TypeError):
+                continue
+
+        if not valid_notes:
+            return 0
+
+        min_t = min(n[1] for n in valid_notes)
+        max_t = max(n[1] for n in valid_notes)
+
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                DELETE FROM frame_notes
+                WHERE source_id = ? AND t >= ? AND t <= ?;
+                """,
+                (source_id, min_t, max_t),
+            )
+            conn.executemany(
+                """
+                INSERT INTO frame_notes (source_id, t, note)
+                VALUES (?, ?, ?);
+                """,
+                valid_notes,
+            )
+            conn.commit()
+
+        return len(valid_notes)
+
+    def list_frame_notes(self, source_id: str) -> list[dict[str, Any]]:
+        """List all stored frame notes for a source, sorted by timestamp t ascending."""
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT t, note FROM frame_notes WHERE source_id = ? ORDER BY t ASC;",
+                (source_id,),
+            ).fetchall()
+            return [{"t": float(r["t"]), "note": str(r["note"])} for r in rows]
 
     def remove_source(self, source_id: str) -> bool:
         """Remove a source and its segments from the library."""
