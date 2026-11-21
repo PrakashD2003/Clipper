@@ -48,6 +48,22 @@ EXPECTED_TOOLS = {
     "cleanup_temp",
     "get_render_status",
     "cancel_render",
+    "index_frames",
+    "get_frame_sheets",
+    "submit_frame_notes",
+    "library_add_source",
+    "search_library",
+    "list_library",
+    "get_topic_material",
+    "record_topic_candidates",
+    "suggest_topics",
+    "start_topic_plan",
+    "submit_topic_plan",
+    "get_topic_plan",
+    "update_topic_plan",
+    "approve_topic_plan",
+    "render_topic_video",
+    "render_topic_shorts",
 }
 
 
@@ -208,7 +224,7 @@ async def test_mcp_server_registration_and_schemas() -> None:
     tools = await mcp.list_tools()
     by_name = {tool.name: tool for tool in tools}
     assert set(by_name.keys()) == EXPECTED_TOOLS
-    assert len(tools) == 13
+    assert len(tools) == len(EXPECTED_TOOLS)
 
     for name, tool in by_name.items():
         schema = tool.input_schema

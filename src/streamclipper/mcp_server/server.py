@@ -12,7 +12,7 @@ import time
 from typing import Any, AsyncIterator
 import weakref
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Image, MCPServer
 
 from . import jobs
 from .jobs import JobProgress
@@ -29,6 +29,8 @@ from ..download.audio import _extract_youtube_id_from_url, download_audio
 from ..download.chat import ChatScraper
 from ..download.heatmap import get_heatmap
 from ..download.video import download_multiple_segments, download_segment
+from ..library.frames import build_contact_sheets, download_proxy_video
+from ..library.index import LibraryIndex
 from ..models import (
     ClipMetadata,
     ClipResult,
@@ -78,7 +80,9 @@ SERVER_INSTRUCTIONS = (
     "submit_highlights requires a transcript (run transcribe_audio first) and rejects "
     "highlights that start before analysis.skip_intro_minutes. Use mode 'breakdown' (instant "
     "replay) ONLY for moment_type clutch, fail, graphics_detail or analysis with a "
-    "breakdown_commentary; reactions (hype, funny, chat_chaos, lore_secret) get narrative/story."
+    "breakdown_commentary; reactions (hype, funny, chat_chaos, lore_secret) get narrative/story. "
+    "Topic workflow: add sources -> frame notes for no-commentary -> material -> candidates -> user picks -> plan -> user approves -> "
+    "render_topic_video -> render_topic_shorts -> poll get_render_status."
 )
 
 mcp = MCPServer("streamclipper", instructions=SERVER_INSTRUCTIONS)
@@ -2460,3 +2464,740 @@ async def cleanup_temp(url: str = "") -> str:
     except Exception as exc:
         logger.exception("cleanup_temp failed")
         return _json_error(str(exc))
+
+
+@mcp.tool()
+async def index_frames(source_id: str) -> str:
+    """Download low-resolution proxy video and generate frame contact sheets for no-commentary sources.
+
+    Runs asynchronously in the background. Poll get_render_status(job_id) until complete.
+    """
+    try:
+        clean_sid = str(source_id or "").strip()
+        if not clean_sid:
+            return _json_error("source_id is required")
+
+        config = Config()
+        index = LibraryIndex(config)
+        source = index.get_source(clean_sid)
+        if not source:
+            return _json_error(f"Source not found in library: {clean_sid}")
+
+        url = source.url
+
+        async def _execute_index_frames(progress: JobProgress) -> dict[str, Any]:
+            progress.set_stage("downloading_proxy")
+            temp_dir = Path(config.get("general.temp_dir", "./temp"))
+            frames_dir = temp_dir / "frames" / clean_sid
+            proxy_h = int(config.get("library.frames.proxy_height", 360))
+            download_proxy_video(url, frames_dir, height=proxy_h)
+
+            progress.set_stage("building_sheets")
+            sheets = build_contact_sheets(config, clean_sid)
+            return {
+                "status": "done",
+                "source_id": clean_sid,
+                "sheets_count": len(sheets),
+            }
+
+        return _start_render_job(
+            "index_frames",
+            config,
+            url,
+            1,
+            _execute_index_frames,
+        )
+    except Exception as exc:
+        logger.exception("index_frames failed")
+        return _json_error(str(exc))
+
+
+@mcp.tool()
+def get_frame_sheets(
+    source_id: str,
+    start: float = 0.0,
+    count: int = 6,
+) -> list[Any]:
+    """Retrieve frame contact sheets as MCP image content with timestamps and tagging instructions.
+
+    Returns images for up to count contact sheets starting at or after start seconds,
+    accompanied by a JSON metadata block with sheet timestamps.
+    """
+    try:
+        clean_sid = str(source_id or "").strip()
+        if not clean_sid:
+            return [_json_error("source_id is required")]
+
+        config = Config()
+        sheets = build_contact_sheets(config, clean_sid)
+        eligible = [s for s in sheets if s.end > float(start)]
+        selected = eligible[: max(0, int(count))]
+
+        meta = {
+            "source_id": clean_sid,
+            "instruction": "write one short factual note per tile: location, action, notable objects",
+            "sheets": [
+                {
+                    "start": s.start,
+                    "end": s.end,
+                    "timestamps": s.timestamps,
+                    "path": str(s.path),
+                }
+                for s in selected
+            ],
+        }
+
+        contents: list[Any] = []
+        for s in selected:
+            if s.path.is_file():
+                contents.append(Image(path=s.path))
+        contents.append(json.dumps(meta, indent=2))
+        return contents
+    except Exception as exc:
+        logger.exception("get_frame_sheets failed")
+        return [_json_error(str(exc))]
+
+
+@mcp.tool()
+def submit_frame_notes(source_id: str, notes: Any) -> str:
+    """Validate and store visual frame notes describing scenes in no-commentary video frames.
+
+    Each note must contain 't' (within source duration) and 'note' (up to 200 characters).
+    """
+    try:
+        clean_sid = str(source_id or "").strip()
+        if not clean_sid:
+            return _json_error("source_id is required")
+
+        if isinstance(notes, str):
+            try:
+                notes_list = json.loads(notes)
+            except Exception as exc:
+                return _json_error(f"Invalid JSON for notes: {exc}")
+        elif isinstance(notes, list):
+            notes_list = notes
+        else:
+            return _json_error("notes must be a JSON list of {t, note}")
+
+        if not isinstance(notes_list, list):
+            return _json_error("notes must be a list of {t, note}")
+
+        config = Config()
+        index = LibraryIndex(config)
+        source = index.get_source(clean_sid)
+        if not source:
+            return _json_error(f"Source not found in library: {clean_sid}")
+
+        duration = float(source.duration_seconds or 0.0)
+
+        validated_notes: list[dict[str, Any]] = []
+        for idx, item in enumerate(notes_list):
+            if not isinstance(item, dict):
+                return _json_error(f"Note item {idx} must be an object with 't' and 'note'")
+            if "t" not in item or "note" not in item:
+                return _json_error(f"Note item {idx} missing required 't' or 'note'")
+            try:
+                t_val = float(item["t"])
+            except (ValueError, TypeError):
+                return _json_error(f"Note item {idx} 't' must be numeric, got {item['t']!r}")
+
+            if duration > 0.0 and (t_val < 0.0 or t_val > duration + 1.0):
+                return _json_error(
+                    f"Note item {idx} timestamp {t_val} is outside source duration [0.0, {duration}]"
+                )
+            elif t_val < 0.0:
+                return _json_error(f"Note item {idx} timestamp {t_val} cannot be negative")
+
+            note_str = str(item["note"]).strip()
+            if not note_str:
+                return _json_error(f"Note item {idx} 'note' cannot be empty")
+            if len(note_str) > 200:
+                return _json_error(
+                    f"Note item {idx} exceeds 200 characters ({len(note_str)} chars): '{note_str[:30]}...'"
+                )
+
+            validated_notes.append({"t": round(t_val, 2), "note": note_str})
+
+        count = index.add_frame_notes(clean_sid, validated_notes)
+        return _json_ok({"source_id": clean_sid, "count": count, "notes_added": count})
+    except Exception as exc:
+        logger.exception("submit_frame_notes failed")
+        return _json_error(str(exc))
+
+
+@mcp.tool()
+async def library_add_source(
+    url: str,
+    game: str,
+    kind: str = "stream",
+    channel: str = "",
+) -> str:
+    """Register and ingest a source video into the topic library in the background.
+
+    Runs download, transcription, and signal analysis, then indexes segments into SQLite FTS5.
+    Allowed kinds: 'stream', 'gameplay', 'official'.
+    Runs asynchronously as a background job. Poll get_render_status(job_id) until complete.
+    """
+    try:
+        clean_url = str(url or "").strip()
+        if not clean_url:
+            return _json_error("url is required")
+        clean_game = str(game or "").strip()
+        if not clean_game:
+            return _json_error("game is required")
+        clean_kind = str(kind or "stream").strip().lower()
+        if clean_kind not in {"stream", "gameplay", "official"}:
+            return _json_error(f"Invalid kind '{kind}'. Allowed kinds: 'stream', 'gameplay', 'official'")
+
+        config = Config()
+
+        async def _execute_add_source(progress: JobProgress) -> dict[str, Any]:
+            progress.set_stage("ingesting")
+            from ..library.ingest import add_source
+            src = await add_source(
+                config,
+                clean_url,
+                game=clean_game,
+                kind=clean_kind,
+                channel=channel.strip() or None,
+            )
+            return {
+                "status": "done",
+                "source_id": src.source_id,
+                "source": src.to_dict(),
+            }
+
+        return _start_render_job(
+            "library_add_source",
+            config,
+            clean_url,
+            1,
+            _execute_add_source,
+        )
+    except Exception as exc:
+        logger.exception("library_add_source failed")
+        return _json_error(str(exc))
+
+
+@mcp.tool()
+def search_library(
+    query: str,
+    game: str = "",
+    kinds: str = "",
+    channels: str = "",
+    limit: int = 20,
+) -> str:
+    """Search indexed library segments and frame notes for speech, chat, and visual evidence.
+
+    Returns JSON hits with timestamps, channel, relevance scores, and matching snippets.
+    """
+    try:
+        clean_q = str(query or "").strip()
+        if not clean_q:
+            return _json_error("query is required")
+
+        config = Config()
+        index = LibraryIndex(config)
+
+        kinds_arg: list[str] | None = None
+        if kinds:
+            kinds_arg = [k.strip() for k in kinds.split(",") if k.strip()]
+
+        channels_arg: list[str] | None = None
+        if channels:
+            channels_arg = [c.strip() for c in channels.split(",") if c.strip()]
+
+        hits = index.search(
+            clean_q,
+            game=game.strip() if game else None,
+            kinds=kinds_arg,
+            channels=channels_arg,
+            limit=max(1, limit),
+        )
+        return _json_ok({
+            "query": clean_q,
+            "game": game,
+            "hits": [h.to_dict() for h in hits],
+            "total": len(hits),
+        })
+    except Exception as exc:
+        logger.exception("search_library failed")
+        return _json_error(str(exc))
+
+
+@mcp.tool()
+def list_library(game: str = "") -> str:
+    """List all registered and indexed source videos in the library, optionally filtered by game."""
+    try:
+        config = Config()
+        index = LibraryIndex(config)
+        sources = index.list_sources(game=game.strip() if game else None)
+        return _json_ok({
+            "game": game,
+            "sources": [s.to_dict() for s in sources],
+            "total": len(sources),
+        })
+    except Exception as exc:
+        logger.exception("list_library failed")
+        return _json_error(str(exc))
+
+
+@mcp.tool()
+def get_topic_material(game: str, max_terms: int = 40) -> str:
+    """Extract salient library evidence, terms, snippets, and stats for proposing topic videos.
+
+    MCP host LLMs should review the returned terms and snippets, brainstorm 5-10 specific,
+    curiosity-driven topics with search keywords, and submit them to record_topic_candidates.
+    """
+    try:
+        clean_game = str(game or "").strip()
+        if not clean_game:
+            return _json_error("game is required")
+
+        from ..topics.discover import topic_material
+        config = Config()
+        mat = topic_material(config, clean_game, max_terms=max_terms)
+        mat["instructions"] = (
+            "Propose 5–10 specific topic videos this evidence supports. "
+            "Return them with record_topic_candidates."
+        )
+        return _json_ok(mat)
+    except Exception as exc:
+        logger.exception("get_topic_material failed")
+        return _json_error(str(exc))
+
+
+@mcp.tool()
+def record_topic_candidates(game: str, candidates: Any) -> str:
+    """Evaluate topic proposals against the library and ledger.
+
+    Accepts a JSON string or list of {title, keywords} candidate objects.
+    Evaluates evidence viability and flags topics already made or too similar to ledger entries.
+    Returns evaluated TopicCandidate objects (viable first, already-made flagged).
+    """
+    try:
+        clean_game = str(game or "").strip()
+        if not clean_game:
+            return _json_error("game is required")
+
+        from ..topics.discover import _extract_json, _slugify, evaluate_topic
+
+        if isinstance(candidates, str):
+            parsed = _extract_json(candidates)
+        else:
+            parsed = candidates
+
+        if isinstance(parsed, dict) and "candidates" in parsed:
+            parsed = parsed["candidates"]
+        elif isinstance(parsed, dict) and "topics" in parsed:
+            parsed = parsed["topics"]
+        elif isinstance(parsed, dict) and "title" in parsed:
+            parsed = [parsed]
+
+        if not isinstance(parsed, list):
+            return _json_error("candidates must be a list of objects with 'title' and 'keywords'")
+
+        config = Config()
+        evaluated = []
+        seen_slugs = set()
+
+        for item in parsed:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title", "")).strip()
+            if not title:
+                continue
+            slug = _slugify(title)
+            if slug in seen_slugs:
+                continue
+            seen_slugs.add(slug)
+
+            raw_kw = item.get("keywords") or []
+            if isinstance(raw_kw, str):
+                kw_list = [k.strip() for k in raw_kw.split(",") if k.strip()]
+            else:
+                kw_list = [str(k).strip() for k in raw_kw if str(k).strip()]
+            candidate = evaluate_topic(config, clean_game, title, kw_list)
+            if item.get("angle"):
+                candidate.description = str(item["angle"])
+            evaluated.append(candidate)
+
+        evaluated.sort(
+            key=lambda c: (
+                0 if (c.is_viable and not c.already_made) else (1 if c.is_viable else 2),
+                -len(c.evidence),
+                -sum(e.score for e in c.evidence),
+            )
+        )
+
+        return _json_ok({
+            "game": clean_game,
+            "candidates": [c.to_dict() for c in evaluated],
+            "count": len(evaluated),
+        })
+    except Exception as exc:
+        logger.exception("record_topic_candidates failed")
+        return _json_error(str(exc))
+
+
+@mcp.tool()
+def suggest_topics(game: str, limit: int = 10) -> str:
+    """Propose viable topic video ideas using the local Ollama LLM or library term clusters.
+
+    Returns evaluated TopicCandidate objects with evidence counts, source diversity, and ledger flags.
+    """
+    try:
+        clean_game = str(game or "").strip()
+        if not clean_game:
+            return _json_error("game is required")
+
+        from ..topics.discover import suggest_topics_local
+        config = Config()
+        candidates = suggest_topics_local(config, clean_game, limit=limit)
+        return _json_ok({
+            "game": clean_game,
+            "candidates": [c.to_dict() for c in candidates],
+            "count": len(candidates),
+        })
+    except Exception as exc:
+        logger.exception("suggest_topics failed")
+        return _json_error(str(exc))
+
+
+@mcp.tool()
+def start_topic_plan(game: str, topic: str) -> str:
+    """Start planning a topic video by generating writing material, shape, and instructions.
+
+    Returns the assembled planning_material, a fresh plan_id, and prompt instructions.
+    The client or host LLM must draft a TopicPlan JSON following the schema and submit it
+    using submit_topic_plan.
+    NOTE: The client must show the complete outline, script, and clip list to the user and call
+    approve_topic_plan only after the user explicitly agrees.
+    """
+    try:
+        clean_game = str(game or "").strip()
+        clean_topic = str(topic or "").strip()
+        if not clean_game:
+            return _json_error("game is required")
+        if not clean_topic:
+            return _json_error("topic is required")
+
+        import uuid
+        from ..topics.discover import _slugify
+        from ..topics.planner import planning_material
+
+        config = Config()
+        material = planning_material(config, clean_game, clean_topic)
+        fresh_plan_id = f"plan_{_slugify(clean_topic)}_{uuid.uuid4().hex[:8]}"
+
+        instructions = (
+            "Write a TopicPlan JSON matching the provided schema and rules. "
+            "Include 5–7 points (or 4–6 points if story shape), 1–2 evidence clips per point, "
+            "and exactly 3 Shorts (teaser, short_a, short_b). Submit the completed JSON with "
+            "submit_topic_plan. The user must review and approve the outline, script, and clip list "
+            "before you call approve_topic_plan."
+        )
+
+        return _json_ok({
+            "plan_id": fresh_plan_id,
+            "game": clean_game,
+            "topic": clean_topic,
+            "material": material,
+            "instructions": instructions,
+        })
+    except Exception as exc:
+        logger.exception("start_topic_plan failed")
+        return _json_error(str(exc))
+
+
+@mcp.tool()
+def submit_topic_plan(plan_json: str | dict[str, Any]) -> str:
+    """Submit a drafted TopicPlan JSON for validation, clip normalization, and persistence.
+
+    Normalizes evidence clips from the library (fills url/channel/kind) and validates against
+    all topic video contracts.
+    If validation issues exist, saves the draft and returns the problems list so the client can fix
+    them with update_topic_plan.
+    If valid, saves the plan and returns a human-readable outline.
+    NOTE: The user approves the plan: the client must show the outline, script, and clip list to the
+    user and call approve_topic_plan only after the user agrees.
+    """
+    try:
+        if isinstance(plan_json, str):
+            try:
+                data = json.loads(plan_json)
+            except Exception as parse_exc:
+                return _json_error(f"Invalid JSON in plan_json: {parse_exc}")
+        elif isinstance(plan_json, dict):
+            data = plan_json
+        else:
+            return _json_error("plan_json must be a JSON string or dict")
+
+        from datetime import datetime, timezone
+        from ..topics.models import TopicPlan
+        from ..topics.planner import format_plan_outline, normalize_plan_clips, save_plan
+        from ..topics.validate import validate_plan
+
+        config = Config()
+        plan = TopicPlan.from_dict(data)
+        normalize_plan_clips(config, plan)
+        if not plan.created_at:
+            plan.created_at = datetime.now(timezone.utc).isoformat()
+
+        problems = validate_plan(config, plan)
+        plan.problems = problems
+        plan.status = "draft"
+        save_plan(config, plan)
+
+        outline = format_plan_outline(plan)
+        return _json_ok({
+            "status": "draft",
+            "plan_id": plan.plan_id,
+            "valid": len(problems) == 0,
+            "problems": problems,
+            "outline": outline,
+            "plan": plan.to_dict(),
+        })
+    except Exception as exc:
+        logger.exception("submit_topic_plan failed")
+        return _json_error(str(exc))
+
+
+@mcp.tool()
+def get_topic_plan(plan_id: str) -> str:
+    """Retrieve an existing TopicPlan by plan_id with validation status and human-readable outline.
+
+    NOTE: The user approves the plan: the client must show the outline, script, and clip list to the
+    user and call approve_topic_plan only after the user agrees.
+    """
+    try:
+        clean_id = str(plan_id or "").strip()
+        if not clean_id:
+            return _json_error("plan_id is required")
+
+        from ..topics.planner import format_plan_outline, load_plan
+        from ..topics.validate import validate_plan
+
+        config = Config()
+        plan = load_plan(config, clean_id)
+        if plan is None:
+            return _json_error(f"Topic plan '{clean_id}' not found.")
+
+        problems = validate_plan(config, plan)
+        outline = format_plan_outline(plan)
+        return _json_ok({
+            "plan_id": plan.plan_id,
+            "valid": len(problems) == 0,
+            "problems": problems,
+            "outline": outline,
+            "plan": plan.to_dict(),
+        })
+    except Exception as exc:
+        logger.exception("get_topic_plan failed")
+        return _json_error(str(exc))
+
+
+@mcp.tool()
+def update_topic_plan(plan_id: str, patch_json: str | dict[str, Any]) -> str:
+    """Apply a JSON merge-patch to a draft TopicPlan, re-validate, and persist updates.
+
+    Modifications are rejected if the plan has already been approved.
+    NOTE: The user approves the plan: the client must show the outline, script, and clip list to the
+    user and call approve_topic_plan only after the user agrees.
+    """
+    try:
+        clean_id = str(plan_id or "").strip()
+        if not clean_id:
+            return _json_error("plan_id is required")
+
+        if isinstance(patch_json, str):
+            try:
+                patch = json.loads(patch_json)
+            except Exception as parse_exc:
+                return _json_error(f"Invalid JSON in patch_json: {parse_exc}")
+        elif isinstance(patch_json, dict):
+            patch = patch_json
+        else:
+            return _json_error("patch_json must be a JSON string or dict")
+
+        from ..topics.models import TopicPlan
+        from ..topics.planner import (
+            apply_merge_patch,
+            format_plan_outline,
+            load_plan,
+            normalize_plan_clips,
+            save_plan,
+        )
+        from ..topics.validate import validate_plan
+
+        config = Config()
+        plan = load_plan(config, clean_id)
+        if plan is None:
+            return _json_error(f"Topic plan '{clean_id}' not found.")
+        if plan.status == "approved":
+            return _json_error(f"Topic plan '{clean_id}' is already approved and locked against modifications.")
+
+        merged_data = apply_merge_patch(plan.to_dict(), patch)
+        updated_plan = TopicPlan.from_dict(merged_data)
+        normalize_plan_clips(config, updated_plan)
+
+        problems = validate_plan(config, updated_plan)
+        updated_plan.problems = problems
+        save_plan(config, updated_plan)
+
+        outline = format_plan_outline(updated_plan)
+        return _json_ok({
+            "plan_id": updated_plan.plan_id,
+            "valid": len(problems) == 0,
+            "problems": problems,
+            "outline": outline,
+            "plan": updated_plan.to_dict(),
+        })
+    except Exception as exc:
+        logger.exception("update_topic_plan failed")
+        return _json_error(str(exc))
+
+
+@mcp.tool()
+def approve_topic_plan(plan_id: str) -> str:
+    """Approve a fully-valid TopicPlan and record it in the ledger to lock it for rendering.
+
+    Approve is refused if validate_plan reports any problems.
+    NOTE: The user approves the plan: the client must show the outline, script, and clip list to the
+    user and call approve_topic_plan only after the user explicitly agrees.
+    """
+    try:
+        clean_id = str(plan_id or "").strip()
+        if not clean_id:
+            return _json_error("plan_id is required")
+
+        from datetime import datetime, timezone
+        from ..topics.ledger import TopicLedger
+        from ..topics.planner import load_plan, save_plan
+        from ..topics.validate import validate_plan
+
+        config = Config()
+        plan = load_plan(config, clean_id)
+        if plan is None:
+            return _json_error(f"Topic plan '{clean_id}' not found.")
+
+        problems = validate_plan(config, plan)
+        if problems:
+            return _json_error(f"Cannot approve topic plan with validation problems: {'; '.join(problems)}")
+
+        plan.status = "approved"
+        plan.approved_at = datetime.now(timezone.utc).isoformat()
+        save_plan(config, plan)
+
+        ledger = TopicLedger(config)
+        ledger.record(
+            topic_id=plan.topic_id,
+            title=plan.topic_title or plan.video_title,
+            game=plan.game,
+            shape=plan.shape,
+            plan_id=plan.plan_id,
+        )
+
+        return _json_ok({
+            "status": "approved",
+            "plan_id": plan.plan_id,
+            "approved_at": plan.approved_at,
+        })
+    except Exception as exc:
+        logger.exception("approve_topic_plan failed")
+        return _json_error(str(exc))
+
+
+@mcp.tool()
+def render_topic_video(plan_id: str) -> str:
+    """Render a 16:9 long topic video from an approved TopicPlan as a background job.
+
+    Downloads evidence clips, validates copyright against cached stream audio, records YouTube
+    chapters, generates thumbnail, burns narration captions and lower-third credits, mixes audio,
+    and writes long_post.txt.
+    Refuses unapproved plans synchronously. Clients poll get_render_status(job_id).
+    NOTE: The user approves the plan: this tool must be called only after approve_topic_plan has succeeded.
+    """
+    try:
+        clean_id = str(plan_id or "").strip()
+        if not clean_id:
+            return _json_error("plan_id is required")
+
+        from ..topics.planner import load_plan
+        config = Config()
+        plan = load_plan(config, clean_id)
+        if plan is None:
+            return _json_error(f"Topic plan '{clean_id}' not found.")
+
+        if plan.status != "approved":
+            return _json_error(
+                f"Topic plan '{clean_id}' is not approved (status: '{plan.status}'). "
+                "Must be approved via approve_topic_plan before rendering."
+            )
+
+        clips_planned = sum(len(pt.evidence) for pt in plan.points) or 1
+
+        async def _execute_render_topic_long(progress: Any) -> dict[str, Any]:
+            from ..assembly.longform import render_long_video
+            return await asyncio.to_thread(render_long_video, config, plan, progress=progress)
+
+        return _start_render_job(
+            "topic_long",
+            config,
+            f"topic://{plan.topic_id}",
+            clips_planned,
+            _execute_render_topic_long,
+        )
+    except Exception as exc:
+        logger.exception("render_topic_video failed")
+        return _json_error(str(exc))
+
+
+@mcp.tool()
+def render_topic_shorts(plan_id: str, slots: str = "") -> str:
+    """Render 9:16 vertical topic Shorts (teaser and/or standalone) from an approved TopicPlan as a background job.
+
+    Composes evidence clips in blur_fill layout, applies persistent hook title, @channel credit tags,
+    voices and mixes commentary intro, callout, and outro with ducking, validates the narration gate,
+    burns ASS captions, normalizes loudness (-14 LUFS), and writes post files.
+    Refuses unapproved plans synchronously. Clients poll get_render_status(job_id).
+    NOTE: The user approves the plan: this tool must be called only after approve_topic_plan has succeeded.
+    """
+    try:
+        clean_id = str(plan_id or "").strip()
+        if not clean_id:
+            return _json_error("plan_id is required")
+
+        from ..topics.planner import load_plan
+        config = Config()
+        plan = load_plan(config, clean_id)
+        if plan is None:
+            return _json_error(f"Topic plan '{clean_id}' not found.")
+
+        if plan.status != "approved":
+            return _json_error(
+                f"Topic plan '{clean_id}' is not approved (status: '{plan.status}'). "
+                "Must be approved via approve_topic_plan before rendering."
+            )
+
+        target_slots = [s.strip().lower() for s in slots.split(",") if s.strip()] if slots else ["teaser", "short_a", "short_b"]
+        shorts_to_render = [s for s in plan.shorts if s.slot in target_slots] or plan.shorts
+        clips_planned = len(shorts_to_render) or 1
+
+        async def _execute_render_topic_shorts(progress: Any) -> dict[str, Any]:
+            from ..assembly.topic_shorts import render_topic_shorts as _render_shorts
+            return await asyncio.to_thread(_render_shorts, config, plan, slots=tuple(target_slots), progress=progress)
+
+        return _start_render_job(
+            "topic_shorts",
+            config,
+            f"topic://{plan.topic_id}",
+            clips_planned,
+            _execute_render_topic_shorts,
+        )
+    except Exception as exc:
+        logger.exception("render_topic_shorts failed")
+        return _json_error(str(exc))
+
+
+
