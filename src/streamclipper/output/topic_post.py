@@ -13,6 +13,25 @@ from streamclipper.topics.planner import plan_dir
 
 logger = logging.getLogger(__name__)
 
+STOPWORDS: frozenset[str] = frozenset({
+    # Common English stopwords
+    "the", "and", "for", "how", "every", "what", "this", "that", "with",
+    "from", "into", "actually", "really", "all", "are", "about", "above",
+    "after", "again", "against", "any", "because", "been", "before", "being",
+    "below", "between", "both", "but", "can", "could", "did", "does", "doing",
+    "down", "during", "each", "few", "further", "had", "has", "have", "having",
+    "her", "here", "hers", "herself", "him", "himself", "his", "just", "more",
+    "most", "not", "now", "off", "once", "only", "other", "our", "ours", "out",
+    "over", "own", "same", "she", "should", "some", "such", "than", "then",
+    "there", "these", "they", "through", "too", "under", "until", "very", "was",
+    "were", "when", "where", "which", "while", "who", "whom", "why", "will",
+    "you", "your", "yours", "its", "itself", "one", "two", "first", "second",
+    # Common Hinglish stopwords
+    "hai", "bhi", "aur", "yeh", "woh", "kya", "kyu", "kyun", "kaise", "hota",
+    "karte", "wali", "wale", "wala", "mein", "par", "se", "ko", "ke", "ki",
+    "ka", "kare", "karna", "nahi", "tha", "thi", "the", "ab", "sab",
+})
+
 
 def _format_chapters(chapters: list[tuple[str, str]] | list[str] | str) -> list[str]:
     """Normalize chapters into a list of formatted YouTube chapter strings."""
@@ -74,7 +93,11 @@ def write_long_post(
             seen_sources.add(key)
             timed_url = _format_timestamp_url(clip.url, clip.start)
             if clip.kind == "official":
-                sources_entries.append(f"- Official footage (Rockstar Games): {timed_url}")
+                raw_channel = (clip.channel or "").strip().lstrip("@")
+                if raw_channel:
+                    sources_entries.append(f"- Official footage ({raw_channel}): {timed_url}")
+                else:
+                    sources_entries.append(f"- Official {plan.game} footage: {timed_url}")
             else:
                 raw_channel = (clip.channel or "").strip().lstrip("@")
                 channel_str = f"@{raw_channel}" if raw_channel else "@Unknown"
@@ -94,18 +117,37 @@ def write_long_post(
 
     desc_parts.append("SOURCES")
     if has_official:
-        desc_parts.append("Official footage: Rockstar Games")
+        official_names: list[str] = []
+        for point in plan.points:
+            for clip in point.evidence:
+                if clip.kind == "official":
+                    raw_ch = (clip.channel or "").strip().lstrip("@")
+                    if raw_ch and raw_ch not in official_names:
+                        official_names.append(raw_ch)
+        if official_names:
+            desc_parts.append(f"Official footage: {', '.join(official_names)}")
+        else:
+            desc_parts.append(f"Official {plan.game} footage")
     desc_parts.extend(sources_entries)
     desc_parts.append("")
 
-    # Tags / Hashtags
+    # Tags / Hashtags: game tag + up to 3 meaningful topic tags (cap 4)
+    max_hashtags = int(config.get("metadata.hashtag_count", 4) or 4)
     game_tag = "".join(ch for ch in plan.game if ch.isalnum())
-    tags_list = [f"#{game_tag}"] if game_tag else []
+    tags_list: list[str] = [f"#{game_tag}"] if game_tag else []
+    seen_tags_lower: set[str] = {t.lower() for t in tags_list}
+
     for word in (plan.topic_title or "").split():
+        if len(tags_list) >= max_hashtags:
+            break
         cleaned = "".join(ch for ch in word if ch.isalnum())
-        if len(cleaned) >= 3 and f"#{cleaned}" not in tags_list:
-            tags_list.append(f"#{cleaned}")
-    if "#Gaming" not in tags_list:
+        if len(cleaned) >= 3 and cleaned.lower() not in STOPWORDS:
+            candidate = f"#{cleaned}"
+            if candidate.lower() not in seen_tags_lower:
+                tags_list.append(candidate)
+                seen_tags_lower.add(candidate.lower())
+
+    if len(tags_list) < max_hashtags and "#gaming" not in seen_tags_lower:
         tags_list.append("#Gaming")
 
     lines = [
@@ -171,7 +213,11 @@ def write_short_post(
             seen_sources.add(key)
             timed_url = _format_timestamp_url(clip.url, clip.start)
             if clip.kind == "official":
-                sources_entries.append(f"- Official footage (Rockstar Games): {timed_url}")
+                raw_channel = (clip.channel or "").strip().lstrip("@")
+                if raw_channel:
+                    sources_entries.append(f"- Official footage ({raw_channel}): {timed_url}")
+                else:
+                    sources_entries.append(f"- Official {plan.game} footage: {timed_url}")
             else:
                 raw_channel = (clip.channel or "").strip().lstrip("@")
                 channel_str = f"@{raw_channel}" if raw_channel else "@Unknown"
@@ -188,20 +234,45 @@ def write_short_post(
     if sources_entries:
         desc_parts.append("SOURCES")
         if has_official:
-            desc_parts.append("Official footage: Rockstar Games")
+            official_names: list[str] = []
+            for point in plan.points:
+                if target_point_indexes and point.index not in target_point_indexes:
+                    continue
+                for clip in point.evidence:
+                    if clip.kind == "official":
+                        raw_ch = (clip.channel or "").strip().lstrip("@")
+                        if raw_ch and raw_ch not in official_names:
+                            official_names.append(raw_ch)
+            if official_names:
+                desc_parts.append(f"Official footage: {', '.join(official_names)}")
+            else:
+                desc_parts.append(f"Official {plan.game} footage")
         desc_parts.extend(sources_entries)
         desc_parts.append("")
 
-    # Tags / Hashtags
+    # Tags / Hashtags: #Shorts + game tag + up to 2 meaningful topic tags (cap 4)
+    max_hashtags = int(config.get("metadata.hashtag_count", 4) or 4)
     tags_list: list[str] = ["#Shorts"]
+    seen_tags_lower: set[str] = {"#shorts"}
+
     game_tag = "".join(ch for ch in plan.game if ch.isalnum())
-    if game_tag:
-        tags_list.append(f"#{game_tag}")
+    if game_tag and len(tags_list) < max_hashtags:
+        candidate_game = f"#{game_tag}"
+        if candidate_game.lower() not in seen_tags_lower:
+            tags_list.append(candidate_game)
+            seen_tags_lower.add(candidate_game.lower())
+
     for word in (plan.topic_title or "").split():
+        if len(tags_list) >= max_hashtags:
+            break
         cleaned = "".join(ch for ch in word if ch.isalnum())
-        if len(cleaned) >= 3 and f"#{cleaned}" not in tags_list:
-            tags_list.append(f"#{cleaned}")
-    if "#Gaming" not in tags_list:
+        if len(cleaned) >= 3 and cleaned.lower() not in STOPWORDS:
+            candidate = f"#{cleaned}"
+            if candidate.lower() not in seen_tags_lower:
+                tags_list.append(candidate)
+                seen_tags_lower.add(candidate.lower())
+
+    if len(tags_list) < max_hashtags and "#gaming" not in seen_tags_lower:
         tags_list.append("#Gaming")
 
     # Reminders

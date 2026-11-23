@@ -178,25 +178,37 @@ def _render_chapter_card_image(
     return base_img
 
 
-def _apply_ken_burns_zoom(clip: Any, max_zoom: float = 1.08) -> Any:
-    """Apply smooth center Ken-Burns zoom over clip duration."""
+def _apply_ken_burns_zoom(
+    clip: Any,
+    max_zoom: float = 1.08,
+    blur_radius: int = 0,
+    dim_factor: float = 1.0,
+) -> Any:
+    """Apply smooth center Ken-Burns zoom over clip duration, with optional blur and dimming."""
     dur = float(clip.duration or 1.0)
     w, h = clip.size
-    if max_zoom <= 1.001 or dur <= 0.0:
+    if (max_zoom <= 1.001 and blur_radius <= 0 and dim_factor >= 0.999) or dur <= 0.0:
         return clip
 
     def transform_frame(get_frame: Any, t: float) -> np.ndarray:
         progress = min(1.0, max(0.0, t / dur))
         zoom = 1.0 + (max_zoom - 1.0) * progress
         frame = get_frame(t)
-        if zoom <= 1.001:
-            return frame
-        crop_w = max(1, min(w, int(w / zoom)))
-        crop_h = max(1, min(h, int(h / zoom)))
-        x1 = (w - crop_w) // 2
-        y1 = (h - crop_h) // 2
-        cropped = frame[y1 : y1 + crop_h, x1 : x1 + crop_w]
-        pil_img = Image.fromarray(cropped).resize((w, h), Image.Resampling.BILINEAR)
+        if zoom > 1.001:
+            crop_w = max(1, min(w, int(w / zoom)))
+            crop_h = max(1, min(h, int(h / zoom)))
+            x1 = (w - crop_w) // 2
+            y1 = (h - crop_h) // 2
+            cropped = frame[y1 : y1 + crop_h, x1 : x1 + crop_w]
+            pil_img = Image.fromarray(cropped).resize((w, h), Image.Resampling.BILINEAR)
+        else:
+            pil_img = Image.fromarray(frame)
+
+        if blur_radius > 0:
+            pil_img = pil_img.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+        if dim_factor < 0.999:
+            from PIL import ImageEnhance
+            pil_img = ImageEnhance.Brightness(pil_img).enhance(dim_factor)
         return np.array(pil_img, dtype=np.uint8)
 
     return clip.transform(transform_frame)
@@ -566,7 +578,9 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None) 
         if plan.cold_open.strip():
             co_wav = temp_dir / "narration_cold_open.wav"
             res_co = narrator.synthesize_speech(plan.cold_open, co_wav, language=plan.language)
-            final_co_wav = _ensure_synthetic_wav(res_co or co_wav, duration_seconds=max(2.0, len(plan.cold_open.split()) / 2.7))
+            final_co_wav = res_co or co_wav
+            if not final_co_wav.is_file() or final_co_wav.stat().st_size == 0:
+                raise RuntimeError("TTS synthesis failed for cold_open")
             co_dur = _probe_duration(final_co_wav) or (len(plan.cold_open.split()) / 2.7)
             voiced_narrations["cold_open"] = (final_co_wav, co_dur)
 
@@ -574,17 +588,22 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None) 
         for pt in plan.points:
             if progress and hasattr(progress, "stage"):
                 progress.stage(f"voicing point {pt.index}/{len(plan.points)}")
-            pt_wav = temp_dir / f"narration_point_{pt.index}.wav"
-            res_pt = narrator.synthesize_speech(pt.narration, pt_wav, language=plan.language)
-            final_pt_wav = _ensure_synthetic_wav(res_pt or pt_wav, duration_seconds=max(2.0, len(pt.narration.split()) / 2.7))
-            pt_dur = _probe_duration(final_pt_wav) or (len(pt.narration.split()) / 2.7)
-            voiced_narrations[f"point_{pt.index}"] = (final_pt_wav, pt_dur)
+            if pt.narration.strip():
+                pt_wav = temp_dir / f"narration_point_{pt.index}.wav"
+                res_pt = narrator.synthesize_speech(pt.narration, pt_wav, language=plan.language)
+                final_pt_wav = res_pt or pt_wav
+                if not final_pt_wav.is_file() or final_pt_wav.stat().st_size == 0:
+                    raise RuntimeError(f"TTS synthesis failed for point {pt.index}")
+                pt_dur = _probe_duration(final_pt_wav) or (len(pt.narration.split()) / 2.7)
+                voiced_narrations[f"point_{pt.index}"] = (final_pt_wav, pt_dur)
 
         # Outro
         if plan.outro.strip():
             out_wav = temp_dir / "narration_outro.wav"
             res_out = narrator.synthesize_speech(plan.outro, out_wav, language=plan.language)
-            final_out_wav = _ensure_synthetic_wav(res_out or out_wav, duration_seconds=max(2.0, len(plan.outro.split()) / 2.7))
+            final_out_wav = res_out or out_wav
+            if not final_out_wav.is_file() or final_out_wav.stat().st_size == 0:
+                raise RuntimeError("TTS synthesis failed for outro")
             out_dur = _probe_duration(final_out_wav) or (len(plan.outro.split()) / 2.7)
             voiced_narrations["outro"] = (final_out_wav, out_dur)
 
@@ -750,14 +769,81 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None) 
                 pt_wav, pt_dur = voiced_narrations[f"point_{pt.index}"]
 
                 opened_pt: list[Any] = []
-                broll_video = VideoFileClip(str(pt_clip_path)) if pt_clip_path else ColorClip(size=(target_w, target_h), color=(20, 20, 30), duration=pt_dur)
-                opened_pt.append(broll_video)
+                # Stop back-to-back duplicate footage: do not play the exact same pt.evidence[0] segment
+                # that immediately plays next at full volume.
+                # Selection priority:
+                # (a) an unused clip from pt.alternates if downloaded/available
+                # (b) pt.evidence[1] if the point has >= 2 evidence clips (trimmed to the last half)
+                # (c) if only 1 clip exists, play a visibly distinct sub-range or dimmed/blurred Ken-Burns background
+                #     from a different point's clip so the same footage never plays twice in a row.
+                broll_source_path: Path | None = None
+                apply_dim_blur = False
+                is_same_as_first_evidence = False
+
+                # (a) unused clip from pt.alternates if downloaded/available
+                pt_ev_keys = {(ev.url, round(ev.start, 2), round(ev.end, 2)) for ev in pt.evidence}
+                for alt in getattr(pt, "alternates", []) or []:
+                    alt_key = (alt.url, round(alt.start, 2), round(alt.end, 2))
+                    if alt_key not in pt_ev_keys:
+                        cand_path = downloaded_files.get(alt_key)
+                        if cand_path and Path(cand_path).is_file():
+                            broll_source_path = cand_path
+                            break
+
+                # (b) pt.evidence[1] if point has >= 2 evidence clips (trimmed to the last half)
+                is_ev2 = False
+                if broll_source_path is None and len(pt.evidence) >= 2:
+                    ev2 = pt.evidence[1]
+                    ev2_key = (ev2.url, round(ev2.start, 2), round(ev2.end, 2))
+                    cand_path = downloaded_files.get(ev2_key)
+                    if cand_path and Path(cand_path).is_file():
+                        broll_source_path = cand_path
+                        is_ev2 = True
+
+                # (c) from a different point's clip with dimmed/blurred Ken-Burns background
+                if broll_source_path is None:
+                    for other_pt in plan.points:
+                        if other_pt.index != pt.index:
+                            for other_ev in other_pt.evidence:
+                                other_key = (other_ev.url, round(other_ev.start, 2), round(other_ev.end, 2))
+                                cand_path = downloaded_files.get(other_key)
+                                if cand_path and Path(cand_path).is_file():
+                                    broll_source_path = cand_path
+                                    apply_dim_blur = True
+                                    break
+                            if broll_source_path is not None:
+                                break
+
+                # Fallback if only 1 clip exists across the whole plan
+                if broll_source_path is None:
+                    broll_source_path = pt_clip_path
+                    is_same_as_first_evidence = True
+                    apply_dim_blur = True
+
+                if broll_source_path and Path(broll_source_path).is_file():
+                    broll_video = VideoFileClip(str(broll_source_path))
+                    opened_pt.append(broll_video)
+                    raw_dur = float(broll_video.duration or 0.0)
+                    if is_ev2 and raw_dur > 0:
+                        half_start = max(0.0, raw_dur / 2.0)
+                        if half_start < raw_dur:
+                            broll_video = broll_video.subclipped(half_start, raw_dur)
+                    elif is_same_as_first_evidence and raw_dur > pt_dur * 1.5:
+                        sub_start = max(0.0, raw_dur - pt_dur)
+                        broll_video = broll_video.subclipped(sub_start, raw_dur)
+                else:
+                    broll_video = ColorClip(size=(target_w, target_h), color=(20, 20, 30), duration=pt_dur)
+                    opened_pt.append(broll_video)
+
                 broll_fitted = _fit_to_canvas(broll_video, target_w, target_h)
                 if (broll_fitted.duration or 0) < pt_dur:
                     loop_count = math.ceil(pt_dur / max(0.1, broll_fitted.duration or 1.0))
                     broll_fitted = concatenate_videoclips([broll_fitted] * loop_count)
                 broll_trimmed = broll_fitted.subclipped(0.0, pt_dur)
-                zoomed = _apply_ken_burns_zoom(broll_trimmed, kenburns_max_zoom)
+                if apply_dim_blur:
+                    zoomed = _apply_ken_burns_zoom(broll_trimmed, max_zoom=kenburns_max_zoom, blur_radius=6, dim_factor=0.65)
+                else:
+                    zoomed = _apply_ken_burns_zoom(broll_trimmed, max_zoom=kenburns_max_zoom)
 
                 pt_audio = AudioFileClip(str(pt_wav))
                 opened_pt.append(pt_audio)
@@ -802,7 +888,8 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None) 
 
                 # Lower-third credit
                 if ev_clip.kind == "official":
-                    cred_text = "Official footage: Rockstar Games"
+                    raw_ch = (ev_clip.channel or "").strip().lstrip("@")
+                    cred_text = f"Official footage: {raw_ch}" if raw_ch else f"Official {plan.game} footage"
                 else:
                     ch_clean = (ev_clip.channel or "").strip().lstrip("@")
                     cred_text = f"@{ch_clean}" if ch_clean else "@Unknown"

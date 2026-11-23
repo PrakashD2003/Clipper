@@ -310,7 +310,7 @@ def test_T6_post_files_teaser_vs_standalone(test_config: Config, synthetic_plan:
     assert teaser_short.hook_title in teaser_text
     assert "SOURCES" in teaser_text
     assert "@ViceGamer: https://youtube.com/watch?v=vault01&t=10s" in teaser_text
-    assert "Official footage (Rockstar Games): https://youtube.com/watch?v=official02&t=5s" in teaser_text
+    assert "Official footage (RockstarGames): https://youtube.com/watch?v=official02&t=5s" in teaser_text
     assert "#Shorts" in teaser_text
     assert "AI voiceover:" in teaser_text
     assert "- Set YouTube's Related Video to the long video" in teaser_text
@@ -613,5 +613,101 @@ def test_T6_quarantine_cleans_stale_outputs(test_config: Config, synthetic_plan:
     assert len(res["quarantined"]) == 1
     assert "teaser" not in synthetic_plan.outputs
     assert "teaser_post" not in synthetic_plan.outputs
+
+
+# ---------------------------------------------------------------------------
+# Ticket T1 Verification Tests for Shorts
+# ---------------------------------------------------------------------------
+
+def test_T1_shorts_official_credit_empty_fallback(test_config: Config, tmp_path: Path) -> None:
+    """Topic Shorts official credit falls back to 'Official {plan.game} footage' when channel is empty."""
+    plan = TopicPlan(
+        plan_id="plan-t1-shorts-cred",
+        topic_id="short-cred",
+        topic_title="Short Credit Test",
+        game="GTA 6",
+        shape="numbered",
+        status="approved",
+        cold_open="",
+        outro="",
+        points=[
+            TopicPoint(
+                index=1,
+                heading="Point 1",
+                narration="Narration",
+                evidence=[
+                    EvidenceClip(
+                        source_id="src_off_empty",
+                        url="https://youtube.com/watch?v=empty",
+                        channel="",  # empty channel
+                        kind="official",
+                        start=0.0,
+                        end=10.0,
+                    )
+                ],
+            )
+        ],
+        shorts=[
+            ShortPlan(
+                slot="short_a",
+                kind="standalone",
+                point_indexes=[1],
+                hook_title="Official Leak Revealed",
+                narration_intro="Intro",
+                narration_outro="Outro",
+            )
+        ],
+    )
+
+    post_file = write_short_post(test_config, plan, plan.shorts[0], tmp_path / "short_a.mp4")
+    text = post_file.read_text(encoding="utf-8")
+    assert "- Official GTA 6 footage: https://youtube.com/watch?v=empty&t=0s" in text
+    assert "Official GTA 6 footage" in text
+    assert "Rockstar Games" not in text
+
+
+def test_T1_shorts_hashtag_stopwords_and_capping(test_config: Config, tmp_path: Path) -> None:
+    """Shorts hashtags filter stopwords and cap at 4 (#Shorts + #Game + up to 2 topic tags)."""
+    plan = TopicPlan(
+        plan_id="plan-t1-shorts-tags",
+        topic_id="shorts-tags",
+        # Stopwords: 'How', 'The', 'For', 'Every', 'Actually'
+        # Meaningful: 'Casino', 'Vault', 'Secrets'
+        topic_title="How The Casino Vault Actually Works For Every Secrets",
+        game="GTA 6",
+        shape="numbered",
+        status="approved",
+        cold_open="",
+        outro="",
+        points=[],
+        shorts=[
+            ShortPlan(
+                slot="short_a",
+                kind="standalone",
+                hook_title="Casino Vault Hook",
+            )
+        ],
+    )
+
+    post_file = write_short_post(test_config, plan, plan.shorts[0], tmp_path / "short_a.mp4")
+    text = post_file.read_text(encoding="utf-8")
+
+    # Extract HASHTAGS line
+    for line in text.splitlines():
+        if line.startswith("#"):
+            tags = line.split()
+            # 1. Must start with #Shorts
+            assert tags[0] == "#Shorts"
+            # 2. Must contain game tag
+            assert "#GTA6" in tags
+            # 3. Must NOT contain stopwords
+            for stop in ["#How", "#The", "#For", "#Every", "#Actually"]:
+                assert stop not in tags
+            # 4. Must contain up to 2 topic tags
+            assert "#Casino" in tags
+            assert "#Vault" in tags
+            # 5. Must be strictly capped at 4
+            assert len(tags) == 4
+            break
 
 

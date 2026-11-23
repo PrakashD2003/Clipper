@@ -420,7 +420,8 @@ def render_topic_shorts(
         credit_windows: list[tuple[float, float, str]] = []
         for st, et, c in clip_timeline_spans:
             if c.kind == "official":
-                tag = "Rockstar Games"
+                raw_ch = (c.channel or "").strip().lstrip("@")
+                tag = raw_ch if raw_ch else f"Official {plan.game} footage"
             else:
                 raw_ch = (c.channel or "").strip().lstrip("@")
                 tag = f"@{raw_ch}" if raw_ch else "@Unknown"

@@ -145,7 +145,7 @@ hooks:
   streamer_tag: true         # blur_fill layout: small "@streamer" credit pill at the bottom of the hook band
 
 metadata:
-  hashtag_count: 15
+  hashtag_count: 4
   include_streamer_tag: true
   include_game_tag: true
 
