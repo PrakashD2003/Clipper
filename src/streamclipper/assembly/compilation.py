@@ -80,7 +80,7 @@ def _ass_time(seconds: float) -> str:
 
 
 def build_countdown_ass(
-    lines: list[str], windows: list[tuple[float, float]], caption_band_top: int = 1488
+    lines: list[str], windows: list[tuple[float, float]], caption_band_top: int = 1268
 ) -> str:
     """Minimal ASS script: one card per countdown line, shown in the caption band."""
     header = (

@@ -31,3 +31,4 @@ def _isolate_user_config(monkeypatch, tmp_path_factory):
 
     missing = tmp_path_factory.getbasetemp() / "no-user-config.yaml"
     monkeypatch.setattr(cfg_mod, "USER_CONFIG_PATH", missing)
+    monkeypatch.setattr(cfg_mod, "_REPO_USER_CONFIG_PATH", missing)

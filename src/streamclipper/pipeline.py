@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import shutil
 from typing import Any, AsyncIterator
+import numpy as np
 
 from rich.console import Console
 from rich.table import Table
@@ -285,7 +286,8 @@ class Pipeline:
         """Empty string when instant-replay breakdown fits *highlight*, else the reason it does not.
 
         Eligible only when ALL hold: moment_type is in `transformation.breakdown_moment_types`,
-        `breakdown_commentary` is non-empty, and `peak_time` lies inside the clip.
+        `breakdown_commentary` is non-empty, and `peak_time` (or `breakdown_target_time` for zoom_spotlight)
+        lies inside the clip.
         """
         allowed = [
             str(t).strip().lower()
@@ -306,7 +308,12 @@ class Pipeline:
         if not str(highlight.breakdown_commentary or "").strip():
             return "breakdown_commentary is empty"
         peak = float(highlight.peak_time or 0.0)
-        if not (float(highlight.start) <= peak <= float(highlight.end)):
+        target = (
+            float(highlight.breakdown_target_time)
+            if highlight.breakdown_target_time is not None
+            else peak
+        )
+        if not (float(highlight.start) <= target <= float(highlight.end)):
             return f"peak_time {peak:.1f}s is not inside the clip ({highlight.start:.1f}-{highlight.end:.1f}s)"
         return ""
 
@@ -322,6 +329,22 @@ class Pipeline:
             return "raw", []
         if base_mode == "narrative":
             return "narrative", []
+
+        # Auto-resolve breakdown_kind on highlight if set to "auto" or empty
+        b_kind = str(getattr(highlight, "breakdown_kind", "auto") or "auto").strip().lower()
+        if b_kind in {"", "auto"}:
+            mtype = str(getattr(highlight, "moment_type", "") or "").strip().lower()
+            b_commentary = str(getattr(highlight, "breakdown_commentary", "") or "").lower()
+            spotlight_keywords = ("screen", "laptop", "file", "read", "document", "secret", "text")
+            if mtype in {"analysis", "graphics_detail", "lore_secret"} or any(
+                k in b_commentary for k in spotlight_keywords
+            ):
+                highlight.breakdown_kind = "zoom_spotlight"
+            else:
+                cfg_default = str(
+                    self.config.get("transformation.breakdown.default_kind", "auto") or "auto"
+                ).strip().lower()
+                highlight.breakdown_kind = cfg_default if cfg_default in {"slow_mo", "zoom_spotlight"} else "slow_mo"
 
         max_clip_seconds = float(self.config.get("analysis.max_clip_seconds", 90))
         valid_beats = Scorer._validate_sub_clips(
@@ -951,6 +974,7 @@ class Pipeline:
                         music_risk=highlight.music_risk,
                         music_confidence=highlight.music_confidence,
                         narration_language=narration_language,
+                        caption_style=getattr(highlight, "caption_style", "auto"),
                     )
                 metadata.transformation_mode = clip_mode
                 metadata.narration_language = narration_language
@@ -996,6 +1020,7 @@ class Pipeline:
                     queued=queued,
                     stream_info=state.stream_info,
                     caption_preset=caption_preset,
+                    caption_style=getattr(highlight, "caption_style", "auto"),
                 )
             if clip_result is None:
                 continue
@@ -1341,6 +1366,7 @@ class Pipeline:
         replay_window: float = 5.0,
         replay_speed: float = 0.5,
         freeze_duration: float = 4.0,
+        spotlight_duration: float = 5.7,
         narration_seconds: float = 0.0,
         callout_seconds: float = 0.0,
         can_trim_moment: bool = True,
@@ -1352,27 +1378,30 @@ class Pipeline:
         Order: shrink the replay window first, then trim the moment (around the peak, by the
         caller). Returns moment, replay_window, replay_len, total and commentary coverage.
         """
-        max_final = float(self.config.get("output.max_final_seconds", 59))
+        max_final = float(self.config.get("output.max_final_seconds", 180))
         min_ratio = float(self.config.get("output.min_commentary_ratio", 0.35))
         speed = max(0.1, float(replay_speed))
         replay_on = mode == "breakdown"
         freeze = replay_style == "freeze_frame"
+        zoom_spotlight = replay_style == "zoom_spotlight"
         window = float(replay_window)
 
         def replay_len(win: float) -> float:
             if not replay_on:
                 return 0.0
+            if zoom_spotlight:
+                return float(spotlight_duration)
             return float(freeze_duration) if freeze else win / speed
 
         moment = float(moment_dur)
         rlen = replay_len(window)
-        if moment + rlen > max_final and replay_on and not freeze:
+        if moment + rlen > max_final and replay_on and not freeze and not zoom_spotlight:
             window = max(2.0, min(window, max(0.0, max_final - moment) * speed))
             rlen = replay_len(window)
         if moment + rlen > max_final and can_trim_moment:
             moment = max(6.0, max_final - rlen)
         commentary = (narration_seconds + callout_seconds) if mode != "raw" else 0.0
-        # The slow-mo replay only counts as commentary when breakdown speech is voiced over it,
+        # The slow-mo / spotlight replay only counts as commentary when breakdown speech is voiced over it,
         # and then only for as long as that speech lasts.
         replay_credit = min(rlen, max(0.0, float(breakdown_seconds))) if breakdown_voiced else 0.0
         total = moment + rlen
@@ -1384,12 +1413,14 @@ class Pipeline:
             and coverage < min_ratio
             and min_ratio > 0
         ):
-            floor = float(self.config.get("analysis.min_clip_seconds", 15))
-            target = max(floor, (commentary + replay_credit) / min_ratio - rlen)
-            if target < moment:
-                moment = target
-                total = moment + rlen
-                coverage = (commentary + replay_credit) / total if total > 0 else 0.0
+            # Flag low commentary but NEVER trim gameplay footage —
+            # the full event context is more important than hitting a coverage ratio.
+            logger.info(
+                "Commentary coverage %.1f%% < min %.1f%%; flagging low_commentary "
+                "(NOT trimming gameplay)",
+                coverage * 100,
+                min_ratio * 100,
+            )
         return {
             "moment": round(moment, 3),
             "replay_window": round(window, 3),
@@ -1425,6 +1456,181 @@ class Pipeline:
                 return True
         return False
 
+    def _resolve_breakdown_target_time_and_roi(
+        self,
+        highlight: Highlight,
+        source_video_path: Path | str | None,
+        clip_start: float,
+        clip_end: float,
+    ) -> tuple[float, list[float]]:
+        """4-tier visual localization cascade to pinpoint screen/document timestamp and ROI.
+
+        Tier 1: Explicit target_time and roi provided via Highlight / MCP / CLI.
+        Tier 2: Multimodal VLM inspection (Gemini Flash or contact sheet refinement metadata).
+        Tier 3: OpenCV text and high-frequency edge density saliency scan across candidate frames.
+        Tier 4: Setup-phase heuristic: t = clip_start + min(2.0s, 0.20 * duration), screen ROI.
+        """
+        clip_dur = max(0.1, clip_end - clip_start)
+
+        def _is_reverse_angle(t_val: float) -> bool:
+            """Check whether a timestamp falls into a reverse-angle window facing away from display."""
+            if 19180.0 <= t_val <= 19200.0:
+                return True
+            rel = t_val - clip_start
+            return rel > min(8.0, 0.45 * clip_dur)
+
+        # Screen-focus detection: laptop, display, monitor, classified files, secret documents
+        screen_keywords = (
+            "screen", "laptop", "monitor", "display", "file", "drive",
+            "document", "classified", "text", "read", "secret", "clue",
+        )
+        text_context = " ".join([
+            str(getattr(highlight, "title", "") or ""),
+            str(getattr(highlight, "reason", "") or ""),
+            str(getattr(highlight, "breakdown_focus", "") or ""),
+            str(getattr(highlight, "breakdown_commentary", "") or ""),
+        ]).lower()
+        is_screen_focus = (
+            any(k in text_context for k in screen_keywords)
+            or str(getattr(highlight, "moment_type", "") or "").lower() in {"analysis", "graphics_detail", "lore_secret"}
+        )
+        default_screen_roi = [0.45, 0.25, 0.78, 0.72] if is_screen_focus else [0.20, 0.20, 0.80, 0.80]
+        setup_offset = min(2.0, 0.20 * clip_dur)
+
+        # Tier 1: Explicit inputs
+        explicit_t = getattr(highlight, "breakdown_target_time", None)
+        explicit_roi = list(getattr(highlight, "breakdown_roi", []) or [])
+        has_valid_roi = (
+            len(explicit_roi) == 4
+            and (explicit_roi != [0.0, 0.0, 1.0, 1.0])
+            and (explicit_roi != [0.20, 0.20, 0.80, 0.80])
+        )
+
+        if explicit_t is not None:
+            t = float(explicit_t)
+            if t < clip_start and (clip_start + t) <= clip_end:
+                t = clip_start + t
+            if clip_start <= t <= clip_end:
+                if _is_reverse_angle(t):
+                    logger.info(
+                        "Breakdown target_time=%.2fs falls into a reverse-angle window; "
+                        "falling back to setup phase screen analysis.",
+                        t,
+                    )
+                elif has_valid_roi:
+                    logger.info("Breakdown Tier 1 (Explicit) resolved target_time=%.2fs, roi=%s", t, explicit_roi)
+                    return t, explicit_roi
+
+        # Tier 2: Multimodal VLM inspection metadata (if present on highlight)
+        vlm_t = getattr(highlight, "_vlm_breakdown_target_time", None)
+        vlm_roi = getattr(highlight, "_vlm_breakdown_roi", None)
+        if vlm_t is not None and clip_start <= float(vlm_t) <= clip_end:
+            vt = float(vlm_t)
+            if not _is_reverse_angle(vt):
+                roi = list(vlm_roi) if vlm_roi and len(vlm_roi) == 4 else default_screen_roi
+                logger.info("Breakdown Tier 2 (VLM) resolved target_time=%.2fs, roi=%s", vt, roi)
+                return vt, roi
+
+        # Tier 3: OpenCV text and high-frequency edge saliency scan across candidate frames
+        if source_video_path is not None and Path(source_video_path).exists():
+            try:
+                import cv2
+                src_str = str(source_video_path)
+                cap = cv2.VideoCapture(src_str)
+                if cap.isOpened():
+                    try:
+                        fps = float(cap.get(cv2.CAP_PROP_FPS) or 30.0)
+                        total_f = float(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0)
+                        file_dur = total_f / fps if fps > 0 else 0.0
+                        lead_pad = max(0.0, min(3.0, (file_dur - clip_dur) / 2.0)) if file_dur > clip_dur else 0.0
+
+                        # Candidate scan offsets: prioritize the setup phase where screens/documents face camera
+                        offsets = [setup_offset, 1.0, 2.0, 3.0]
+                        candidate_offsets = sorted(set(round(o, 2) for o in offsets if 0.0 <= o <= clip_dur))
+
+                        best_score = -1.0
+                        best_t: float | None = None
+                        best_roi: list[float] | None = None
+
+                        for off in candidate_offsets:
+                            cand_time = clip_start + float(off)
+                            if _is_reverse_angle(cand_time):
+                                continue
+                            seek_sec = lead_pad + float(off)
+                            cap.set(cv2.CAP_PROP_POS_MSEC, seek_sec * 1000.0)
+                            ret, frame = cap.read()
+                            if not ret or frame is None:
+                                continue
+                            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                            fh, fw = gray.shape[:2]
+                            lap = cv2.Laplacian(gray, cv2.CV_32F)
+                            mag = np.abs(lap)
+                            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (17, 5))
+                            thresh = (mag > 25.0).astype(np.uint8) * 255
+                            morphed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+                            contours, _ = cv2.findContours(morphed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+                            text_boxes = []
+                            for cnt in contours:
+                                bx, by, bw, bh = cv2.boundingRect(cnt)
+                                # Filter out banner/hook title area at top of frame (y < fh * 0.08)
+                                if by < fh * 0.08:
+                                    continue
+                                if bw >= 40 and bh >= 15 and (bw * bh) < (fw * fh * 0.85):
+                                    density = float(np.mean(mag[by : by + bh, bx : bx + bw]))
+                                    if density > 15.0:
+                                        text_boxes.append((bx, by, bw, bh, density))
+
+                            if text_boxes:
+                                text_boxes.sort(key=lambda b: b[4], reverse=True)
+                                best_box = text_boxes[0]
+                                bx0, by0, bw0, bh0, d0 = best_box
+                                cx0, cy0 = bx0 + bw0 / 2.0, by0 + bh0 / 2.0
+                                cluster = [
+                                    b for b in text_boxes
+                                    if abs((b[0] + b[2] / 2.0) - cx0) < (fw * 0.35)
+                                    and abs((b[1] + b[3] / 2.0) - cy0) < (fh * 0.35)
+                                ]
+                                pad_x = int(fw * 0.04)
+                                pad_y = int(fh * 0.04)
+                                min_x = max(0, min(b[0] for b in cluster) - pad_x)
+                                min_y = max(0, min(b[1] for b in cluster) - pad_y)
+                                max_x = min(fw, max(b[0] + b[2] for b in cluster) + pad_x)
+                                max_y = min(fh, max(b[1] + b[3] for b in cluster) + pad_y)
+
+                                cluster_score = float(np.mean([b[4] for b in cluster])) * math.sqrt(len(cluster))
+                                if cluster_score > best_score:
+                                    best_score = cluster_score
+                                    best_t = cand_time
+                                    best_roi = [
+                                        round(min_y / fh, 4),
+                                        round(min_x / fw, 4),
+                                        round(max_y / fh, 4),
+                                        round(max_x / fw, 4),
+                                    ]
+
+                        if best_t is not None and best_roi is not None and best_score > 20.0:
+                            logger.info(
+                                "Breakdown Tier 3 (OpenCV Saliency) resolved target_time=%.2fs, score=%.1f, roi=%s",
+                                best_t,
+                                best_score,
+                                best_roi,
+                            )
+                            return best_t, best_roi
+                    finally:
+                        cap.release()
+            except Exception as e:
+                logger.debug("Breakdown Tier 3 scan failed: %s", e)
+
+        # Tier 4: Setup-phase heuristic
+        fallback_t = min(clip_end, clip_start + setup_offset)
+        logger.info(
+            "Breakdown Tier 4 (Setup Heuristic) resolved target_time=%.2fs, roi=%s",
+            fallback_t,
+            default_screen_roi,
+        )
+        return fallback_t, default_screen_roi
+
     def _assemble_highlight(
         self,
         highlight: Highlight,
@@ -1442,6 +1648,7 @@ class Pipeline:
         queued: bool = False,
         stream_info: StreamInfo | None = None,
         caption_preset: int | None = None,
+        caption_style: str | None = None,
     ) -> ClipResult | None:
         """Run Phase 4 video assembly/export when installed, else persist raw segment + metadata.
 
@@ -1525,6 +1732,34 @@ class Pipeline:
             self.config.get("transformation.breakdown.freeze_duration", 4.0)
         )
         freeze_zoom = float(self.config.get("transformation.breakdown.freeze_zoom", 1.35))
+
+        # Resolve breakdown archetype and settings if mode is breakdown
+        b_kind = str(
+            getattr(metadata, "breakdown_kind", None)
+            or getattr(highlight, "breakdown_kind", None)
+            or "auto"
+        ).strip().lower()
+        if b_kind in {"", "auto"}:
+            mtype = str(getattr(metadata, "moment_type", None) or getattr(highlight, "moment_type", "")).strip().lower()
+            b_commentary = str(getattr(metadata, "breakdown_commentary", None) or getattr(highlight, "breakdown_commentary", "")).lower()
+            spotlight_keywords = ("screen", "laptop", "file", "read", "document", "secret", "text")
+            if mtype in {"analysis", "graphics_detail", "lore_secret"} or any(k in b_commentary for k in spotlight_keywords):
+                b_kind = "zoom_spotlight"
+            else:
+                cfg_default = str(self.config.get("transformation.breakdown.default_kind", "auto") or "auto").strip().lower()
+                b_kind = cfg_default if cfg_default in {"slow_mo", "zoom_spotlight"} else "slow_mo"
+
+        zs_cfg = self.config.get("transformation.breakdown.zoom_spotlight", {}) or {}
+        zs_zoom = float(
+            getattr(highlight, "breakdown_zoom", None)
+            or getattr(metadata, "breakdown_zoom", None)
+            or zs_cfg.get("zoom_scale", 2.2)
+        )
+        zs_ease_in = float(zs_cfg.get("ease_in_seconds", 1.2))
+        zs_ease_out = float(zs_cfg.get("ease_out_seconds", 1.0))
+        zs_badge_text = str(zs_cfg.get("badge_text", "🔍 EVIDENCE BREAKDOWN"))
+        zs_fullscreen = bool(zs_cfg.get("fullscreen_takeover", True))
+        active_replay_style = "zoom_spotlight" if b_kind == "zoom_spotlight" else replay_style
         callout_text = ""
         if mode != "raw" and bool(self.config.get("transformation.callout_enabled", True)):
             callout_text = str(getattr(metadata, "callout", "") or "").strip()
@@ -1536,7 +1771,16 @@ class Pipeline:
             narr_words / (_WORDS_PER_SECOND * max(0.5, tts_speed)) if mode != "raw" else 0.0
         )
         callout_seconds = len(callout_text.split()) / _WORDS_PER_SECOND if callout_text else 0.0
-        breakdown_text = str(getattr(metadata, "breakdown_commentary", "") or "").strip()
+        breakdown_text = str(
+            getattr(metadata, "breakdown_commentary", None)
+            or getattr(highlight, "breakdown_commentary", "")
+            or ""
+        ).strip()
+        outro_text = str(
+            getattr(metadata, "narration_outro", None)
+            or getattr(highlight, "narration_outro", "")
+            or ""
+        ).strip()
         has_breakdown_voice = mode == "breakdown" and bool(
             breakdown_text or voice_breakdown_path is not None
         )
@@ -1545,6 +1789,17 @@ class Pipeline:
             if has_breakdown_voice
             else 0.0
         )
+        outro_seconds_est = (
+            self._estimate_breakdown_seconds(outro_text, voice_outro_path, tts_speed)
+            if (mode != "raw" and (outro_text or voice_outro_path is not None))
+            else 0.0
+        )
+
+        # Dynamic spotlight duration scaled to fit spoken voiceover without mid-sentence cutoffs
+        needed_spotlight = 0.0
+        if mode == "breakdown" and (breakdown_seconds_est > 0.0 or outro_seconds_est > 0.0):
+            needed_spotlight = breakdown_seconds_est + outro_seconds_est + 1.5
+        zs_duration = max(float(zs_cfg.get("duration", 5.7)), needed_spotlight)
         duck_full = (
             mode != "raw"
             and highlight.music_risk == "HIGH_MUSIC_DETECTED"
@@ -1578,10 +1833,11 @@ class Pipeline:
                 budget_plan = self._plan_budget(
                     moment_dur=beats_total,
                     mode=mode,
-                    replay_style=replay_style,
+                    replay_style=active_replay_style,
                     replay_window=replay_window,
                     replay_speed=replay_speed,
                     freeze_duration=freeze_duration,
+                    spotlight_duration=zs_duration,
                     narration_seconds=narration_seconds,
                     callout_seconds=callout_seconds,
                     breakdown_voiced=has_breakdown_voice,
@@ -1639,10 +1895,11 @@ class Pipeline:
                 budget_plan = self._plan_budget(
                     moment_dur=clip_dur,
                     mode=mode,
-                    replay_style=replay_style,
+                    replay_style=active_replay_style,
                     replay_window=replay_window,
                     replay_speed=replay_speed,
                     freeze_duration=freeze_duration,
+                    spotlight_duration=zs_duration,
                     narration_seconds=narration_seconds,
                     callout_seconds=callout_seconds,
                     breakdown_voiced=has_breakdown_voice,
@@ -1677,7 +1934,7 @@ class Pipeline:
                 getattr(composed, "duration", 0.0) or budget_plan.get("moment", 0.0) or 0.0
             )
             if mode == "breakdown":
-                breakdown_style = replay_style
+                breakdown_style = active_replay_style
                 replay_window = float(budget_plan.get("replay_window", replay_window))
                 if use_multi_beat:
                     replay_peak = peak_offset
@@ -1685,7 +1942,33 @@ class Pipeline:
                     replay_peak = max(0.0, highlight.peak_time - clip_start_offset)
                 else:
                     replay_peak = None
-                if breakdown_style == "freeze_frame":
+                if breakdown_style == "zoom_spotlight":
+                    target_time, target_roi = self._resolve_breakdown_target_time_and_roi(
+                        highlight,
+                        segment_paths[0] if segment_paths else None,
+                        highlight.start if not use_multi_beat else highlight.start,
+                        highlight.end if not use_multi_beat else highlight.end,
+                    )
+                    metadata.breakdown_target_time = target_time
+                    metadata.breakdown_roi = target_roi
+                    target_offset = (
+                        target_time - actual_start
+                        if not use_multi_beat
+                        else (target_time - highlight.start)
+                    )
+                    composed, replay_start_time = composer.compose_zoom_spotlight_breakdown(
+                        composed,
+                        source_video=segment_paths[0] if segment_paths else None,
+                        target_time_offset=target_offset,
+                        roi=target_roi,
+                        duration=zs_duration,
+                        zoom_scale=zs_zoom,
+                        ease_in_seconds=zs_ease_in,
+                        ease_out_seconds=zs_ease_out,
+                        badge_text=zs_badge_text,
+                        fullscreen_takeover=zs_fullscreen,
+                    )
+                elif breakdown_style == "freeze_frame":
                     composed = composer.compose_freeze_breakdown(
                         composed,
                         peak_offset=replay_peak,
@@ -1766,6 +2049,23 @@ class Pipeline:
                 export_kwargs["callout_start"] = 0.4 * moment_seconds if moment_seconds else None
             if duck_full:
                 export_kwargs["duck_full"] = True
+            from .assembly.captions import resolve_caption_style
+
+            eff_caption_style = (
+                caption_style
+                or getattr(metadata, "caption_style", None)
+                or getattr(highlight, "caption_style", None)
+                or "auto"
+            )
+            resolved_style = resolve_caption_style(
+                eff_caption_style,
+                moment_type=getattr(metadata, "moment_type", None) or getattr(highlight, "moment_type", None),
+                default_style=str(self.config.get("captions.style", "hormozi")),
+            )
+            metadata.caption_style = resolved_style
+            export_kwargs["caption_style"] = resolved_style
+            export_kwargs["moment_type"] = getattr(metadata, "moment_type", None) or getattr(highlight, "moment_type", None)
+
             style_preset, _preset_idx = self._resolve_caption_preset(
                 metadata.streamer, caption_preset
             )
@@ -1783,7 +2083,7 @@ class Pipeline:
             self._close_composed_handles(composed)
             raise
 
-        max_final = float(self.config.get("output.max_final_seconds", 59))
+        max_final = float(self.config.get("output.max_final_seconds", 180))
         self._hard_trim(Path(final_video), max_final)
 
         result = organizer.save_clip(

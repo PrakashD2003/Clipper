@@ -5,8 +5,9 @@ import math
 from pathlib import Path
 from typing import Any
 
+import cv2
 import numpy as np
-from moviepy import CompositeVideoClip, ImageClip, VideoFileClip, concatenate_videoclips
+from moviepy import CompositeVideoClip, ImageClip, VideoClip, VideoFileClip, concatenate_videoclips
 from moviepy.audio.AudioClip import AudioArrayClip
 from PIL import Image, ImageFilter
 
@@ -632,6 +633,34 @@ class VideoComposer:
             zoom=zoom,
         )
 
+    def compose_zoom_spotlight_breakdown(
+        self,
+        main_clip: Any,
+        source_video: str | Path | None = None,
+        target_time_offset: float | None = None,
+        roi: list[float] | None = None,
+        duration: float = 5.7,
+        zoom_scale: float = 2.2,
+        ease_in_seconds: float = 1.2,
+        ease_out_seconds: float = 1.0,
+        badge_text: str = "🔍 EVIDENCE BREAKDOWN",
+        fullscreen_takeover: bool = True,
+    ) -> tuple[CompositeVideoClip, float]:
+        """Assemble a high-resolution Ken Burns zoom spotlight breakdown ending on main_clip."""
+        return compose_zoom_spotlight_breakdown(
+            main_clip=main_clip,
+            source_video=source_video,
+            target_time_offset=target_time_offset,
+            roi=roi,
+            duration=duration,
+            zoom_scale=zoom_scale,
+            ease_in_seconds=ease_in_seconds,
+            ease_out_seconds=ease_out_seconds,
+            badge_text=badge_text,
+            fullscreen_takeover=fullscreen_takeover,
+            config=getattr(self, "_config", None),
+        )
+
 
 def compose_instant_replay(
     main_clip: Any,
@@ -818,3 +847,228 @@ def compose_freeze_breakdown(
         combined._layout = main_clip._layout
 
     return combined
+
+
+def compose_zoom_spotlight_breakdown(
+    main_clip: Any,
+    source_video: str | Path | None = None,
+    target_time_offset: float | None = None,
+    roi: list[float] | None = None,
+    duration: float = 5.7,
+    zoom_scale: float = 2.2,
+    ease_in_seconds: float = 1.2,
+    ease_out_seconds: float = 1.0,
+    badge_text: str = "🔍 EVIDENCE BREAKDOWN",
+    fullscreen_takeover: bool = True,
+    config: Config | None = None,
+) -> tuple[CompositeVideoClip, float]:
+    """Assemble a high-resolution Ken Burns zoom spotlight breakdown ending on main_clip.
+
+    Args:
+        main_clip: The base composed vertical clip (e.g. 1080x1920).
+        source_video: Path to uncompressed 1080p source video (for raw frame extraction).
+        target_time_offset: Stream/clip second where the screen/document appears.
+        roi: Normalized Region of Interest [ymin, xmin, ymax, xmax] in [0.0, 1.0].
+        duration: Total duration of the spotlight clip (default 5.7s).
+        zoom_scale: Zoom magnification factor into ROI (default 2.2x).
+        ease_in_seconds: Duration of sinusoidal zoom-in ease (default 1.2s).
+        ease_out_seconds: Duration of sinusoidal zoom-out ease (default 1.0s).
+        badge_text: Text for on-screen breakdown badge (default "🔍 EVIDENCE BREAKDOWN").
+        fullscreen_takeover: Whether to expand to full 9:16 vertical canvas (default True).
+        config: Optional Config instance.
+
+    Returns:
+        (combined_clip, replay_start_time) where replay_start_time == main_clip.duration.
+    """
+    clip_dur = float(getattr(main_clip, "duration", 0.0) or 0.0)
+    w = getattr(main_clip, "w", 1080) or 1080
+    h = getattr(main_clip, "h", 1920) or 1920
+    if clip_dur <= 0.0:
+        return main_clip, 0.0
+
+    duration = float(duration) if duration and float(duration) > 0.0 else 5.7
+
+    raw_frame: np.ndarray | None = None
+    target_time = (
+        float(target_time_offset)
+        if target_time_offset is not None and float(target_time_offset) >= 0.0
+        else min(3.5, 0.25 * clip_dur)
+    )
+
+    if source_video is not None:
+        src_path = Path(source_video)
+        if src_path.exists():
+            try:
+                cap = cv2.VideoCapture(str(src_path))
+                if cap.isOpened():
+                    try:
+                        cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, target_time * 1000.0))
+                        ret, bgr = cap.read()
+                        if (not ret or bgr is None) and target_time > 0:
+                            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+                            if total_frames > 1:
+                                cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, total_frames - 2))
+                                ret, bgr = cap.read()
+                        if ret and bgr is not None:
+                            raw_frame = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                    finally:
+                        cap.release()
+            except Exception as e:
+                logger.debug("Failed to extract frame from %s at %.2fs: %s", src_path, target_time, e)
+
+    if raw_frame is None:
+        frame_time = min(max(0.0, target_time), max(0.0, clip_dur - 0.04))
+        try:
+            raw_frame = main_clip.get_frame(frame_time)
+        except Exception as e:
+            logger.warning("Failed to extract frame from main_clip at %.2fs: %s", frame_time, e)
+            raw_frame = np.zeros((h, w, 3), dtype=np.uint8)
+
+    if raw_frame.dtype != np.uint8:
+        raw_frame = np.clip(raw_frame, 0, 255).astype(np.uint8)
+
+    src_h, src_w = raw_frame.shape[:2]
+
+    # ROI normalization: [ymin, xmin, ymax, xmax] in 0.0 - 1.0
+    valid_roi = [0.0, 0.0, 1.0, 1.0]
+    if roi and len(roi) == 4:
+        try:
+            valid_roi = [float(x) for x in roi]
+        except (ValueError, TypeError):
+            valid_roi = [0.0, 0.0, 1.0, 1.0]
+
+    ymin = max(0.0, min(1.0, min(valid_roi[0], valid_roi[2])))
+    ymax = max(0.0, min(1.0, max(valid_roi[0], valid_roi[2])))
+    xmin = max(0.0, min(1.0, min(valid_roi[1], valid_roi[3])))
+    xmax = max(0.0, min(1.0, max(valid_roi[1], valid_roi[3])))
+
+    # Handle degenerate point / invalid ROI with a reasonable window
+    if (ymax - ymin) < 0.01:
+        ymin = max(0.0, ymin - 0.15)
+        ymax = min(1.0, ymax + 0.15)
+    if (xmax - xmin) < 0.01:
+        xmin = max(0.0, xmin - 0.15)
+        xmax = min(1.0, xmax + 0.15)
+
+    roi_cx_norm = (xmin + xmax) / 2.0
+    roi_cy_norm = (ymin + ymax) / 2.0
+
+    target_aspect = float(w) / float(h)
+    src_aspect = float(src_w) / float(src_h)
+
+    # Initial full-bleed crop box fitting the target vertical aspect ratio
+    if src_aspect >= target_aspect:
+        # Source is wider than target (e.g. 16:9 source in 9:16 vertical)
+        crop_h_0 = float(src_h)
+        crop_w_0 = crop_h_0 * target_aspect
+    else:
+        # Source is taller than target
+        crop_w_0 = float(src_w)
+        crop_h_0 = crop_w_0 / target_aspect
+
+    # Target zoom scale
+    z_target = max(1.0, float(zoom_scale)) if zoom_scale is not None and float(zoom_scale) > 0 else 2.2
+
+    # Target crop dimensions at full zoom (maintaining target_aspect)
+    crop_h_1 = max(10.0, crop_h_0 / z_target)
+    crop_w_1 = crop_h_1 * target_aspect
+
+    # Center coordinates in source pixels
+    cx_0 = float(src_w) / 2.0
+    cy_0 = float(src_h) / 2.0
+    cx_target = roi_cx_norm * float(src_w)
+    cy_target = roi_cy_norm * float(src_h)
+
+    t_in = (
+        max(0.0, min(float(ease_in_seconds), duration / 2.0))
+        if ease_in_seconds is not None
+        else min(1.2, duration / 2.0)
+    )
+    t_out = (
+        max(0.0, min(float(ease_out_seconds), duration - t_in))
+        if ease_out_seconds is not None
+        else min(1.0, duration - t_in)
+    )
+
+    def make_frame(t: float) -> np.ndarray:
+        t_clamped = max(0.0, min(duration, float(t)))
+        if t_in > 0.0 and t_clamped <= t_in:
+            alpha = t_clamped / t_in
+            u = (1.0 - math.cos(math.pi * alpha)) / 2.0
+        elif t_clamped <= (duration - t_out):
+            u = 1.0
+        elif t_out > 0.0:
+            beta = (t_clamped - (duration - t_out)) / t_out
+            u = (1.0 + math.cos(math.pi * beta)) / 2.0
+        else:
+            u = 1.0
+
+        # Current crop size and center interpolated smoothly
+        curr_crop_w = crop_w_0 + (crop_w_1 - crop_w_0) * u
+        curr_crop_h = crop_h_0 + (crop_h_1 - crop_h_0) * u
+        curr_cx = cx_0 + (cx_target - cx_0) * u
+        curr_cy = cy_0 + (cy_target - cy_0) * u
+
+        # Clamp center so crop box stays strictly inside raw_frame boundaries
+        curr_cx = max(curr_crop_w / 2.0, min(float(src_w) - curr_crop_w / 2.0, curr_cx))
+        curr_cy = max(curr_crop_h / 2.0, min(float(src_h) - curr_crop_h / 2.0, curr_cy))
+
+        x1 = curr_cx - curr_crop_w / 2.0
+        y1 = curr_cy - curr_crop_h / 2.0
+        x2 = curr_cx + curr_crop_w / 2.0
+        y2 = curr_cy + curr_crop_h / 2.0
+
+        src_pts = np.float32([[x1, y1], [x2, y1], [x1, y2]])
+        dst_pts = np.float32([[0, 0], [w, 0], [0, h]])
+        M = cv2.getAffineTransform(src_pts, dst_pts)
+        return cv2.warpAffine(raw_frame, M, (w, h), flags=cv2.INTER_LANCZOS4, borderMode=cv2.BORDER_REFLECT)
+
+    spotlight_clip = VideoClip(make_frame, duration=duration)
+    spotlight_clip.fps = float(getattr(main_clip, "fps", 30.0) or 30.0)
+
+    from .hooks import create_replay_badge
+
+    badge_clip = create_replay_badge(
+        text=badge_text,
+        width=w,
+        height=h,
+        duration=duration,
+        config=config,
+        layout=None if fullscreen_takeover else getattr(main_clip, "_layout", None),
+    )
+
+    spotlight_comp = CompositeVideoClip([spotlight_clip, badge_clip], size=(w, h))
+
+    audio_fps = 44100
+    if main_clip.audio is not None:
+        audio_fps = int(getattr(main_clip.audio, "fps", 44100) or 44100)
+    n_samples = int(math.ceil(duration * audio_fps))
+    silent_audio = AudioArrayClip(np.zeros((n_samples, 2), dtype=np.float32), fps=audio_fps)
+    spotlight_comp = spotlight_comp.with_audio(silent_audio)
+
+    replay_start_time = float(main_clip.duration)
+    combined = concatenate_videoclips([main_clip, spotlight_comp], method="compose")
+
+    sources: list[Any] = []
+    seen_ids: set[int] = set()
+    for c in (main_clip, spotlight_comp):
+        candidates = list(getattr(c, "_source_clips", None) or [])
+        sc = getattr(c, "_source_clip", None)
+        if sc is not None:
+            candidates.append(sc)
+        for s in candidates:
+            if id(s) not in seen_ids:
+                seen_ids.add(id(s))
+                sources.append(s)
+    if not sources:
+        sources = [main_clip]
+
+    combined._source_clip = sources[0]
+    combined._source_clips = sources
+    combined._breakdown_kind = "zoom_spotlight"
+    combined._replay_start = replay_start_time
+    combined._spotlight_duration = duration
+    if getattr(main_clip, "_layout", None) is not None:
+        combined._layout = main_clip._layout
+
+    return combined, replay_start_time

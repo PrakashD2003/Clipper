@@ -64,6 +64,8 @@ EXPECTED_TOOLS = {
     "approve_topic_plan",
     "render_topic_video",
     "render_topic_shorts",
+    "inspect_moment_context",
+    "refine_highlight_bounds",
 }
 
 
@@ -110,7 +112,13 @@ def _extract_json(call_result: Any) -> dict[str, Any]:
     """Decode the JSON string payload returned in an MCP SDK v2 CallToolResult."""
     assert getattr(call_result, "is_error", False) is False
     assert call_result.content, "Expected non-empty content in CallToolResult"
-    text = call_result.content[0].text
+    text = ""
+    for item in call_result.content:
+        if getattr(item, "text", None):
+            text = item.text
+            break
+    if not text:
+        text = getattr(call_result.content[-1], "text", "")
     parsed = json.loads(text)
     assert isinstance(parsed, dict)
     return parsed
@@ -187,7 +195,7 @@ def _lenient_call_tool(monkeypatch: pytest.MonkeyPatch) -> None:
                         it.setdefault("narration_intro", "Opening line for the clip.")
                         it.setdefault("narration_outro", "Closing line for the clip.")
                 args["highlights"] = json.dumps(parsed)
-        elif name in ("render_clip", "render_all_selected"):
+        elif name in ("render_clip", "render_all_selected", "transcribe_audio"):
             args.setdefault("wait", True)
             if name == "render_all_selected":
                 return await _REAL_CALL_TOOL(name, args, *a, **kw)
@@ -252,9 +260,11 @@ async def test_mcp_server_registration_and_schemas() -> None:
         "mode",
         "voice_intro_path",
         "voice_outro_path",
+        "language",
     ):
         assert param in render_props, f"render_clip missing parameter {param}"
     assert render_props["mode"]["default"] is None
+    assert render_props["language"]["default"] == ""
 
     meta_props = by_name["generate_post_metadata"].input_schema["properties"]
     assert meta_props["use_ollama"]["default"] is False
@@ -800,6 +810,41 @@ async def test_render_clip_story_narrative_raw_and_voice_overrides(
     err_data = _extract_json(err_res)
     assert "error" in err_data
     assert "Invalid transformation mode" in err_data["error"]
+
+    # 5) Explicit language parameter overrides auto-detection
+    lang_res = await mcp.call_tool(
+        "render_clip",
+        {
+            "url": url,
+            "start": 100.0,
+            "end": 140.0,
+            "hook_title": "HINGLISH CLIP",
+            "narration_intro": "Dekho bhai kya scene hua yahan par.",
+            "narration_outro": "Batao comment section mein kya sochte ho.",
+            "mode": "narrative",
+            "language": "hinglish",
+            "wait": True,
+        },
+    )
+    lang_data = _extract_json(lang_res)
+    assert "error" not in lang_data
+    assert assemble_calls[-1]["metadata"].narration_language == "hinglish"
+
+    # 6) Invalid language returns structured JSON error
+    bad_lang_res = await mcp.call_tool(
+        "render_clip",
+        {
+            "url": url,
+            "start": 100.0,
+            "end": 140.0,
+            "hook_title": "BAD LANG",
+            "mode": "raw",
+            "language": "klingon",
+        },
+    )
+    bad_lang_data = _extract_json(bad_lang_res)
+    assert "error" in bad_lang_data
+    assert "Invalid language" in bad_lang_data["error"]
 
 
 @pytest.mark.asyncio
@@ -3455,3 +3500,987 @@ async def test_Q3_render_clip_rejects_pre_skip_intro_start(
     res = await _REAL_CALL_TOOL("render_clip", args)
     err = json.loads(res.content[0].text)["error"]
     assert "skip_intro_minutes" in err and "288" in err
+
+
+# ---------------------------------------------------------------------------
+# Overhaul: Workstream 1, 2, 5 verification tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_transcribe_audio_async_job_and_poll_status(
+    mcp_env: tuple[Config, StepCache, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """transcribe_audio starts background job and can be polled via get_render_status."""
+    config, cache, tmp_path = mcp_env
+    url = "https://www.youtube.com/watch?v=async1234567"
+    wav_path = tmp_path / "temp" / "async1234567.wav"
+    wav_path.parent.mkdir(parents=True, exist_ok=True)
+    wav_path.write_bytes(b"RIFF")
+
+    stream_info = StreamInfo(
+        url=url,
+        title="Async Stream Test",
+        platform=Platform.YOUTUBE,
+        streamer="Speed",
+        game="GTA 6",
+        duration_seconds=3600,
+        video_id="async1234567",
+    )
+    cache.save_state(
+        PipelineState(
+            stream_info=stream_info,
+            status=PipelineStatus.TRANSCRIBING,
+            audio_path=wav_path,
+        )
+    )
+
+    class FakeTranscriber:
+        def __init__(self, cfg: Config) -> None:
+            pass
+
+        def transcribe(self, path: Path) -> TranscriptionResult:
+            return _make_sample_transcript()
+
+    monkeypatch.setattr(mcp_server, "Transcriber", FakeTranscriber)
+
+    # Call with wait=False (the default behavior of the MCP tool)
+    res = await _REAL_CALL_TOOL("transcribe_audio", {"url": url, "wait": False})
+    data = _extract_json(res)
+    assert data["status"] == "started"
+    assert "job_id" in data
+    assert data["poll_with"] == "get_render_status"
+
+    job_id = data["job_id"]
+    # Poll until done
+    status_data: dict[str, Any] = {}
+    for _ in range(50):
+        status_res = await mcp.call_tool("get_render_status", {"job_id": job_id})
+        status_data = _extract_json(status_res)
+        if status_data.get("status") in ("done", "failed"):
+            break
+        await asyncio.sleep(0.05)
+
+    assert status_data.get("status") == "done"
+    assert status_data["progress"]["stage"] == "done"
+    assert len(status_data["results"]) == 1
+    assert status_data["results"][0]["segment_count"] == 3
+    assert status_data["results"][0]["url"] == url
+
+
+@pytest.mark.asyncio
+async def test_inspect_moment_context_mcp_tool(
+    mcp_env: tuple[Config, StepCache, Path],
+) -> None:
+    """inspect_moment_context returns interleaved dialogue and chat window."""
+    config, cache, tmp_path = mcp_env
+    url = "https://www.youtube.com/watch?v=ctx12345678"
+    video_id = "ctx12345678"
+
+    # Write a test chat CSV
+    temp_dir = tmp_path / "temp"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    chat_csv = temp_dir / f"{video_id}_chat.csv"
+    chat_rows = [
+        {"offset_seconds": 1805.0, "author": "fan1", "message": "HOLY SMOKES"},
+        {"offset_seconds": 1806.0, "author": "fan2", "message": "WHAT WAS THAT"},
+        {"offset_seconds": 1807.0, "author": "fan3", "message": "POGGERS"},
+    ]
+    pd.DataFrame(chat_rows).to_csv(chat_csv, index=False)
+
+    stream_info = StreamInfo(
+        url=url,
+        title="Context Inspection Test",
+        platform=Platform.YOUTUBE,
+        streamer="Speed",
+        game="GTA 6",
+        duration_seconds=3600,
+        video_id=video_id,
+    )
+    cache.save_state(
+        PipelineState(
+            stream_info=stream_info,
+            status=PipelineStatus.SCORING,
+            transcript=_make_sample_transcript(),
+        )
+    )
+
+    res = await mcp.call_tool("inspect_moment_context", {"url": url, "timestamp": 1810.0})
+    data = _extract_json(res)
+    assert data["url"] == url
+    assert data["timestamp"] == 1810.0
+    assert "timeline" in data
+    assert "STREAM CONTEXT WINDOW" in data["timeline"]
+    assert "NO WAY" in data["timeline"] and "EXPLODED" in data["timeline"]
+    assert "HOLY SMOKES" in data["timeline"]
+    assert "hint" in data
+
+
+@pytest.mark.asyncio
+async def test_refine_highlight_bounds_mcp_tool(
+    mcp_env: tuple[Config, StepCache, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """refine_highlight_bounds returns LLM-snapped boundaries."""
+    config, cache, _ = mcp_env
+    url = "https://www.youtube.com/watch?v=ref12345678"
+
+    stream_info = StreamInfo(
+        url=url,
+        title="Refine Test",
+        platform=Platform.YOUTUBE,
+        streamer="Speed",
+        game="GTA 6",
+        duration_seconds=3600,
+        video_id="ref12345678",
+    )
+    cache.save_state(
+        PipelineState(
+            stream_info=stream_info,
+            status=PipelineStatus.SCORING,
+            transcript=_make_sample_transcript(),
+        )
+    )
+
+    from streamclipper.scoring.refiner import RefinedMoment
+
+    async def fake_refine(self, ctx, s, e, hint=""):
+        return RefinedMoment(
+            exact_start=1798.5,
+            exact_end=1841.2,
+            peak_time=1821.0,
+            moment_type="hype",
+            title="Helicopter Rooftop Detonation",
+            description="Chopper crashes and detonates on the helipad.",
+            sub_clips=[{"start": 1798.5, "end": 1841.2, "label": "Explosion"}],
+            reasoning="Dialogue starts at 1800s; explosion occurs at 1820s.",
+            confidence=0.92,
+        )
+
+    from streamclipper.scoring import refiner as refiner_mod
+    monkeypatch.setattr(refiner_mod.ContextRefiner, "refine", fake_refine)
+
+    res = await mcp.call_tool(
+        "refine_highlight_bounds",
+        {"url": url, "start": 1800.0, "end": 1840.0, "hint": "Look for helicopter"},
+    )
+    data = _extract_json(res)
+    assert data["url"] == url
+    assert data["original_start"] == 1800.0
+    assert data["refined_start"] == 1798.5
+    assert data["refined_end"] == 1841.2
+    assert data["title"] == "Helicopter Rooftop Detonation"
+    assert data["confidence"] == 0.92
+    assert "contact_sheets" in data
+
+
+@pytest.mark.asyncio
+async def test_inspect_moment_context_mcp_tool_returns_images(
+    mcp_env: tuple[Config, StepCache, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """inspect_moment_context returns MCP Image content when contact sheets are present."""
+    config, cache, tmp_path = mcp_env
+    url = "https://www.youtube.com/watch?v=imgctx123456"
+    video_id = "imgctx123456"
+
+    stream_info = StreamInfo(
+        url=url,
+        title="Context Image Inspection Test",
+        platform=Platform.YOUTUBE,
+        streamer="Speed",
+        game="GTA 6",
+        duration_seconds=3600,
+        video_id=video_id,
+    )
+    cache.save_state(
+        PipelineState(
+            stream_info=stream_info,
+            status=PipelineStatus.SCORING,
+            transcript=_make_sample_transcript(),
+        )
+    )
+
+    from streamclipper.library.frames import ContactSheet
+    from unittest.mock import patch
+
+    s1_path = tmp_path / "sheet_1.png"
+    s2_path = tmp_path / "sheet_2.png"
+    s1_path.write_bytes(b"\x89PNG\r\n\x1a\nfake1")
+    s2_path.write_bytes(b"\x89PNG\r\n\x1a\nfake2")
+
+    mock_sheets = [
+        ContactSheet(path=s1_path, start=1690.0, end=1780.0, timestamps=[1690.0, 1700.0]),
+        ContactSheet(path=s2_path, start=1780.0, end=1870.0, timestamps=[1780.0, 1790.0]),
+    ]
+
+    with patch(
+        "streamclipper.library.frames.extract_moment_contact_sheets",
+        return_value=mock_sheets,
+    ):
+        res = await mcp.call_tool("inspect_moment_context", {"url": url, "timestamp": 1810.0})
+
+        # Should contain 2 images and 1 text JSON
+        assert len(res.content) == 3
+        # First two contents are Image objects
+        assert getattr(res.content[0], "type", "") == "image"
+        assert getattr(res.content[1], "type", "") == "image"
+
+        data = _extract_json(res)
+        assert data["url"] == url
+        assert len(data["contact_sheets"]) == 2
+        assert str(s1_path) in data["contact_sheets"]
+        assert str(s2_path) in data["contact_sheets"]
+
+
+@pytest.mark.asyncio
+async def test_transcribe_audio_audio_path_only_persists_and_resolves_chunks(
+    mcp_env: tuple[Config, StepCache, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """transcribe_audio called with only audio_path creates cached state retrievable by get_transcript_chunks."""
+    config, cache, tmp_path = mcp_env
+    wav_path = tmp_path / "temp" / "local_standalone_audio.wav"
+    wav_path.parent.mkdir(parents=True, exist_ok=True)
+    wav_path.write_bytes(b"RIFF")
+
+    class FakeTranscriber:
+        def __init__(self, cfg: Config) -> None:
+            pass
+
+        def transcribe(self, path: Path) -> TranscriptionResult:
+            return _make_sample_transcript()
+
+    monkeypatch.setattr(mcp_server, "Transcriber", FakeTranscriber)
+
+    # Call with ONLY audio_path (clean_url is empty)
+    res = await _REAL_CALL_TOOL("transcribe_audio", {"audio_path": str(wav_path), "wait": True})
+    data = _extract_json(res)
+    assert data["cached"] is True
+    assert data["segment_count"] == 3
+
+    # Subsequent call to get_transcript_chunks using ONLY audio_path must resolve cached state
+    chunks_res = await mcp.call_tool(
+        "get_transcript_chunks",
+        {"audio_path": str(wav_path), "only_with_signals": False},
+    )
+    chunks_data = _extract_json(chunks_res)
+    assert "chunks" in chunks_data
+    assert len(chunks_data["chunks"]) >= 1
+
+
+@pytest.mark.asyncio
+async def test_inspect_and_refine_input_validation(
+    mcp_env: tuple[Config, StepCache, Path]
+) -> None:
+    """inspect_moment_context and refine_highlight_bounds reject invalid numeric inputs."""
+    config, cache, tmp_path = mcp_env
+    url = "https://www.youtube.com/watch?v=val12345678"
+
+    # Negative timestamp
+    res_bad_ts = await mcp.call_tool("inspect_moment_context", {"url": url, "timestamp": -5.0})
+    assert "Invalid timestamp" in _extract_json(res_bad_ts)["error"]
+
+    # Negative window
+    res_bad_win = await mcp.call_tool("inspect_moment_context", {"url": url, "timestamp": 10.0, "window_before": -10.0})
+    assert "Invalid window" in _extract_json(res_bad_win)["error"]
+
+    # Invalid range: end <= start
+    res_bad_bounds = await mcp.call_tool("refine_highlight_bounds", {"url": url, "start": 50.0, "end": 40.0})
+    assert "Invalid bounds" in _extract_json(res_bad_bounds)["error"]
+
+
+
+@pytest.mark.asyncio
+async def test_submit_highlights_without_transcript_forces_raw_mode(
+    mcp_env: tuple[Config, StepCache, Path],
+) -> None:
+    """submit_highlights with allow_without_transcript=True forces mode='raw'."""
+    _, cache, _ = mcp_env
+    url = "https://www.youtube.com/watch?v=notr1234567"
+    stream_info = StreamInfo(
+        url=url,
+        title="No Transcript Stream",
+        platform=Platform.YOUTUBE,
+        streamer="Speed",
+        game="GTA 6",
+        duration_seconds=3600,
+        video_id="notr1234567",
+    )
+    # State with NO transcript
+    cache.save_state(
+        PipelineState(
+            stream_info=stream_info,
+            status=PipelineStatus.ANALYZING,
+            transcript=None,
+        )
+    )
+
+    highlights_payload = json.dumps([
+        {
+            "start": 100.0,
+            "end": 130.0,
+            "title": "Uncut Moment",
+            "score": 8.0,
+            "mode": "narrative",
+            "narration_intro": "Intro text here",
+            "narration_outro": "Outro text here",
+        }
+    ])
+
+    # 1) When allow_without_transcript=False: fails with error
+    res_err = await _REAL_CALL_TOOL(
+        "submit_highlights",
+        {"url": url, "highlights": highlights_payload, "allow_without_transcript": False},
+    )
+    data_err = _extract_json(res_err)
+    assert "error" in data_err
+    assert "No transcript cached" in data_err["error"]
+
+    # 2) When allow_without_transcript=True: succeeds and forces mode to 'raw'
+    res_ok = await _REAL_CALL_TOOL(
+        "submit_highlights",
+        {"url": url, "highlights": highlights_payload, "allow_without_transcript": True},
+    )
+    data_ok = _extract_json(res_ok)
+    assert data_ok["accepted_count"] == 1
+    assert data_ok["highlights"][0]["transformation_mode"] == "raw"
+
+
+@pytest.mark.asyncio
+async def test_submit_highlights_caption_style_support(mcp_env) -> None:
+    """Verify submit_highlights accepts tool-level and per-highlight caption_style."""
+    _, cache, _ = mcp_env
+    url = "https://www.youtube.com/watch?v=capstyle123"
+    cache.save_state(
+        PipelineState(
+            stream_info=StreamInfo(
+                url=url,
+                title="Test Stream",
+                platform=Platform.YOUTUBE,
+                streamer="StreamerA",
+                game="GTA 6",
+                duration_seconds=3600,
+                video_id="capstyle123",
+            ),
+            status=PipelineStatus.SCORING,
+            transcript=_make_sample_transcript(),
+        )
+    )
+
+    # Payload with two highlights: one uses per-highlight caption_style, one relies on tool-level default
+    payload = json.dumps([
+        {
+            "start": 100.0,
+            "end": 120.0,
+            "title": "Funny Moment",
+            "score": 9.0,
+            "moment_type": "funny",
+            "caption_style": "karaoke",
+            "narration_intro": "Opening water physics intro.",
+            "narration_outro": "Closing outro line.",
+        },
+        {
+            "start": 900.0,
+            "end": 920.0,
+            "title": "Hype Moment",
+            "score": 8.5,
+            "moment_type": "hype",
+            "narration_intro": "Opening driving highway intro.",
+            "narration_outro": "Closing highway outro.",
+        },
+    ])
+
+    res = await _REAL_CALL_TOOL(
+        "submit_highlights",
+        {
+            "url": url,
+            "highlights": payload,
+            "caption_style": "bounce",
+            "narration_strict": False,
+        },
+    )
+    data = _extract_json(res)
+    assert data["accepted_count"] == 2
+
+    # Check cached highlight models
+    state = cache.load_state(url)
+    assert state is not None
+    assert len(state.highlights) == 2
+    # Highlight 0 has per-highlight override 'karaoke'
+    assert state.highlights[0].caption_style == "karaoke"
+    # Highlight 1 inherited tool-level 'bounce'
+    assert state.highlights[1].caption_style == "bounce"
+
+    # Tool-level invalid caption_style is rejected immediately
+    res_bad_tool = await _REAL_CALL_TOOL(
+        "submit_highlights",
+        {
+            "url": url,
+            "highlights": payload,
+            "caption_style": "invalid_tool_style",
+            "narration_strict": False,
+        },
+    )
+    bad_tool_data = _extract_json(res_bad_tool)
+    assert "error" in bad_tool_data
+    assert "Invalid caption_style: 'invalid_tool_style'" in bad_tool_data["error"]
+
+    # Per-item invalid caption_style is rejected in rejected_reasons
+    payload_bad_item = json.dumps([
+        {
+            "start": 100.0,
+            "end": 120.0,
+            "title": "Good Style Moment",
+            "score": 9.0,
+            "moment_type": "funny",
+            "caption_style": "pop",
+            "narration_intro": "Intro text.",
+            "narration_outro": "Outro text.",
+        },
+        {
+            "start": 900.0,
+            "end": 920.0,
+            "title": "Bad Style Moment",
+            "score": 8.0,
+            "moment_type": "hype",
+            "caption_style": "disco_flashing",
+            "narration_intro": "Intro text.",
+            "narration_outro": "Outro text.",
+        },
+    ])
+    res_bad_item = await _REAL_CALL_TOOL(
+        "submit_highlights",
+        {
+            "url": url,
+            "highlights": payload_bad_item,
+            "narration_strict": False,
+        },
+    )
+    bad_item_data = _extract_json(res_bad_item)
+    assert bad_item_data["accepted_count"] == 1
+    assert bad_item_data["rejected_count"] == 1
+    assert "Invalid caption_style: 'disco_flashing'" in bad_item_data["rejected"][0]["reason"]
+
+
+@pytest.mark.asyncio
+async def test_render_clip_caption_style_support_and_validation(mcp_env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify render_clip validates caption_style and forwards it to metadata."""
+    _, cache, tmp_path = mcp_env
+    url = "https://www.youtube.com/watch?v=render_cap_test"
+    cache.save_state(
+        PipelineState(
+            stream_info=StreamInfo(
+                url=url,
+                title="Render Cap Test",
+                platform=Platform.YOUTUBE,
+                streamer="StreamerA",
+                game="GTA 6",
+                duration_seconds=3600,
+                video_id="render_cap_test",
+            ),
+            status=PipelineStatus.SCORING,
+            transcript=_make_sample_transcript(),
+        )
+    )
+
+    # 1. Invalid caption_style is rejected
+    res_bad = await _REAL_CALL_TOOL(
+        "render_clip",
+        {
+            "url": url,
+            "start": 100.0,
+            "end": 120.0,
+            "hook_title": "Test Title",
+            "caption_style": "disco_lights",
+            "mode": "raw",
+        },
+    )
+    bad_data = _extract_json(res_bad)
+    assert "error" in bad_data
+    assert "Invalid caption_style: 'disco_lights'" in bad_data["error"]
+
+    # 2. Valid caption_style passes validation and is accepted
+    from unittest.mock import patch
+    from streamclipper.models import ClipMetadata, ClipResult
+    fake_clip_result = ClipResult(
+        video_path=tmp_path / "clip_01.mp4",
+        metadata_path=None,
+        metadata=ClipMetadata(
+            hook_title="Hook",
+            caption="Cap",
+            hashtags=[],
+            streamer="StreamerA",
+            game="GTA 6",
+            source_url=url,
+            clip_start=100.0,
+            clip_end=120.0,
+            highlight_score=8.0,
+            caption_style="bounce",
+        ),
+        duration_seconds=20.0,
+    )
+
+    async def fake_render(*args, **kwargs):
+        assert kwargs.get("caption_style") == "bounce"
+        return fake_clip_result, "narrative"
+
+    monkeypatch.setattr(mcp_server, "_render_single_highlight", fake_render)
+
+    res_ok = await _REAL_CALL_TOOL(
+        "render_clip",
+        {
+            "url": url,
+            "start": 100.0,
+            "end": 120.0,
+            "hook_title": "Test Title",
+            "caption_style": "bounce",
+            "mode": "raw",
+            "wait": True,
+        },
+    )
+    ok_data = _extract_json(res_ok)
+    assert "clip" in ok_data
+    assert ok_data["clip"]["metadata"]["caption_style"] == "bounce"
+
+
+def test_pipeline_assemble_highlight_caption_style_wireup(tmp_path: Path) -> None:
+    """Verify Pipeline._assemble_highlight resolves caption_style and passes to Exporter."""
+    from unittest.mock import MagicMock, patch
+    from streamclipper.pipeline import Pipeline
+    from streamclipper.config import Config
+    from streamclipper.models import Highlight, ClipMetadata
+
+    cfg = Config()
+    pipe = Pipeline(cfg)
+
+    h_funny = Highlight(
+        start=10.0,
+        end=30.0,
+        score=9.0,
+        title="Funny",
+        reason="r",
+        moment_type="funny",
+        caption_style="auto",
+    )
+    meta = ClipMetadata(
+        hook_title="Funny",
+        caption="cap",
+        hashtags=[],
+        streamer="StreamerX",
+        game="GTA 6",
+        source_url="http://example.com",
+        clip_start=10.0,
+        clip_end=30.0,
+        highlight_score=9.0,
+        moment_type="funny",
+    )
+
+    exported_kwargs: dict[str, Any] = {}
+
+    class FakeExporter:
+        def __init__(self, *args, **kwargs):
+            self.last_export_info = {}
+        def export(self, **kwargs):
+            exported_kwargs.update(kwargs)
+            out = tmp_path / "final.mp4"
+            out.write_bytes(b"dummy")
+            return out
+
+    class FakeComposer:
+        def __init__(self, *args, **kwargs):
+            pass
+        def compose(self, *args, **kwargs):
+            class FakeComposed:
+                duration = 20.0
+                audio = None
+                def close(self):
+                    pass
+            return FakeComposed()
+
+    fake_seg = tmp_path / "seg.mp4"
+    fake_seg.write_bytes(b"dummy")
+
+    with (
+        patch("streamclipper.output.exporter.Exporter", FakeExporter),
+        patch("streamclipper.assembly.composer.VideoComposer", FakeComposer),
+        patch("streamclipper.assembly.hooks.HookTitleOverlay.add_hook", lambda self, comp, *a, **k: comp),
+        patch.object(pipe, "_hard_trim", lambda *a, **k: None),
+    ):
+        res = pipe._assemble_highlight(
+            highlight=h_funny,
+            metadata=meta,
+            segment_paths=[fake_seg],
+            clip_index=1,
+            mode="narrative",
+            voice_intro_path=None,
+            voice_outro_path=None,
+        )
+
+    # 1. Moment type 'funny' with caption_style='auto' resolves to 'bounce'
+    assert meta.caption_style == "bounce"
+    assert exported_kwargs.get("caption_style") == "bounce"
+
+    # 2. Explicit caption_style='karaoke' passed overrides funny moment_type
+    exported_kwargs.clear()
+    with (
+        patch("streamclipper.output.exporter.Exporter", FakeExporter),
+        patch("streamclipper.assembly.composer.VideoComposer", FakeComposer),
+        patch("streamclipper.assembly.hooks.HookTitleOverlay.add_hook", lambda self, comp, *a, **k: comp),
+        patch.object(pipe, "_hard_trim", lambda *a, **k: None),
+    ):
+        res2 = pipe._assemble_highlight(
+            highlight=h_funny,
+            metadata=meta,
+            segment_paths=[fake_seg],
+            clip_index=2,
+            mode="narrative",
+            voice_intro_path=None,
+            voice_outro_path=None,
+            caption_style="karaoke",
+        )
+    assert meta.caption_style == "karaoke"
+    assert exported_kwargs.get("caption_style") == "karaoke"
+
+
+@pytest.mark.asyncio
+async def test_cleanup_temp_cleans_moment_frames(
+    mcp_env: tuple[Config, StepCache, Path]
+) -> None:
+    """cleanup_temp deletes moment_frames directory for the target stream."""
+    import hashlib
+    _, cache, tmp_path = mcp_env
+    temp_dir = tmp_path / "temp"
+    url = "https://www.youtube.com/watch?v=cleanframes123"
+    vid = "cleanframes123"
+    source_key = hashlib.sha256(url.encode("utf-8")).hexdigest()[:12]
+
+    mf_dir = temp_dir / "moment_frames" / source_key / "100_120_60"
+    mf_dir.mkdir(parents=True, exist_ok=True)
+    sheet1 = mf_dir / "sheet_1_buildup.png"
+    manifest = mf_dir / "manifest.json"
+    sheet1.write_bytes(b"png")
+    manifest.write_bytes(b"{}")
+
+    cache.save_state(
+        PipelineState(
+            stream_info=StreamInfo(
+                url=url,
+                title="Frames Clean Test",
+                platform=Platform.YOUTUBE,
+                streamer="Streamer",
+                game="GTA 6",
+                duration_seconds=3600,
+                video_id=vid,
+            ),
+            status=PipelineStatus.COMPLETE,
+        )
+    )
+
+    res = await mcp.call_tool("cleanup_temp", {"url": url})
+    data = _extract_json(res)
+    assert data["scope"] == "stream"
+    assert data["deleted_count"] >= 2
+    assert not sheet1.exists()
+    assert not manifest.exists()
+
+
+# ---------------------------------------------------------------------------
+# MCP Resource Registration & Workflow Guide Tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_mcp_workflow_guide_resource_registration() -> None:
+    """Verify streamclipper://workflow-guide resource is registered on MCPServer."""
+    resources = await mcp.list_resources()
+    guide_res = next((r for r in resources if str(r.uri) == "streamclipper://workflow-guide"), None)
+    assert guide_res is not None, "streamclipper://workflow-guide resource not found in list_resources()"
+    assert guide_res.name == "workflow-guide"
+    assert guide_res.mime_type == "text/markdown"
+    assert "Workflow" in (guide_res.title or "")
+    assert guide_res.description and "operator runbook" in guide_res.description.lower()
+
+
+@pytest.mark.asyncio
+async def test_mcp_workflow_guide_resource_read_content() -> None:
+    """Verify reading streamclipper://workflow-guide returns comprehensive markdown guide."""
+    from pydantic import AnyUrl
+
+    # 1. Read using string URI
+    contents = await mcp.read_resource("streamclipper://workflow-guide")
+    items = list(contents)
+    assert len(items) == 1
+    text = items[0].content
+    assert isinstance(text, str)
+    assert len(text) > 1000
+
+    # 2. Read using pydantic.AnyUrl
+    contents_url = await mcp.read_resource(AnyUrl("streamclipper://workflow-guide"))
+    assert list(contents_url)[0].content == text
+
+    # Verify key sections and instructions are present
+    assert "# StreamClipper MCP Operator Runbook & Workflow Guide" in text
+    assert "inspect_moment_context" in text
+    assert "Sheet 1" in text and "Sheet 2" in text
+    assert "get_render_status" in text
+    assert "submit_highlights" in text
+    assert "Ready-to-Copy Starter Prompt for New Chats" in text
+    assert "narration_intro" in text and "narration_outro" in text
+    assert "Delayed Reaction Trap" in text
+    assert "analyze_signals" in text
+    assert "get_transcript_chunks" in text
+    assert "refine_highlight_bounds" in text
+    assert "render_all_selected" in text
+    assert "generate_post_metadata" in text
+    assert "cleanup_temp" in text
+
+
+@pytest.mark.asyncio
+async def test_mcp_workflow_guide_fallback_when_missing_on_disk() -> None:
+    """Verify get_workflow_guide() falls back gracefully when file does not exist."""
+    from unittest.mock import patch
+
+    with patch("pathlib.Path.is_file", return_value=False):
+        content = mcp_server.get_workflow_guide()
+        assert "# StreamClipper MCP Workflow Guide" in content
+        assert "not found on disk" in content
+
+
+@pytest.mark.asyncio
+async def test_server_instructions_updated_with_compulsory_visual_and_grounding() -> None:
+    """Verify SERVER_INSTRUCTIONS instructs models on compulsory visual inspection and grounding."""
+    instructions = mcp_server.SERVER_INSTRUCTIONS
+    assert "COMPULSORY VISUAL INSPECTION" in instructions
+    assert "inspect_moment_context" in instructions
+    assert "Sheet 1" in instructions and "Sheet 2" in instructions
+    assert "TRANSCRIPT GROUNDING & COMMENTARY" in instructions
+    assert "streamclipper://workflow-guide" in instructions
+    assert "Never assemble clips yourself" in instructions
+    assert "get_render_status" in instructions
+    assert "ASYNCHRONOUS" in instructions
+    assert "never fall back" in instructions
+
+    # Verify synchronization with instructions.md if present
+    instructions_file = Path(r"C:\Users\praka\.gemini\antigravity\mcp\streamclipper\instructions.md")
+    if instructions_file.is_file():
+        file_text = instructions_file.read_text(encoding="utf-8").strip()
+        assert file_text == instructions.strip()
+
+
+@pytest.mark.asyncio
+async def test_submit_highlights_breakdown_parameters_support(mcp_env) -> None:
+    """Verify submit_highlights accepts and validates breakdown_kind, breakdown_target_time, breakdown_roi, breakdown_zoom, breakdown_focus."""
+    config, cache, _ = mcp_env
+    config._data.setdefault("analysis", {})["skip_intro_minutes"] = 0
+    url = "https://www.youtube.com/watch?v=breakdown_zoom_test"
+    cache.save_state(
+        PipelineState(
+            stream_info=StreamInfo(
+                url=url,
+                title="Breakdown Stream",
+                platform=Platform.YOUTUBE,
+                streamer="StreamerX",
+                game="GTA 6",
+                duration_seconds=3600,
+                video_id="breakdown_zoom_test",
+            ),
+            status=PipelineStatus.SCORING,
+            transcript=_make_sample_transcript(),
+        )
+    )
+
+    valid_payload = json.dumps([
+        {
+            "start": 100.0,
+            "end": 130.0,
+            "title": "Secret Laptop Clue",
+            "score": 9.0,
+            "moment_type": "analysis",
+            "narration_intro": "Check out the water physics detail on the screen.",
+            "narration_outro": "What do you think about this Vice City secret?",
+            "breakdown_commentary": "Laptop screen shows progress 1% decrypting.",
+            "breakdown_callout": "Secret Files",
+            "breakdown_kind": "zoom_spotlight",
+            "breakdown_target_time": 103.5,
+            "breakdown_roi": [0.25, 0.35, 0.75, 0.80],
+            "breakdown_zoom": 2.2,
+            "breakdown_focus": "laptop screen",
+        }
+    ])
+
+    res_str = await mcp_server.submit_highlights(url=url, highlights=valid_payload)
+    res_data = json.loads(res_str)
+    assert res_data.get("accepted_count") == 1
+
+    loaded_state = cache.load_state(url)
+    assert loaded_state is not None
+    saved_h = loaded_state.highlights[0]
+    assert saved_h.breakdown_kind == "zoom_spotlight"
+    assert saved_h.breakdown_target_time == 103.5
+    assert saved_h.breakdown_roi == [0.25, 0.35, 0.75, 0.80]
+    assert saved_h.breakdown_zoom == 2.2
+    assert saved_h.breakdown_focus == "laptop screen"
+
+    # Test invalid breakdown_kind rejection (with 1 valid item so payload is not completely empty)
+    invalid_kind_payload = json.dumps([
+        {
+            "start": 100.0,
+            "end": 130.0,
+            "title": "Valid Item",
+            "score": 9.0,
+            "moment_type": "analysis",
+            "narration_intro": "Check out the water physics detail on the screen.",
+            "narration_outro": "What do you think about this Vice City secret?",
+            "breakdown_kind": "zoom_spotlight",
+        },
+        {
+            "start": 900.0,
+            "end": 920.0,
+            "title": "Bad Kind",
+            "score": 9.0,
+            "moment_type": "analysis",
+            "narration_intro": "Intro text here.",
+            "narration_outro": "Outro text here.",
+            "breakdown_kind": "invalid_kind_xyz",
+        }
+    ])
+    res_bad_kind = await mcp_server.submit_highlights(url=url, highlights=invalid_kind_payload, narration_strict=False)
+    res_bad_data = json.loads(res_bad_kind)
+    assert res_bad_data.get("accepted_count") == 1
+    assert res_bad_data.get("rejected_count") == 1
+    assert "Invalid breakdown_kind" in res_bad_data["rejected"][0]["reason"]
+
+    # Test invalid breakdown_roi rejection
+    invalid_roi_payload = json.dumps([
+        {
+            "start": 100.0,
+            "end": 130.0,
+            "title": "Valid Item",
+            "score": 9.0,
+            "moment_type": "analysis",
+            "narration_intro": "Check out the water physics detail on the screen.",
+            "narration_outro": "What do you think about this Vice City secret?",
+            "breakdown_kind": "zoom_spotlight",
+        },
+        {
+            "start": 900.0,
+            "end": 920.0,
+            "title": "Bad ROI",
+            "score": 9.0,
+            "moment_type": "analysis",
+            "narration_intro": "Intro text here.",
+            "narration_outro": "Outro text here.",
+            "breakdown_roi": [0.8, 0.2, 0.3, 0.9],  # ymin > ymax
+        }
+    ])
+    res_bad_roi = await mcp_server.submit_highlights(url=url, highlights=invalid_roi_payload, narration_strict=False)
+    res_bad_roi_data = json.loads(res_bad_roi)
+    assert res_bad_roi_data.get("accepted_count") == 1
+    assert res_bad_roi_data.get("rejected_count") == 1
+    assert "Invalid breakdown_roi" in res_bad_roi_data["rejected"][0]["reason"]
+
+
+@pytest.mark.asyncio
+async def test_render_clip_breakdown_parameters_support(mcp_env) -> None:
+    """Verify render_clip / _prepare_render_clip validates and binds breakdown parameters."""
+    _, cache, _ = mcp_env
+    url = "https://www.youtube.com/watch?v=render_breakdown_test"
+    cache.save_state(
+        PipelineState(
+            stream_info=StreamInfo(
+                url=url,
+                title="Render Breakdown Stream",
+                platform=Platform.YOUTUBE,
+                streamer="StreamerY",
+                game="GTA 6",
+                duration_seconds=3600,
+                video_id="render_breakdown_test",
+            ),
+            status=PipelineStatus.SCORING,
+            transcript=_make_sample_transcript(),
+        )
+    )
+
+    prep = await mcp_server._prepare_render_clip(
+        url=url,
+        start=100.0,
+        end=130.0,
+        hook_title="Laptop Secret Detail",
+        moment_type="analysis",
+        narration_intro="Look closely at the screen.",
+        narration_outro="This changes everything.",
+        narration_strict=False,
+        breakdown_commentary="The screen shows 1% decrypted classified data.",
+        breakdown_callout="Secret Document",
+        breakdown_kind="zoom_spotlight",
+        breakdown_target_time=104.0,
+        breakdown_roi=[0.2, 0.3, 0.7, 0.8],
+        breakdown_zoom=2.5,
+        breakdown_focus="classified screen",
+    )
+
+    assert isinstance(prep, dict)
+    assert prep["breakdown_kind"] == "zoom_spotlight"
+    assert prep["breakdown_target_time"] == 104.0
+    assert prep["breakdown_roi"] == [0.2, 0.3, 0.7, 0.8]
+    assert prep["breakdown_zoom"] == 2.5
+    assert prep["breakdown_focus"] == "classified screen"
+
+    # Test invalid breakdown_kind in render_clip
+    err_kind = await mcp_server._prepare_render_clip(
+        url=url,
+        start=100.0,
+        end=130.0,
+        hook_title="Bad Kind",
+        narration_intro="Intro line here.",
+        narration_outro="Outro line here.",
+        narration_strict=False,
+        breakdown_kind="unsupported_kind",
+    )
+    assert isinstance(err_kind, str)
+    assert "Invalid breakdown_kind" in err_kind
+
+    # Test invalid breakdown_roi in render_clip
+    err_roi = await mcp_server._prepare_render_clip(
+        url=url,
+        start=100.0,
+        end=130.0,
+        hook_title="Bad ROI",
+        narration_intro="Intro line here.",
+        narration_outro="Outro line here.",
+        narration_strict=False,
+        breakdown_roi=[1.5, 0.2, 0.8, 0.9],  # coordinate > 1.0
+    )
+    assert isinstance(err_roi, str)
+    assert "Invalid breakdown_roi" in err_roi
+
+    # Test malformed string breakdown_roi in render_clip
+    err_roi_str = await mcp_server._prepare_render_clip(
+        url=url,
+        start=100.0,
+        end=130.0,
+        hook_title="Malformed ROI String",
+        narration_intro="Intro line here.",
+        narration_outro="Outro line here.",
+        narration_strict=False,
+        breakdown_roi="corrupt_roi_json",
+    )
+    assert isinstance(err_roi_str, str)
+    assert "Invalid breakdown_roi" in err_roi_str
+
+    # Test non-number element in breakdown_roi
+    err_roi_nonnum = await mcp_server._prepare_render_clip(
+        url=url,
+        start=100.0,
+        end=130.0,
+        hook_title="Non-number ROI",
+        narration_intro="Intro line here.",
+        narration_outro="Outro line here.",
+        narration_strict=False,
+        breakdown_roi=[0.1, "not_a_number", 0.8, 0.9],
+    )
+    assert isinstance(err_roi_nonnum, str)
+    assert "Invalid breakdown_roi" in err_roi_nonnum
+
+
+
+
+

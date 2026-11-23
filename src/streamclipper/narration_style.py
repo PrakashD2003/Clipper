@@ -223,6 +223,7 @@ def check_narration(
     chat_samples: list[str] | None = None,
     avoid_phrases: list[str] | None = None,
     max_words_per_sentence: int = DEFAULT_MAX_WORDS_PER_SENTENCE,
+    require_grounding: bool = False,
 ) -> list[str]:
     """Return human-readable problems with the narration lines (empty list = OK).
 
@@ -291,7 +292,14 @@ def check_narration(
 
     # 6. grounding
     source = " ".join([_norm(transcript_excerpt)] + [_norm(c) for c in (chat_samples or [])]).strip()
-    if source:
+    if not source:
+        # No transcript or chat to ground narration against
+        if require_grounding and (intro or outro or callout):
+            problems.append(
+                "UNGROUNDED: narration lines provided but no transcript excerpt or chat "
+                "samples are available to ground them. Run transcribe_audio first or use mode: raw."
+            )
+    else:
         dev_chars = len(_DEVANAGARI_RE.findall(source))
         letters = max(1, len(re.findall(r"\w", source)))
         if dev_chars / letters < DEVANAGARI_TRANSCRIPT_RATIO:

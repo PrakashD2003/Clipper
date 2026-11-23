@@ -126,6 +126,7 @@ def test_N1_flags_each_problem_type() -> None:
         check_narration(GOOD, transcript_excerpt="fishing boat harbor sunset")
     )
     assert "not grounded" not in _joined(check_narration(GOOD))
+    assert "ungrounded" in _joined(check_narration(GOOD, require_grounding=True))
     # chat samples ground too
     assert check_narration(GOOD, chat_samples=["helicopter!!"]) == []
     # not interactive

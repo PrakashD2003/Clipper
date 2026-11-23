@@ -19,6 +19,7 @@ from streamclipper.library.frames import (
     ContactSheet,
     build_contact_sheets,
     download_proxy_video,
+    extract_moment_contact_sheets,
 )
 from streamclipper.library.index import LibraryIndex
 from streamclipper.library.models import LibrarySource
@@ -649,3 +650,130 @@ def test_T2_cli_library_frames_and_describe(tmp_path: Path) -> None:
         )
         assert res2.exit_code == 0
         assert "ollama pull" in res2.output.lower()
+
+
+def test_extract_moment_contact_sheets_generates_dual_sheets(tmp_path: Path) -> None:
+    """Verify extract_moment_contact_sheets builds 2 PNG 3x3 sheets with 9 tiles each."""
+    from PIL import Image
+
+    vid_path = tmp_path / "stream_source.mp4"
+    _create_synthetic_video(vid_path, duration=240)
+
+    sheets = extract_moment_contact_sheets(
+        str(vid_path),
+        center_time=150.0,
+        temp_dir=tmp_path,
+        window_before=120.0,
+        window_after=60.0,
+    )
+
+    assert len(sheets) == 2
+    sheet1, sheet2 = sheets[0], sheets[1]
+
+    # Sheet 1: Buildup & Trigger [center - 120s to -30s] -> [30.0s to 120.0s]
+    assert sheet1.start == 30.0
+    assert sheet1.end == 120.0
+    assert len(sheet1.timestamps) == 9
+    assert sheet1.timestamps == [30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0, 110.0]
+    assert sheet1.path.is_file()
+    assert sheet1.path.suffix.lower() == ".png"
+
+    with Image.open(sheet1.path) as im:
+        assert im.size[0] == 1152
+        assert im.size[1] > 0
+
+    # Sheet 2: Climax & Reaction [center - 30s to +60s] -> [120.0s to 210.0s]
+    assert sheet2.start == 120.0
+    assert sheet2.end == 210.0
+    assert len(sheet2.timestamps) == 9
+    assert sheet2.timestamps == [120.0, 130.0, 140.0, 150.0, 160.0, 170.0, 180.0, 190.0, 200.0]
+    assert sheet2.path.is_file()
+    assert sheet2.path.suffix.lower() == ".png"
+
+    with Image.open(sheet2.path) as im:
+        assert im.size[0] == 1152
+        assert im.size[1] > 0
+
+
+def test_extract_moment_contact_sheets_cached(tmp_path: Path) -> None:
+    """Subsequent calls with identical parameters return cached ContactSheets immediately."""
+    vid_path = tmp_path / "cached_source.mp4"
+    _create_synthetic_video(vid_path, duration=240)
+
+    sheets1 = extract_moment_contact_sheets(
+        str(vid_path),
+        center_time=150.0,
+        temp_dir=tmp_path,
+        window_before=120.0,
+        window_after=60.0,
+    )
+    assert len(sheets1) == 2
+
+    # Second call should load from manifest without calling ffmpeg
+    with patch("subprocess.run") as mock_sub:
+        sheets2 = extract_moment_contact_sheets(
+            str(vid_path),
+            center_time=150.0,
+            temp_dir=tmp_path,
+            window_before=120.0,
+            window_after=60.0,
+        )
+        assert len(sheets2) == 2
+        assert sheets2[0].path == sheets1[0].path
+        assert sheets2[1].path == sheets1[1].path
+        assert not mock_sub.called
+
+
+def test_extract_moment_contact_sheets_download_failure(tmp_path: Path) -> None:
+    """When proxy slice download encounters an error, return empty list gracefully."""
+    import yt_dlp
+
+    with patch.object(
+        yt_dlp.YoutubeDL, "download", side_effect=yt_dlp.utils.DownloadError("Network error")
+    ):
+        res = extract_moment_contact_sheets(
+            "https://www.youtube.com/watch?v=mock_fail",
+            center_time=150.0,
+            temp_dir=tmp_path,
+        )
+        assert res == []
+
+
+def test_extract_moment_contact_sheets_validation(tmp_path: Path) -> None:
+    """Empty URL or negative timestamp raises ValueError."""
+    with pytest.raises(ValueError, match="URL cannot be empty"):
+        extract_moment_contact_sheets("", 100.0, tmp_path)
+
+    with pytest.raises(ValueError, match="center_time must be >= 0"):
+        extract_moment_contact_sheets("https://example.com/stream", -5.0, tmp_path)
+
+
+def test_extract_moment_contact_sheets_stream_isolation(tmp_path: Path) -> None:
+    """Different streams at identical center_time must have isolated cache directories."""
+    vid_a = tmp_path / "stream_a.mp4"
+    vid_b = tmp_path / "stream_b.mp4"
+    _create_synthetic_video(vid_a, duration=200)
+    _create_synthetic_video(vid_b, duration=200)
+
+    sheets_a = extract_moment_contact_sheets(str(vid_a), center_time=100.0, temp_dir=tmp_path)
+    sheets_b = extract_moment_contact_sheets(str(vid_b), center_time=100.0, temp_dir=tmp_path)
+
+    assert len(sheets_a) == 2
+    assert len(sheets_b) == 2
+    # Distinct paths — no cache collision
+    assert sheets_a[0].path != sheets_b[0].path
+    assert sheets_a[0].path.parent != sheets_b[0].path.parent
+
+
+def test_format_timestamp_label_nan_inf_safety() -> None:
+    """_format_timestamp_label handles NaN, Inf, negative, and hours gracefully."""
+    from streamclipper.library.frames import _format_timestamp_label
+
+    assert _format_timestamp_label(0.0) == "00:00"
+    assert _format_timestamp_label(65.0) == "01:05"
+    assert _format_timestamp_label(3665.0) == "01:01:05"
+    assert _format_timestamp_label(-10.0) == "00:00"
+    assert _format_timestamp_label(float("nan")) == "00:00"
+    assert _format_timestamp_label(float("inf")) == "00:00"
+
+

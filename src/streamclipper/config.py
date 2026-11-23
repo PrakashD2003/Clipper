@@ -18,6 +18,7 @@ DEFAULT_CONFIG_PATH = (
     else _PACKAGE_DEFAULT_CONFIG_PATH
 )
 USER_CONFIG_PATH = Path("config.yaml")
+_REPO_USER_CONFIG_PATH = Path(__file__).parent.parent.parent / "config.yaml"
 _REPO_ENV_PATH = Path(__file__).parent.parent.parent / ".env"
 
 
@@ -253,12 +254,20 @@ class Config:
         with open(DEFAULT_CONFIG_PATH, encoding="utf-8") as f:
             self._data = yaml.safe_load(f)
 
-        config_path = Path(user_config_path) if user_config_path is not None else USER_CONFIG_PATH
+        if user_config_path is not None:
+            config_path = Path(user_config_path)
+        elif USER_CONFIG_PATH.exists():
+            config_path = USER_CONFIG_PATH
+        elif USER_CONFIG_PATH == Path("config.yaml") and _REPO_USER_CONFIG_PATH.is_file():
+            config_path = _REPO_USER_CONFIG_PATH
+        else:
+            config_path = USER_CONFIG_PATH
+        user_data: dict[str, Any] = {}
         if config_path.exists():
             with open(config_path, encoding="utf-8") as f:
                 loaded_user = yaml.safe_load(f)
             if loaded_user is None:
-                user_data: dict[str, Any] = {}
+                user_data = {}
             elif isinstance(loaded_user, dict):
                 user_data = loaded_user
             else:
@@ -272,6 +281,7 @@ class Config:
             if isinstance(_user_weights, dict) and "heatmap" not in _user_weights:
                 # Pre-heatmap user override: keep their weights summing to 1.0 (heatmap off).
                 self._data["analysis"]["weights"]["heatmap"] = 0.0
+        self._user_data = user_data
 
         self._raw_auto_keys = {
             key: self.get(key) == "auto"
@@ -303,6 +313,17 @@ class Config:
     def is_auto_resolved(self, dotted_key: str) -> bool:
         """Return True if this setting came from dynamic 'auto' hardware resolution."""
         return bool(self._raw_auto_keys.get(dotted_key, False))
+
+    def is_user_specified(self, dotted_key: str) -> bool:
+        """Return True if this setting was explicitly provided in user configuration."""
+        keys = dotted_key.split(".")
+        val = getattr(self, "_user_data", {})
+        for k in keys:
+            if isinstance(val, dict) and k in val:
+                val = val[k]
+            else:
+                return False
+        return True
 
     def _deep_merge(self, base: dict, override: dict) -> dict:
         """Recursively merge override into base."""

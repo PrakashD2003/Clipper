@@ -569,6 +569,8 @@ class OllamaScorer(Scorer):
             context_badge = _as_str(item.get("context_badge"))
             breakdown_commentary = _as_str(item.get("breakdown_commentary"))
             breakdown_callout = _as_str(item.get("breakdown_callout"))
+            breakdown_kind = _as_str(item.get("breakdown_kind")) or "auto"
+            breakdown_focus = _as_str(item.get("breakdown_focus"))
 
             highlights.append(
                 Highlight(
@@ -585,6 +587,8 @@ class OllamaScorer(Scorer):
                     sub_clips=sub_clips,
                     breakdown_commentary=breakdown_commentary,
                     breakdown_callout=breakdown_callout,
+                    breakdown_kind=breakdown_kind,
+                    breakdown_focus=breakdown_focus,
                     callout=callout,
                 )
             )
@@ -732,6 +736,10 @@ class OllamaScorer(Scorer):
             highlight.breakdown_commentary = _as_str(data.get("breakdown_commentary"))
         if not highlight.breakdown_callout and data.get("breakdown_callout"):
             highlight.breakdown_callout = _as_str(data.get("breakdown_callout"))
+        if (not highlight.breakdown_kind or highlight.breakdown_kind == "auto") and data.get("breakdown_kind"):
+            highlight.breakdown_kind = _as_str(data.get("breakdown_kind"))
+        if not highlight.breakdown_focus and data.get("breakdown_focus"):
+            highlight.breakdown_focus = _as_str(data.get("breakdown_focus"))
         return result
 
     def _generate_hook_title(
@@ -956,6 +964,11 @@ class OllamaScorer(Scorer):
             narration_language=str(language or "english"),
             breakdown_commentary=breakdown_commentary,
             breakdown_callout=breakdown_callout,
+            breakdown_kind=highlight.breakdown_kind,
+            breakdown_target_time=highlight.breakdown_target_time,
+            breakdown_roi=list(highlight.breakdown_roi),
+            breakdown_zoom=highlight.breakdown_zoom,
+            breakdown_focus=highlight.breakdown_focus,
             music_risk=highlight.music_risk,
             music_confidence=highlight.music_confidence,
             callout=(

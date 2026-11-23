@@ -20,6 +20,7 @@ from ..analysis.chat_velocity import ChatVelocityAnalyzer
 from ..analysis.heatmap import HeatmapAnalyzer
 from ..analysis.loudness import LoudnessDetector
 from ..analysis.transcriber import Transcriber
+from ..assembly.captions import _VALID_CAPTION_STYLES
 from ..cache import StepCache
 from ..config import Config
 from ..language import language_instruction, resolve_narration_language
@@ -61,31 +62,78 @@ from ..scoring.scorer import Scorer, TranscriptChunk
 logger = logging.getLogger(__name__)
 
 SERVER_INSTRUCTIONS = (
-    "RENDERING IS ASYNCHRONOUS: render_clip / render_all_selected validate your input, start a "
-    "background job and return immediately with a job_id (status 'started'). Then call "
-    "get_render_status(job_id) every ~20 seconds until status is done or failed (cancel_render "
-    "stops it). A render taking several minutes is NORMAL; keep polling and never fall back to "
-    "manual ffmpeg, terminal or file work while a job is queued or running. "
+    "TRANSCRIPTION AND RENDERING ARE ASYNCHRONOUS: transcribe_audio, render_clip / "
+    "render_all_selected validate your input, start a background job and return immediately "
+    "with a job_id (status 'started'). Then call get_render_status(job_id) every ~20 seconds "
+    "until status is done or failed (cancel_render stops it). Background jobs taking several "
+    "minutes is NORMAL; keep polling and never fall back to manual ffmpeg, terminal or file "
+    "work while a job is queued or running. "
     "Always render with render_clip / render_all_selected. Never assemble clips yourself with "
     "ffmpeg, subtitle files or system TTS voices — those outputs skip the narration, captions, "
     "loudness and copyright checks. "
     "Workflow: download_stream_audio -> transcribe_audio -> analyze_signals -> "
-    "get_transcript_chunks -> submit_highlights -> render_all_selected (or render_clip) -> "
-    "get_render_status until done. "
-    "Required fields: every non-raw highlight needs a non-empty narration_intro AND "
+    "get_transcript_chunks -> inspect_moment_context / refine_highlight_bounds -> "
+    "submit_highlights -> render_all_selected (or render_clip) -> get_render_status until done -> "
+    "generate_post_metadata -> cleanup_temp. "
+    "COMPULSORY VISUAL INSPECTION: Never jump directly from get_transcript_chunks to submit_highlights "
+    "without calling inspect_moment_context on candidate timestamps. Inspect Sheet 1 (buildup & trigger, "
+    "-120s to -30s) and Sheet 2 (climax & reaction, -30s to +60s) along with live chat [BURST] tags to locate "
+    "the real on-screen trigger (e.g. vehicle crash, death screen, cutscene prompt) rather than the streamer's "
+    "delayed reaction/scream. Set clip start before the trigger, not at the scream. Use refine_highlight_bounds "
+    "for speech-snapped boundary refinement. "
+    "TRANSCRIPT GROUNDING & COMMENTARY: Every non-raw highlight needs a non-empty narration_intro AND "
     "narration_outro (1-2 short sentences, grounded in the transcript, in the reported narration "
     "language). Write narration following narration_guide from get_transcript_chunks "
     "(energetic, interactive gamer voice, grounded in the transcript); generic, ungrounded or "
     "non-interactive lines are rejected with a problems list so you can rewrite and resubmit. "
-    "submit_highlights requires a transcript (run transcribe_audio first) and rejects "
-    "highlights that start before analysis.skip_intro_minutes. Use mode 'breakdown' (instant "
-    "replay) ONLY for moment_type clutch, fail, graphics_detail or analysis with a "
-    "breakdown_commentary; reactions (hype, funny, chat_chaos, lore_secret) get narrative/story. "
+    "submit_highlights requires a transcript (run transcribe_audio first) and forces mode to "
+    "'raw' if submitted without a transcript. Highlights that start before "
+    "analysis.skip_intro_minutes are rejected. Use mode 'breakdown' (instant replay) ONLY for "
+    "moment_type clutch, fail, graphics_detail or analysis with a breakdown_commentary; "
+    "reactions (hype, funny, chat_chaos, lore_secret) get narrative/story. "
+    "BREAKDOWN ARCHETYPES: When using breakdown mode, specify breakdown_kind ('slow_mo' for combat/crashes, "
+    "'zoom_spotlight' for screens/documents/files/clues). For zoom_spotlight, the pipeline auto-detects reverse-angle "
+    "cuts, snatches the setup-phase frame where screens face the camera, and zooms Ken Burns into breakdown_roi "
+    "with zero audio cutoffs. "
+    "VIDEO DURATION LIMITS: StreamClipper supports modern YouTube Shorts up to 180 seconds (3 minutes) "
+    "with dynamic spotlight duration matching TTS audio length. "
     "Topic workflow: add sources -> frame notes for no-commentary -> material -> candidates -> user picks -> plan -> user approves -> "
-    "render_topic_video -> render_topic_shorts -> poll get_render_status."
+    "render_topic_video -> render_topic_shorts -> poll get_render_status. "
+    "Read MCP resource streamclipper://workflow-guide for the full operator runbook, schemas, and starter prompt."
 )
 
 mcp = MCPServer("streamclipper", instructions=SERVER_INSTRUCTIONS)
+
+_GUIDE_PATH = Path(__file__).resolve().parents[3] / "docs" / "streamclipper-mcp-workflow-guide.md"
+
+
+@mcp.resource(
+    "streamclipper://workflow-guide",
+    name="workflow-guide",
+    title="StreamClipper MCP Workflow & Operator Runbook",
+    description=(
+        "Comprehensive operator runbook for StreamClipper MCP: step-by-step tool sequence, "
+        "JSON payload schemas, async polling rules, Sheet 1/Sheet 2 visual verification, "
+        "and ready-to-copy starter prompt."
+    ),
+    mime_type="text/markdown",
+)
+def get_workflow_guide() -> str:
+    """Return the complete StreamClipper MCP operator workflow guide."""
+    candidates = [
+        _GUIDE_PATH,
+        Path.cwd() / "docs" / "streamclipper-mcp-workflow-guide.md",
+        Path("docs/streamclipper-mcp-workflow-guide.md"),
+        Path(__file__).resolve().parents[2] / "docs" / "streamclipper-mcp-workflow-guide.md",
+        Path(__file__).resolve().parent / "streamclipper-mcp-workflow-guide.md",
+    ]
+    for p in candidates:
+        if p.is_file():
+            try:
+                return p.read_text(encoding="utf-8")
+            except Exception as exc:
+                logger.warning("Failed to read workflow guide from %s: %s", p, exc)
+    return "# StreamClipper MCP Workflow Guide\n\n(Workflow guide document not found on disk.)"
 
 _LOOP_GPU_LOCKS: weakref.WeakKeyDictionary[
     asyncio.AbstractEventLoop, asyncio.Lock
@@ -490,6 +538,23 @@ def _collect_temp_files_for_stream(
                         candidates.append(seg_file)
                         break
 
+        moment_frames_dir = temp_dir / "moment_frames"
+        if moment_frames_dir.is_dir():
+            possible_keys = set(video_ids)
+            if url:
+                import hashlib
+                possible_keys.add(hashlib.sha256(url.strip().encode("utf-8")).hexdigest()[:12])
+            if cache_key:
+                possible_keys.add(cache_key)
+            for k in possible_keys:
+                if not _is_safe_id_prefix(k):
+                    continue
+                k_dir = moment_frames_dir / k
+                if k_dir.is_dir() and _is_within_directory(k_dir, temp_dir):
+                    for sub in k_dir.rglob("*"):
+                        if sub.is_file() and _is_within_directory(sub, temp_dir):
+                            candidates.append(sub)
+
     unique: list[Path] = []
     seen: set[str] = set()
     for p in candidates:
@@ -569,6 +634,7 @@ async def _render_single_highlight(
     language: str = "english",
     notes: list[dict[str, Any]] | None = None,
     progress: JobProgress | None = None,
+    caption_style: str = "auto",
 ) -> tuple[ClipResult, str]:
     """Download segment(s), build offline ClipMetadata, and assemble one highlight.
 
@@ -639,9 +705,19 @@ async def _render_single_highlight(
         transformation_mode=clip_mode,
         breakdown_commentary="" if clip_mode == "raw" else _as_str(highlight.breakdown_commentary),
         breakdown_callout="" if clip_mode == "raw" else _as_str(highlight.breakdown_callout),
+        breakdown_kind="" if clip_mode == "raw" else _as_str(getattr(highlight, "breakdown_kind", "auto") or "auto"),
+        breakdown_target_time=None if clip_mode == "raw" else getattr(highlight, "breakdown_target_time", None),
+        breakdown_roi=[] if clip_mode == "raw" else list(getattr(highlight, "breakdown_roi", []) or []),
+        breakdown_zoom=float(getattr(highlight, "breakdown_zoom", 2.2) or 2.2),
+        breakdown_focus="" if clip_mode == "raw" else _as_str(getattr(highlight, "breakdown_focus", "")),
         music_risk=highlight.music_risk,
         music_confidence=highlight.music_confidence,
         narration_language=language,
+        caption_style=(
+            caption_style
+            if (caption_style and caption_style != "auto")
+            else getattr(highlight, "caption_style", "auto")
+        ),
     )
     # `callout` lands on ClipMetadata in Batch D; set it as an attribute so this works pre/post merge.
     metadata.callout = "" if clip_mode == "raw" else _as_str(getattr(highlight, "callout", ""))
@@ -821,10 +897,12 @@ async def download_stream_audio(url: str) -> str:
 
 
 @mcp.tool()
-async def transcribe_audio(url: str = "", audio_path: str = "") -> str:
+async def transcribe_audio(url: str = "", audio_path: str = "", wait: bool = False) -> str:
     """Transcribe downloaded audio using WhisperX with word-level timestamps.
 
-    Resolves cached PipelineState via `url` or `StepCache.find_by_audio_path(audio_path)`.
+    ASYNCHRONOUS: returns immediately with a job_id. Poll with get_render_status(job_id)
+    until status is 'done', then call get_transcript_chunks.
+    Pass wait=True to block until finished (scripts/tests only).
     """
     try:
         clean_url = url.strip() if isinstance(url, str) else ""
@@ -849,57 +927,68 @@ async def transcribe_audio(url: str = "", audio_path: str = "") -> str:
         if not target_audio.is_file():
             return _json_error(f"Audio file not found: {target_audio}")
 
-        transcriber = Transcriber(config)
-        async with _gpu_guard(config):
-            transcript = await asyncio.to_thread(transcriber.transcribe, target_audio)
-
         resolved_url = (
             initial_state.stream_info.url if initial_state is not None else clean_url
         )
-        state: PipelineState | None = None
-        if resolved_url:
-            async with _get_url_lock(cache.get_cache_key(resolved_url)):
-                # Reload latest state to avoid clobbering concurrent analyze_signals updates
-                fresh_state = cache.load_state(resolved_url) or initial_state
-                if fresh_state is None:
-                    fresh_state = PipelineState(
-                        stream_info=StreamInfo(
-                            url=resolved_url,
-                            title="",
-                            platform=Platform.YOUTUBE,
-                            streamer="",
-                            game=str(config.get("discovery.default_game", "GTA 6")),
-                            duration_seconds=0,
-                            video_id=_extract_youtube_id_from_url(resolved_url) or "",
-                        ),
-                        status=PipelineStatus.ANALYZING,
-                        audio_path=target_audio,
-                        transcript=transcript,
-                    )
-                else:
-                    Pipeline._recover_failed_state(fresh_state)
-                    fresh_state.transcript = transcript
-                    if fresh_state.audio_path is None or (
-                        clean_audio and not Path(fresh_state.audio_path).is_file()
-                    ):
-                        fresh_state.audio_path = target_audio
-                    if (
-                        fresh_state.status < PipelineStatus.ANALYZING
-                        or fresh_state.status == PipelineStatus.FAILED
-                    ):
-                        fresh_state.status = (
-                            PipelineStatus.SCORING
-                            if fresh_state.analysis_complete
-                            else PipelineStatus.ANALYZING
+        if not resolved_url and target_audio:
+            try:
+                resolved_url = target_audio.resolve().as_uri()
+            except Exception:
+                resolved_url = f"file://{target_audio.as_posix()}"
+
+        async def _execute_transcription(progress: JobProgress) -> dict[str, Any]:
+            progress.stage("loading WhisperX model")
+            transcriber = Transcriber(config)
+            async with _gpu_guard(config):
+                progress.stage("transcribing audio (this may take 10-25 minutes)")
+                transcript = await asyncio.to_thread(transcriber.transcribe, target_audio)
+
+            # Save transcript to cache
+            progress.stage("saving transcript to cache")
+            state: PipelineState | None = None
+            if resolved_url:
+                async with _get_url_lock(cache.get_cache_key(resolved_url)):
+                    # Reload latest state to avoid clobbering concurrent analyze_signals updates
+                    fresh_state = cache.load_state(resolved_url) or initial_state
+                    if fresh_state is None:
+                        fresh_state = PipelineState(
+                            stream_info=StreamInfo(
+                                url=resolved_url,
+                                title=target_audio.stem,
+                                platform=Platform.YOUTUBE,
+                                streamer="",
+                                game=str(config.get("discovery.default_game", "GTA 6")),
+                                duration_seconds=0,
+                                video_id=_extract_youtube_id_from_url(resolved_url) or target_audio.stem,
+                            ),
+                            status=PipelineStatus.ANALYZING,
+                            audio_path=target_audio,
+                            transcript=transcript,
                         )
-                cache.save_state(fresh_state)
-                state = fresh_state
+                    else:
+                        Pipeline._recover_failed_state(fresh_state)
+                        fresh_state.transcript = transcript
+                        if fresh_state.audio_path is None or (
+                            clean_audio and not Path(fresh_state.audio_path).is_file()
+                        ):
+                            fresh_state.audio_path = target_audio
+                        if (
+                            fresh_state.status < PipelineStatus.ANALYZING
+                            or fresh_state.status == PipelineStatus.FAILED
+                        ):
+                            fresh_state.status = (
+                                PipelineStatus.SCORING
+                                if fresh_state.analysis_complete
+                                else PipelineStatus.ANALYZING
+                            )
+                    cache.save_state(fresh_state)
+                    state = fresh_state
 
-        word_count = sum(len(seg.words) for seg in transcript.segments)
-        duration_seconds = transcript.segments[-1].end if transcript.segments else 0.0
+            word_count = sum(len(seg.words) for seg in transcript.segments)
+            duration_seconds = transcript.segments[-1].end if transcript.segments else 0.0
+            progress.clip_done()
 
-        return _json_ok(
-            {
+            return {
                 "url": resolved_url,
                 "audio_path": str(target_audio),
                 "language": transcript.language,
@@ -910,6 +999,16 @@ async def transcribe_audio(url: str = "", audio_path: str = "") -> str:
                 "cached": state is not None,
                 "status": state.status.name.lower() if state is not None else "analyzing",
             }
+
+        if wait:
+            return _json_ok(await _execute_transcription(JobProgress(None)))
+
+        return _start_render_job(
+            "transcribe_audio",
+            config,
+            resolved_url or clean_audio,
+            1,
+            _execute_transcription,
         )
     except Exception as exc:
         logger.exception("transcribe_audio failed")
@@ -1173,11 +1272,180 @@ async def get_transcript_chunks(
 
 
 @mcp.tool()
+async def inspect_moment_context(
+    url: str = "",
+    timestamp: float = 0.0,
+    window_before: float = 180.0,
+    window_after: float = 120.0,
+    audio_path: str = "",
+):
+    """Inspect a 5-minute context window around a proposed highlight timestamp.
+
+    Returns dual visual contact sheets (Sheet 1: Buildup & Trigger [-120s to -30s],
+    Sheet 2: Climax & Reaction [-30s to +60s]) as MCP Image content alongside
+    interleaved streamer dialogue and live chat velocity. Use this BEFORE submit_highlights
+    to visually inspect on-screen cutscenes, character deaths, and mission banners.
+    """
+    try:
+        clean_url = url.strip() if isinstance(url, str) else ""
+        clean_audio = audio_path.strip() if isinstance(audio_path, str) else ""
+        if not clean_url and not clean_audio:
+            return _json_error("Provide either 'url' or 'audio_path'.")
+
+        ts = float(timestamp)
+        if ts < 0:
+            return _json_error("Invalid timestamp: timestamp must be >= 0.")
+        wb = float(window_before)
+        wa = float(window_after)
+        if wb < 0 or wa < 0:
+            return _json_error("Invalid window: window_before and window_after must be >= 0.")
+
+        config = _get_config()
+        cache = _get_cache(config)
+        state = _resolve_state(cache, url=clean_url, audio_path=clean_audio)
+        if state is None:
+            return _json_error("No cached pipeline state found.")
+        if state.transcript is None:
+            return _json_error("No transcript available. Run transcribe_audio first.")
+
+        # Find chat CSV path
+        video_id = state.stream_info.video_id or ""
+        temp_dir = Path(config.get("general.temp_dir", "./temp"))
+        chat_csv = temp_dir / f"{video_id}_chat.csv"
+
+        from ..analysis.context_window import extract_context_window
+
+        ctx = extract_context_window(
+            state.transcript,
+            chat_csv if chat_csv.is_file() else None,
+            ts,
+            window_before=wb,
+            window_after=wa,
+            url=clean_url or state.stream_info.url,
+            temp_dir=temp_dir,
+        )
+
+        payload = {
+            "url": state.stream_info.url,
+            "timestamp": ts,
+            "window_start": ctx.window_start,
+            "window_end": ctx.window_end,
+            "total_chat_messages": ctx.total_chat_messages,
+            "avg_chat_rate": round(ctx.avg_chat_rate, 2),
+            "burst_timestamps": ctx.burst_timestamps,
+            "contact_sheets": [str(p) for p in ctx.contact_sheets],
+            "sheet_timestamps": ctx.sheet_timestamps,
+            "timeline": ctx.to_llm_text(),
+            "hint": (
+                "Chat bursts marked [BURST] indicate where viewers saw the on-screen event. "
+                "If a BURST occurs well before a loudness spike, the real moment is at the BURST. "
+                "Set your clip start BEFORE the event, not at the streamer's delayed reaction."
+            ),
+        }
+
+        if ctx.contact_sheets:
+            contents: list[Any] = []
+            for sheet_path in ctx.contact_sheets:
+                p = Path(sheet_path)
+                if p.is_file():
+                    contents.append(Image(path=p))
+            contents.append(_json_ok(payload))
+            return contents
+
+        return _json_ok(payload)
+    except Exception as exc:
+        logger.exception("inspect_moment_context failed")
+        return _json_error(str(exc))
+
+
+@mcp.tool()
+async def refine_highlight_bounds(
+    url: str = "",
+    start: float = 0.0,
+    end: float = 0.0,
+    hint: str = "",
+    audio_path: str = "",
+) -> str:
+    """Auto-refine proposed highlight boundaries using Gemini Flash or local Ollama.
+
+    Analyzes a 5-minute context window around [start, end], identifies the actual
+    triggering event vs. delayed reaction, and returns exact speech-snapped boundaries.
+    Uses gemini-2.5-flash when GEMINI_API_KEY is set, else falls back to Ollama.
+    """
+    try:
+        clean_url = url.strip() if isinstance(url, str) else ""
+        clean_audio = audio_path.strip() if isinstance(audio_path, str) else ""
+        if not clean_url and not clean_audio:
+            return _json_error("Provide either 'url' or 'audio_path'.")
+
+        s = float(start)
+        e = float(end)
+        if s < 0 or e <= s:
+            return _json_error("Invalid bounds: end must be greater than start and start must be >= 0.")
+
+        config = _get_config()
+        cache = _get_cache(config)
+        state = _resolve_state(cache, url=clean_url, audio_path=clean_audio)
+        if state is None:
+            return _json_error("No cached pipeline state found.")
+        if state.transcript is None:
+            return _json_error("No transcript available. Run transcribe_audio first.")
+
+        video_id = state.stream_info.video_id or ""
+        temp_dir = Path(config.get("general.temp_dir", "./temp"))
+        chat_csv = temp_dir / f"{video_id}_chat.csv"
+
+        from ..analysis.context_window import extract_context_window
+
+        center = (s + e) / 2.0
+        wb = float(config.get("refinement.window_before", 120.0))
+        wa = float(config.get("refinement.window_after", 60.0))
+        ctx = extract_context_window(
+            state.transcript,
+            chat_csv if chat_csv.is_file() else None,
+            center,
+            window_before=wb,
+            window_after=wa,
+            url=clean_url or state.stream_info.url,
+            temp_dir=temp_dir,
+        )
+
+        from ..scoring.refiner import ContextRefiner
+
+        refiner = ContextRefiner(config)
+        refined = await refiner.refine(ctx, s, e, hint)
+
+        return _json_ok(
+            {
+                "url": state.stream_info.url,
+                "original_start": s,
+                "original_end": e,
+                "refined_start": refined.exact_start,
+                "refined_end": refined.exact_end,
+                "peak_time": refined.peak_time,
+                "moment_type": refined.moment_type,
+                "title": refined.title,
+                "description": refined.description,
+                "sub_clips": refined.sub_clips,
+                "reasoning": refined.reasoning,
+                "confidence": refined.confidence,
+                "contact_sheets": [str(p) for p in ctx.contact_sheets],
+                "sheet_timestamps": ctx.sheet_timestamps,
+                "engine_used": refiner._resolve_engine(),
+            }
+        )
+    except Exception as exc:
+        logger.exception("refine_highlight_bounds failed")
+        return _json_error(str(exc))
+
+
+@mcp.tool()
 async def submit_highlights(
     url: str,
     highlights: str,
     allow_without_transcript: bool = False,
     narration_strict: bool = True,
+    caption_style: str = "auto",
 ) -> str:
     """Submit highlight selections from the MCP client LLM for rendering.
 
@@ -1192,6 +1460,12 @@ async def submit_highlights(
     narrative/story instead. Always render with render_clip / render_all_selected; never
     assemble clips yourself with ffmpeg, subtitle files or system TTS voices.
 
+    caption_style: Optional subtitle style ('auto', 'hormozi', 'bounce', 'pop', 'box', 'karaoke',
+                   'single_word', 'sentence'). Defaults to 'auto', which automatically resolves
+                   subtitle styles based on moment_type (e.g. funny/fail -> bounce, hype/clutch -> pop,
+                   graphics_detail/analysis -> box). Can also be specified per-highlight in the
+                   highlights JSON payload.
+
     Write narration following narration_guide from get_transcript_chunks (energetic,
     interactive gamer voice, grounded in the transcript). Every non-raw highlight's narration is
     quality-checked (banned generic phrases, repeats, long sentences, not grounded in the
@@ -1205,6 +1479,13 @@ async def submit_highlights(
             return _json_error("Invalid URL: url must be a non-empty string.")
         if not isinstance(highlights, str) or not highlights.strip():
             return _json_error("highlights must be a non-empty JSON string.")
+
+        clean_caption_style = _as_str(caption_style).lower() or "auto"
+        if clean_caption_style != "auto" and clean_caption_style not in _VALID_CAPTION_STYLES:
+            return _json_error(
+                f"Invalid caption_style: {caption_style!r}. Valid options: 'auto', "
+                f"{', '.join(sorted(_VALID_CAPTION_STYLES))}."
+            )
 
         cleaned_json = _clean_llm_text(highlights)
         try:
@@ -1250,12 +1531,21 @@ async def submit_highlights(
                     status=PipelineStatus.SCORING,
                 )
 
-            if state.transcript is None and not allow_without_transcript:
-                return _json_error(
-                    "No transcript cached for this stream. Run transcribe_audio first so "
-                    "narration and captions can use what the streamer actually says, then "
-                    "submit highlights again (or pass allow_without_transcript=true to "
-                    "submit without one)."
+            if state.transcript is None:
+                if not allow_without_transcript:
+                    return _json_error(
+                        "No transcript cached for this stream. Run transcribe_audio first so "
+                        "narration and captions can use what the streamer actually says, then "
+                        "submit highlights again (or pass allow_without_transcript=true to "
+                        "submit raw-mode clips without one)."
+                    )
+                # With allow_without_transcript, only raw mode is permitted
+                for item in raw_items:
+                    if isinstance(item, dict):
+                        item["mode"] = "raw"
+                        item["transformation_mode"] = "raw"
+                logger.warning(
+                    "submit_highlights: no transcript available; forcing all highlights to raw mode"
                 )
 
             accepted: list[Highlight] = []
@@ -1331,6 +1621,125 @@ async def submit_highlights(
                 breakdown_commentary = _as_str(item.get("breakdown_commentary"))
                 breakdown_callout = _as_str(item.get("breakdown_callout"))
                 callout = _as_str(item.get("callout"))
+                raw_item_style = _as_str(item.get("caption_style")).lower()
+                if raw_item_style and raw_item_style != "auto" and raw_item_style not in _VALID_CAPTION_STYLES:
+                    rejected_count += 1
+                    rejected_reasons.append(
+                        {
+                            "start": start,
+                            "end": end,
+                            "reason": (
+                                f"Invalid caption_style: {item.get('caption_style')!r}. Valid options: 'auto', "
+                                f"{', '.join(sorted(_VALID_CAPTION_STYLES))}."
+                            ),
+                        }
+                    )
+                    continue
+                item_caption_style = raw_item_style or clean_caption_style or "auto"
+
+                raw_b_kind = _as_str(item.get("breakdown_kind")).lower()
+                if raw_b_kind and raw_b_kind not in {"auto", "slow_mo", "zoom_spotlight"}:
+                    rejected_count += 1
+                    rejected_reasons.append(
+                        {
+                            "start": start,
+                            "end": end,
+                            "reason": (
+                                f"Invalid breakdown_kind: {item.get('breakdown_kind')!r}. "
+                                "Valid options: 'auto', 'slow_mo', 'zoom_spotlight'."
+                            ),
+                        }
+                    )
+                    continue
+                item_breakdown_kind = raw_b_kind or "auto"
+
+                raw_roi = item.get("breakdown_roi")
+                item_breakdown_roi: list[float] = []
+                if raw_roi is not None:
+                    parsed_roi_list = None
+                    if isinstance(raw_roi, str):
+                        trimmed_roi = raw_roi.strip()
+                        if trimmed_roi:
+                            try:
+                                parsed = json.loads(trimmed_roi)
+                                if isinstance(parsed, list):
+                                    parsed_roi_list = parsed
+                                else:
+                                    parsed_roi_list = "invalid"
+                            except Exception:
+                                parsed_roi_list = "invalid"
+                        else:
+                            parsed_roi_list = []
+                    elif isinstance(raw_roi, (list, tuple)):
+                        parsed_roi_list = list(raw_roi)
+                    else:
+                        parsed_roi_list = "invalid"
+
+                    if parsed_roi_list == "invalid":
+                        rejected_count += 1
+                        rejected_reasons.append(
+                            {
+                                "start": start,
+                                "end": end,
+                                "reason": (
+                                    f"Invalid breakdown_roi: {raw_roi!r}. "
+                                    "Require 4 normalized coordinates [ymin, xmin, ymax, xmax] "
+                                    "between 0.0 and 1.0."
+                                ),
+                            }
+                        )
+                        continue
+                    elif parsed_roi_list:
+                        try:
+                            item_breakdown_roi = [float(x) for x in parsed_roi_list]
+                        except (ValueError, TypeError):
+                            rejected_count += 1
+                            rejected_reasons.append(
+                                {
+                                    "start": start,
+                                    "end": end,
+                                    "reason": (
+                                        f"Invalid breakdown_roi: {raw_roi!r}. "
+                                        "Coordinates must be numbers."
+                                    ),
+                                }
+                            )
+                            continue
+
+                        if (
+                            len(item_breakdown_roi) != 4
+                            or not all(0.0 <= x <= 1.0 for x in item_breakdown_roi)
+                            or item_breakdown_roi[0] >= item_breakdown_roi[2]
+                            or item_breakdown_roi[1] >= item_breakdown_roi[3]
+                        ):
+                            rejected_count += 1
+                            rejected_reasons.append(
+                                {
+                                    "start": start,
+                                    "end": end,
+                                    "reason": (
+                                        f"Invalid breakdown_roi: {raw_roi!r}. "
+                                        "Require 4 normalized coordinates [ymin, xmin, ymax, xmax] "
+                                        "between 0.0 and 1.0 with ymin < ymax and xmin < xmax."
+                                    ),
+                                }
+                            )
+                            continue
+
+                item_breakdown_target_time = _parse_seconds(item.get("breakdown_target_time"))
+                raw_zoom = item.get("breakdown_zoom")
+                item_breakdown_zoom = float(raw_zoom) if raw_zoom is not None else 2.2
+                if item_breakdown_zoom <= 0.0:
+                    rejected_count += 1
+                    rejected_reasons.append(
+                        {
+                            "start": start,
+                            "end": end,
+                            "reason": f"Invalid breakdown_zoom: {raw_zoom!r}. Must be > 0.0.",
+                        }
+                    )
+                    continue
+                item_breakdown_focus = _as_str(item.get("breakdown_focus"))
 
                 raw_beats = _parse_raw_sub_clips(item.get("sub_clips"))
                 validated_beats = Scorer._validate_sub_clips(
@@ -1354,6 +1763,13 @@ async def submit_highlights(
                     sub_clips=validated_beats,
                     breakdown_commentary=breakdown_commentary,
                     breakdown_callout=breakdown_callout,
+                    breakdown_kind=item_breakdown_kind,
+                    breakdown_target_time=item_breakdown_target_time,
+                    breakdown_roi=item_breakdown_roi,
+                    breakdown_zoom=item_breakdown_zoom,
+                    breakdown_focus=item_breakdown_focus,
+                    transformation_mode=item_mode,
+                    caption_style=item_caption_style,
                 )
                 highlight.callout = callout
                 stitched = sum(float(b["end"]) - float(b["start"]) for b in validated_beats)
@@ -1440,6 +1856,7 @@ async def submit_highlights(
                         transcript_excerpt=_as_str(highlight.transcript_chunk),
                         chat_samples=_chat_texts(highlight.chat_burst),
                         avoid_phrases=recent_outros,
+                        require_grounding=True,
                     )
                     if problems and narration_strict:
                         rejected_count += 1
@@ -1536,9 +1953,16 @@ async def _prepare_render_clip(
     breakdown_commentary: str = "",
     breakdown_callout: str = "",
     voice_breakdown_path: str = "",
+    breakdown_kind: str = "auto",
+    breakdown_target_time: float | None = None,
+    breakdown_roi: list[float] | str | None = None,
+    breakdown_zoom: float = 2.2,
+    breakdown_focus: str = "",
     callout: str = "",
     layout: str = "",
     narration_strict: bool = True,
+    language: str = "",
+    caption_style: str = "auto",
 ) -> str | dict[str, Any]:
     """Validate render_clip inputs synchronously; return an error JSON string or a prepared dict."""
     clean_url = url.strip() if isinstance(url, str) else ""
@@ -1554,6 +1978,77 @@ async def _prepare_render_clip(
     ):
         return _json_error(
             f"Invalid clip range: start={start!r}, end={end!r} (require 0 <= start < end)."
+        )
+
+    clean_caption_style = _as_str(caption_style).lower() or "auto"
+    if clean_caption_style != "auto" and clean_caption_style not in _VALID_CAPTION_STYLES:
+        return _json_error(
+            f"Invalid caption_style: {caption_style!r}. Valid options: 'auto', "
+            f"{', '.join(sorted(_VALID_CAPTION_STYLES))}."
+        )
+
+    clean_breakdown_kind = _as_str(breakdown_kind).lower() or "auto"
+    if clean_breakdown_kind not in {"auto", "slow_mo", "zoom_spotlight"}:
+        return _json_error(
+            f"Invalid breakdown_kind: {breakdown_kind!r}. Valid options: 'auto', 'slow_mo', 'zoom_spotlight'."
+        )
+
+    clean_roi: list[float] = []
+    if breakdown_roi is not None:
+        parsed_roi_list = None
+        if isinstance(breakdown_roi, str):
+            trimmed_roi = breakdown_roi.strip()
+            if trimmed_roi:
+                try:
+                    parsed = json.loads(trimmed_roi)
+                    if isinstance(parsed, list):
+                        parsed_roi_list = parsed
+                    else:
+                        parsed_roi_list = "invalid"
+                except Exception:
+                    parsed_roi_list = "invalid"
+            else:
+                parsed_roi_list = []
+        elif isinstance(breakdown_roi, (list, tuple)):
+            parsed_roi_list = list(breakdown_roi)
+        else:
+            parsed_roi_list = "invalid"
+
+        if parsed_roi_list == "invalid":
+            return _json_error(
+                f"Invalid breakdown_roi: {breakdown_roi!r}. "
+                "Require 4 normalized coordinates [ymin, xmin, ymax, xmax] between 0.0 and 1.0."
+            )
+        elif parsed_roi_list:
+            try:
+                clean_roi = [float(x) for x in parsed_roi_list]
+            except (ValueError, TypeError):
+                return _json_error(
+                    f"Invalid breakdown_roi: {breakdown_roi!r}. Coordinates must be numbers."
+                )
+
+            if (
+                len(clean_roi) != 4
+                or not all(0.0 <= x <= 1.0 for x in clean_roi)
+                or clean_roi[0] >= clean_roi[2]
+                or clean_roi[1] >= clean_roi[3]
+            ):
+                return _json_error(
+                    f"Invalid breakdown_roi: {breakdown_roi!r}. "
+                    "Require 4 normalized coordinates [ymin, xmin, ymax, xmax] between 0.0 and 1.0 with ymin < ymax and xmin < xmax."
+                )
+
+    clean_zoom = float(breakdown_zoom) if breakdown_zoom is not None else 2.2
+    if clean_zoom <= 0.0:
+        return _json_error(f"Invalid breakdown_zoom: {breakdown_zoom!r}. Must be > 0.0.")
+
+    clean_target_time = float(breakdown_target_time) if breakdown_target_time is not None else None
+    clean_focus = _as_str(breakdown_focus)
+
+    clean_language = _as_str(language).lower()
+    if clean_language and clean_language not in ("english", "hinglish"):
+        return _json_error(
+            f"Invalid language: {language!r}. Supported languages: 'english', 'hinglish'."
         )
 
     config = _get_config()
@@ -1605,6 +2100,7 @@ async def _prepare_render_clip(
                 transcript_excerpt=nq_excerpt,
                 chat_samples=nq_chat,
                 avoid_phrases=_recent_outros(config),
+                require_grounding=True,
             )
             if nq_problems:
                 return _json_error(
@@ -1702,7 +2198,9 @@ async def _prepare_render_clip(
         "moment_type": moment_type, "narration_intro": narration_intro,
         "narration_outro": narration_outro, "context_badge": context_badge,
         "breakdown_commentary": breakdown_commentary, "breakdown_callout": breakdown_callout,
-        "callout": callout,
+        "breakdown_kind": clean_breakdown_kind, "breakdown_target_time": clean_target_time,
+        "breakdown_roi": clean_roi, "breakdown_zoom": clean_zoom, "breakdown_focus": clean_focus,
+        "callout": callout, "language": clean_language, "caption_style": clean_caption_style,
     }
 
 
@@ -1746,6 +2244,11 @@ async def _execute_render_clip(p: dict[str, Any], progress: JobProgress) -> dict
             sub_clips=validated_beats,
             breakdown_commentary=_as_str(breakdown_commentary),
             breakdown_callout=_as_str(breakdown_callout),
+            breakdown_kind=p.get("breakdown_kind", "auto"),
+            breakdown_target_time=p.get("breakdown_target_time"),
+            breakdown_roi=list(p.get("breakdown_roi", []) or []),
+            breakdown_zoom=float(p.get("breakdown_zoom", 2.2) or 2.2),
+            breakdown_focus=_as_str(p.get("breakdown_focus", "")),
             bounds_adjustment=bounds_adjustment,
         )
         highlight.callout = _as_str(callout)
@@ -1778,6 +2281,22 @@ async def _execute_render_clip(p: dict[str, Any], progress: JobProgress) -> dict
 
         min_clip_index = (len(state.clips) + 1) if state is not None else 1
         render_notes: list[dict[str, Any]] = []
+        user_lang = _as_str(p.get("language", ""))
+        from ..language import _normalize
+        norm_user_lang = _normalize(user_lang) if user_lang else None
+        if norm_user_lang:
+            final_lang = norm_user_lang
+        elif user_lang:
+            final_lang = user_lang.strip().lower()
+        else:
+            final_lang = resolve_narration_language(
+                config,
+                resolved_streamer,
+                state.transcript.language
+                if state is not None and state.transcript is not None
+                else None,
+            )
+        caption_style_param = p.get("caption_style", "auto")
         clip_result, resolved_mode = await _render_single_highlight(
             pipeline=pipeline,
             config=config,
@@ -1794,13 +2313,8 @@ async def _execute_render_clip(p: dict[str, Any], progress: JobProgress) -> dict
             voice_breakdown_path=breakdown_voice,
             layout=layout_kind,
             notes=render_notes,
-            language=resolve_narration_language(
-                config,
-                resolved_streamer,
-                state.transcript.language
-                if state is not None and state.transcript is not None
-                else None,
-            ),
+            language=final_lang,
+            caption_style=caption_style_param,
         )
 
         fresh_state = cache.load_state(clean_url)
@@ -1842,10 +2356,17 @@ async def render_clip(
     breakdown_commentary: str = "",
     breakdown_callout: str = "",
     voice_breakdown_path: str = "",
+    breakdown_kind: str = "auto",
+    breakdown_target_time: float | None = None,
+    breakdown_roi: list[float] | None = None,
+    breakdown_zoom: float = 2.2,
+    breakdown_focus: str = "",
     callout: str = "",
     layout: str = "",
     narration_strict: bool = True,
+    language: str = "",
     wait: bool = False,
+    caption_style: str = "auto",
 ) -> str:
     """Render a single highlight into a final 9:16 vertical clip (mode: auto | narrative | story | breakdown | raw) with YPP transformative narration, zoom, and ASS captions+chat ticker.
 
@@ -1865,32 +2386,47 @@ async def render_clip(
     rendered as narrative/story and the response says so (mode_adjusted + reason). Use
     narrative/story (or auto) for reactions: hype, funny, chat_chaos, lore_secret.
 
+    caption_style: Optional subtitle style ('auto', 'hormozi', 'bounce', 'pop', 'box', 'karaoke',
+                   'single_word', 'sentence'). Defaults to 'auto', which automatically maps
+                   moment_type to suitable subtitle animations/styles (e.g. funny/fail -> bounce,
+                   hype/clutch -> pop, graphics_detail/analysis -> box).
+
     Write narration following narration_guide from get_transcript_chunks (energetic,
     interactive gamer voice, grounded in the transcript). Given narration text is
     quality-checked and rejected with a problems list unless narration_strict=false.
+
+    language: optional narration language override ("english" or "hinglish"). Defaults to ""
+    (auto-detected from streamer or transcript).
     """
     try:
         prepared = await _prepare_render_clip(
             url=url,
-        start=start,
-        end=end,
-        hook_title=hook_title,
-        game=game,
-        streamer=streamer,
-        moment_type=moment_type,
-        narration_intro=narration_intro,
-        narration_outro=narration_outro,
-        context_badge=context_badge,
-        sub_clips_json=sub_clips_json,
-        mode=mode,
-        voice_intro_path=voice_intro_path,
-        voice_outro_path=voice_outro_path,
-        breakdown_commentary=breakdown_commentary,
-        breakdown_callout=breakdown_callout,
-        voice_breakdown_path=voice_breakdown_path,
-        callout=callout,
-        layout=layout,
-        narration_strict=narration_strict,
+            start=start,
+            end=end,
+            hook_title=hook_title,
+            game=game,
+            streamer=streamer,
+            moment_type=moment_type,
+            narration_intro=narration_intro,
+            narration_outro=narration_outro,
+            context_badge=context_badge,
+            sub_clips_json=sub_clips_json,
+            mode=mode,
+            voice_intro_path=voice_intro_path,
+            voice_outro_path=voice_outro_path,
+            breakdown_commentary=breakdown_commentary,
+            breakdown_callout=breakdown_callout,
+            voice_breakdown_path=voice_breakdown_path,
+            breakdown_kind=breakdown_kind,
+            breakdown_target_time=breakdown_target_time,
+            breakdown_roi=breakdown_roi,
+            breakdown_zoom=breakdown_zoom,
+            breakdown_focus=breakdown_focus,
+            callout=callout,
+            layout=layout,
+            narration_strict=narration_strict,
+            language=language,
+            caption_style=caption_style,
         )
         if isinstance(prepared, str):
             return prepared
@@ -1926,6 +2462,8 @@ def _job_results_from_payload(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Per-clip result dicts (same shape the synchronous responses used) plus a summary."""
     results: list[dict[str, Any]] = []
+    if kind == "transcribe_audio":
+        return [payload], payload
     if kind == "render_clip":
         clip = dict(payload.get("clip") or {})
         entry = {

@@ -255,6 +255,7 @@ def _download_segment_with_id(
 
     ydl_opts: dict[str, Any] = {
         "format": VIDEO_FORMAT_1080P,
+        "format_sort": ["res:1080", "fps:60", "vbr", "br", "quality"],
         "merge_output_format": "mp4",
         "postprocessors": [
             {

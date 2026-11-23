@@ -8,11 +8,12 @@ import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
+import hashlib
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 
 from streamclipper.analysis.content_gate import DEFAULT_STATIC_THRESHOLD
 from streamclipper.config import Config
@@ -188,11 +189,231 @@ def _grab_tile_frame(video_path: Path, timestamp: float, temp_path: Path) -> Ima
 
 
 def _format_timestamp_label(seconds: float) -> str:
-    """Format seconds into MM:SS display label."""
+    """Format seconds into MM:SS (or HH:MM:SS) display label."""
+    if not math.isfinite(seconds):
+        return "00:00"
     s = max(0, int(round(seconds)))
-    mins = s // 60
+    if s < 3600:
+        mins = s // 60
+        secs = s % 60
+        return f"{mins:02d}:{secs:02d}"
+    hrs = s // 3600
+    mins = (s % 3600) // 60
     secs = s % 60
-    return f"{mins:02d}:{secs:02d}"
+    return f"{hrs:02d}:{mins:02d}:{secs:02d}"
+
+
+def _stamp_tile_timestamp(
+    img: Image.Image,
+    seconds: float,
+    *,
+    text_color: tuple[int, int, int] = (255, 255, 0),
+) -> Image.Image:
+    """Stamp a high-contrast timestamp badge on the top-left of a tile."""
+    draw = ImageDraw.Draw(img)
+    lbl = _format_timestamp_label(seconds)
+    try:
+        font = ImageFont.load_default(size=16)
+    except (TypeError, AttributeError):
+        font = ImageFont.load_default()
+
+    try:
+        bbox = draw.textbbox((10, 8), lbl, font=font)
+        draw.rectangle(
+            [bbox[0] - 4, bbox[1] - 2, bbox[2] + 4, bbox[3] + 2], fill=(0, 0, 0)
+        )
+    except Exception:
+        draw.rectangle([6, 6, 80, 26], fill=(0, 0, 0))
+    draw.text((10, 8), lbl, fill=text_color, font=font)
+    return img
+
+
+def extract_moment_contact_sheets(
+    url: str,
+    center_time: float,
+    temp_dir: Path | str,
+    *,
+    window_before: float = 120.0,
+    window_after: float = 60.0,
+    height: int = 360,
+    grid: int = 3,
+    sheet_width: int = 1152,
+) -> list[ContactSheet]:
+    """Extract dual 90-second 3x3 contact sheets for candidate moment inspection.
+
+    Downloads a lightweight 360p proxy video slice for [center - window_before, center + window_after]
+    using yt-dlp download_ranges (or uses local video if url points to an existing file).
+    Generates:
+      - Sheet 1: Buildup & Trigger [center - 120s to -30s] (9 tiles, 1 every 10s)
+      - Sheet 2: Climax & Reaction [center - 30s to +60s] (9 tiles, 1 every 10s)
+    Each tile is stamped with a high-contrast yellow MM:SS (or HH:MM:SS) timestamp label.
+    Returns list of ContactSheet objects with file paths and tile timestamps.
+    """
+    clean_url = str(url or "").strip()
+    if not clean_url:
+        raise ValueError("URL cannot be empty")
+    center = float(center_time)
+    if center < 0:
+        raise ValueError("center_time must be >= 0")
+
+    wb = float(window_before)
+    wa = float(window_after)
+    slice_start = max(0.0, center - wb)
+    slice_end = center + wa
+
+    source_key = hashlib.sha256(clean_url.encode("utf-8")).hexdigest()[:12]
+    target_dir = Path(temp_dir) / "moment_frames" / source_key / f"{int(center)}_{int(wb)}_{int(wa)}"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    sheet1_path = target_dir / "sheet_1_buildup.png"
+    sheet2_path = target_dir / "sheet_2_climax.png"
+    manifest_path = target_dir / "manifest.json"
+
+    if manifest_path.is_file() and sheet1_path.is_file() and sheet2_path.is_file():
+        try:
+            cached_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if isinstance(cached_data, list) and len(cached_data) == 2:
+                cached_sheets = [ContactSheet.from_dict(d) for d in cached_data]
+                if all(s.path.is_file() and s.path.stat().st_size > 0 for s in cached_sheets):
+                    return cached_sheets
+        except Exception as exc:
+            logger.debug("Failed loading moment sheets manifest %s: %s", manifest_path, exc)
+
+    local_cand = Path(clean_url)
+    if local_cand.is_file() and local_cand.stat().st_size > 0:
+        actual_video = local_cand
+    else:
+        proxy_path = target_dir / "proxy_slice.mp4"
+        if not (proxy_path.is_file() and proxy_path.stat().st_size > 0):
+            fmt = f"bestvideo[height<={height}]+bestaudio/best[height<={height}]/worst"
+            ydl_opts: dict[str, Any] = {
+                "format": fmt,
+                "outtmpl": str(target_dir / "proxy_slice.%(ext)s"),
+                "merge_output_format": "mp4",
+                "force_keyframes_at_cuts": True,
+                "noplaylist": True,
+                "quiet": True,
+                "no_warnings": True,
+                "overwrites": True,
+                "retries": 3,
+                "fragment_retries": 3,
+                "extractor_retries": 3,
+            }
+            apply_ytdlp_auth_opts(ydl_opts)
+
+            import yt_dlp
+
+            ydl_opts["download_ranges"] = yt_dlp.utils.download_range_func(
+                None, [(slice_start, slice_end)]
+            )
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ydl.download([clean_url])
+            except Exception as exc:
+                logger.warning(
+                    "Failed downloading proxy video slice for %s [%.1f-%.1f]: %s",
+                    clean_url,
+                    slice_start,
+                    slice_end,
+                    exc,
+                )
+                return []
+
+            if not (proxy_path.is_file() and proxy_path.stat().st_size > 0):
+                video_exts = {".webm", ".mkv", ".avi", ".mov", ".ts", ".flv"}
+                for cand in target_dir.glob("proxy_slice.*"):
+                    if (
+                        cand.is_file()
+                        and cand.stat().st_size > 0
+                        and cand.suffix.lower() in video_exts
+                        and cand.resolve() != proxy_path.resolve()
+                    ):
+                        try:
+                            cmd = ["ffmpeg", "-y", "-i", str(cand), "-c", "copy", str(proxy_path)]
+                            subprocess.run(cmd, capture_output=True, check=True)
+                            cand.unlink(missing_ok=True)
+                            if proxy_path.is_file() and proxy_path.stat().st_size > 0:
+                                break
+                        except Exception:
+                            shutil.move(str(cand), str(proxy_path))
+                            break
+
+        if not (proxy_path.is_file() and proxy_path.stat().st_size > 0):
+            logger.warning("No proxy slice video file found at %s", proxy_path)
+            return []
+        actual_video = proxy_path
+
+    v_dur = _get_video_duration(actual_video)
+    proxy_cand = target_dir / "proxy_slice.mp4"
+    if actual_video == proxy_cand or actual_video.name.startswith("proxy_slice"):
+        file_offset = slice_start
+    else:
+        file_offset = 0.0
+
+    num_tiles = max(1, grid * grid)
+
+    # Sheet 1: Buildup & Trigger [center - window_before, center - 30.0]
+    s1_start = max(0.0, center - wb)
+    s1_end = max(s1_start, center - 30.0)
+    if s1_end <= s1_start:
+        s1_end = max(s1_start + 1.0, center)
+    s1_dur = max(0.1, s1_end - s1_start)
+    step1 = s1_dur / num_tiles
+    s1_timestamps = [round(s1_start + i * step1, 2) for i in range(num_tiles)]
+
+    # Sheet 2: Climax & Reaction [center - 30.0, center + window_after]
+    s2_start = max(0.0, center - 30.0)
+    s2_end = max(s2_start + 0.1, center + wa)
+    s2_dur = max(0.1, s2_end - s2_start)
+    step2 = s2_dur / num_tiles
+    s2_timestamps = [round(s2_start + i * step2, 2) for i in range(num_tiles)]
+
+    tile_width = max(16, sheet_width // grid)
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp_dir = Path(tmp_str)
+
+        def _render_sheet(timestamps: list[float], out_png: Path) -> None:
+            tile_images: list[Image.Image] = []
+            for idx, ts in enumerate(timestamps):
+                tile_tmp = tmp_dir / f"tile_{idx:02d}.jpg"
+                seek_time = max(0.0, ts - file_offset)
+                if v_dur > 0:
+                    seek_time = min(seek_time, max(0.0, v_dur - 0.05))
+                img = _grab_tile_frame(actual_video, seek_time, tile_tmp)
+                if img is None:
+                    img = Image.new("RGB", (tile_width, int(tile_width * 9 / 16)), color=(0, 0, 0))
+                tile_images.append(img)
+
+            first_w, first_h = tile_images[0].size
+            aspect = (first_h / first_w) if first_w > 0 else (9.0 / 16.0)
+            tile_height = max(16, int(round(tile_width * aspect)))
+            sheet_height = tile_height * grid
+
+            canvas = Image.new("RGB", (sheet_width, sheet_height), color=(0, 0, 0))
+            for idx, (img, ts) in enumerate(zip(tile_images, timestamps)):
+                resized = img.resize((tile_width, tile_height), Image.Resampling.LANCZOS)
+                _stamp_tile_timestamp(resized, ts, text_color=(255, 255, 0))
+                r = idx // grid
+                c = idx % grid
+                canvas.paste(resized, (c * tile_width, r * tile_height))
+
+            canvas.save(out_png, "PNG")
+
+        _render_sheet(s1_timestamps, sheet1_path)
+        _render_sheet(s2_timestamps, sheet2_path)
+
+    sheet1 = ContactSheet(path=sheet1_path, start=s1_start, end=s1_end, timestamps=s1_timestamps)
+    sheet2 = ContactSheet(path=sheet2_path, start=s2_start, end=s2_end, timestamps=s2_timestamps)
+    results = [sheet1, sheet2]
+
+    try:
+        manifest_path.write_text(
+            json.dumps([s.to_dict() for s in results], indent=2),
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        logger.debug("Failed writing moment sheets manifest %s: %s", manifest_path, exc)
+
+    return results
 
 
 def build_contact_sheets(
@@ -336,18 +557,7 @@ def build_contact_sheets(
 
             for idx, (img, ts) in enumerate(zip(tile_images, timestamps)):
                 resized = img.resize((tile_width, tile_height), Image.Resampling.LANCZOS)
-                draw = ImageDraw.Draw(resized)
-
-                # Label tile with MM:SS timestamp
-                lbl = _format_timestamp_label(ts)
-                # Badge background in top-left
-                try:
-                    bbox = draw.textbbox((10, 8), lbl)
-                    draw.rectangle([bbox[0] - 4, bbox[1] - 2, bbox[2] + 4, bbox[3] + 2], fill=(0, 0, 0))
-                except Exception:
-                    draw.rectangle([6, 6, 60, 24], fill=(0, 0, 0))
-                draw.text((10, 8), lbl, fill=(255, 255, 255))
-
+                _stamp_tile_timestamp(resized, ts, text_color=(255, 255, 255))
                 r = idx // grid
                 c = idx % grid
                 canvas.paste(resized, (c * tile_width, r * tile_height))

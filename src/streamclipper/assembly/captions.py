@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -26,10 +27,139 @@ _NAMED_ASS_COLORS: dict[str, str] = {
 
 _HEX6_RE = re.compile(r"[0-9a-fA-F]{6}")
 _ASS_CONTROL_RE = re.compile(r"\\([Nnh])")
-_VALID_CAPTION_STYLES = frozenset({"hormozi", "single_word", "sentence"})
+_VALID_CAPTION_STYLES = frozenset(
+    {"hormozi", "single_word", "sentence", "bounce", "pop", "karaoke", "box"}
+)
+_VALID_ANIMATIONS = frozenset(
+    {"none", "pop", "bounce", "sweep", "color_sweep"}
+)
+
+MOMENT_TYPE_CAPTION_STYLES: dict[str, str] = {
+    "funny": "bounce",
+    "chat_chaos": "bounce",
+    "fail": "bounce",
+    "hype": "pop",
+    "clutch": "pop",
+    "graphics_detail": "box",
+    "analysis": "box",
+    "lore_secret": "box",
+}
 
 
-def _safe_int(value: Any, default: int, *, minimum: int | None = None) -> int:
+def resolve_caption_style(
+    caption_style: str | None = None,
+    moment_type: str | None = None,
+    default_style: str = "hormozi",
+) -> str:
+    """Resolve the effective subtitle style from an explicit override or moment_type.
+
+    Priority:
+    1. Explicit style override (e.g. 'bounce', 'pop', 'box', 'karaoke', 'hormozi') if not 'auto'.
+    2. Automatic mapping based on moment_type:
+       - funny, chat_chaos, fail -> bounce
+       - hype, clutch -> pop
+       - graphics_detail, analysis, lore_secret -> box
+    3. Fallback to default_style (e.g. config captions.style).
+    """
+    clean_style = str(caption_style or "").strip().lower()
+    if clean_style and clean_style != "auto":
+        if clean_style in _VALID_CAPTION_STYLES:
+            return clean_style
+        return clean_style
+
+    clean_moment = str(moment_type or "").strip().lower()
+    if clean_moment in MOMENT_TYPE_CAPTION_STYLES:
+        return MOMENT_TYPE_CAPTION_STYLES[clean_moment]
+
+    return default_style or "hormozi"
+
+
+_FONT_CANDIDATES: dict[str, list[str]] = {
+    "impact": ["impact.ttf", "Impact.ttf", "impact.TTF", "Impact"],
+    "arial black": ["ariblk.ttf", "Arial Black.ttf", "ariblk.TTF", "ariblk", "Arial Black"],
+    "arial": ["arial.ttf", "Arial.ttf", "arial.TTF", "arial"],
+}
+
+
+def _is_font_installed(font_family: str) -> bool:
+    """Check if a font family is installed on the local system."""
+    clean = font_family.strip().lower()
+    candidates = _FONT_CANDIDATES.get(clean, [f"{clean}.ttf", clean])
+    try:
+        from PIL import ImageFont
+
+        for cand in candidates:
+            try:
+                ImageFont.truetype(cand, 10)
+                return True
+            except OSError:
+                continue
+    except ImportError:
+        pass
+
+    windir = os.environ.get("WINDIR", r"C:\Windows")
+    win_fonts = Path(windir) / "Fonts"
+    if win_fonts.is_dir():
+        for cand in candidates:
+            if (win_fonts / cand).exists():
+                return True
+
+    # Check Windows per-user font directory (%LOCALAPPDATA%\Microsoft\Windows\Fonts)
+    local_app_data = os.environ.get("LOCALAPPDATA", "")
+    if local_app_data:
+        user_fonts = Path(local_app_data) / "Microsoft" / "Windows" / "Fonts"
+        if user_fonts.is_dir():
+            for cand in candidates:
+                if (user_fonts / cand).exists():
+                    return True
+
+    # Check Linux / Unix font paths if running on non-Windows
+    for sys_font_dir in (Path("/usr/share/fonts"), Path("/usr/local/share/fonts"), Path.home() / ".fonts"):
+        if sys_font_dir.is_dir():
+            for cand in candidates:
+                if list(sys_font_dir.glob(f"**/{cand}")):
+                    return True
+    return False
+
+
+def resolve_font(font_name: str, fallback: str = "Arial Black") -> str:
+    """Resolve font name with automatic fallback (e.g. Impact -> Arial Black).
+
+    Preserves explicit custom fonts while ensuring missing 'Impact' falls back cleanly.
+    """
+    raw = (font_name or "").strip()
+    if not raw:
+        return fallback
+    clean_lower = raw.lower()
+    if clean_lower == "impact":
+        if _is_font_installed("impact"):
+            return "Impact"
+        if _is_font_installed("arial black"):
+            return "Arial Black"
+        return fallback or "Arial Black"
+    return raw
+
+
+def _chunk_words(words: list[str], max_chunk_size: int = 3) -> list[list[str]]:
+    """Split words into natural 2-3 word chunks, borrowing to prevent 1-word trailing orphans."""
+    if not words:
+        return []
+    effective_max = max(1, max_chunk_size)
+    if len(words) <= effective_max:
+        return [words]
+    chunks = [words[i : i + effective_max] for i in range(0, len(words), effective_max)]
+    if len(chunks) > 1 and len(chunks[-1]) == 1 and len(chunks[-2]) > 2:
+        chunks[-1].insert(0, chunks[-2].pop())
+    return chunks
+
+
+def _safe_int(
+    value: Any,
+    default: int,
+    *,
+    minimum: int | None = None,
+    maximum: int | None = None,
+) -> int:
     """Coerce config value to int safely (rejecting None/bool/non-numeric)."""
     if value is None or isinstance(value, bool):
         result = default
@@ -41,6 +171,8 @@ def _safe_int(value: Any, default: int, *, minimum: int | None = None) -> int:
             result = default
     if minimum is not None and result < minimum:
         return minimum
+    if maximum is not None and result > maximum:
+        return maximum
     return result
 
 
@@ -116,14 +248,97 @@ def _hex_to_ass_bgr(hex_color: str, default: str = "&H00D7FF&") -> str:
     return f"&H{b}{g}{r}&".upper()
 
 
+def _resolve_highlight_bgr(color: str, default: str = "&H00E6FF&") -> str:
+    """Resolve highlight color from hex (#RRGGBB), named color, or ASS (&HBBGGRR& / &HAABBGGRR)."""
+    raw = str(color or "").strip()
+    if not raw:
+        return default
+    clean = raw.rstrip("&")
+    if clean.startswith("&H") or clean.startswith("&h"):
+        hex_part = clean[2:]
+        if len(hex_part) == 6 and bool(_HEX6_RE.fullmatch(hex_part)):
+            return f"&H{hex_part.upper()}&"
+        if len(hex_part) == 8 and bool(re.fullmatch(r"[0-9a-fA-F]{8}", hex_part)):
+            return f"&H{hex_part[2:].upper()}&"
+    lower_raw = raw.lower()
+    if lower_raw in _NAMED_ASS_COLORS:
+        named = _NAMED_ASS_COLORS[lower_raw]
+        return f"&H{named[4:]}&"
+    bgr = _hex_to_ass_bgr(raw, default="")
+    if bgr:
+        return bgr
+    return default
+
+
 def _color_to_ass_style(color: str, default: str = "&H00FFFFFF") -> str:
-    """Convert CSS named color or '#RRGGBB' into ASS style color '&H00BBGGRR'."""
-    raw = str(color or "").strip().lower()
-    if raw in _NAMED_ASS_COLORS:
-        return _NAMED_ASS_COLORS[raw]
+    """Convert CSS named color, '#RRGGBB', or '&HAABBGGRR' into ASS style color '&HAABBGGRR'."""
+    raw = str(color or "").strip()
+    if not raw:
+        return default
+    clean_ass = raw.rstrip("&")
+    if clean_ass.startswith("&H") or clean_ass.startswith("&h"):
+        if len(clean_ass) == 10 and bool(re.fullmatch(r"[0-9a-fA-F]{8}", clean_ass[2:])):
+            return clean_ass.upper()
+        if len(clean_ass) == 8 and bool(_HEX6_RE.fullmatch(clean_ass[2:])):
+            return f"&H00{clean_ass[2:].upper()}"
+    lower_raw = raw.lower()
+    if lower_raw in _NAMED_ASS_COLORS:
+        return _NAMED_ASS_COLORS[lower_raw]
     bgr = _hex_to_ass_bgr(raw, default="")
     if bgr:
         return "&H00" + bgr[2:-1]
+    return default
+
+
+def _color_to_ass_style_with_alpha(
+    color: str, opacity: float | None = None, default: str = "&H00000000"
+) -> str:
+    """Convert CSS named color, '#RRGGBB', or ASS color into '&HAABBGGRR' format with opacity.
+
+    Opacity is between 0.0 (transparent) and 1.0 (fully opaque).
+    In ASS style colors, the alpha byte 00 is opaque and FF is fully transparent.
+    """
+    raw = str(color or "").strip()
+    if not raw:
+        return default
+
+    alpha_hex: str | None = None
+    if opacity is not None and math.isfinite(opacity):
+        clamped_op = max(0.0, min(1.0, float(opacity)))
+        alpha_int = round((1.0 - clamped_op) * 255)
+        alpha_hex = f"{alpha_int:02X}"
+
+    clean_ass = raw.rstrip("&")
+    if clean_ass.startswith("&H") or clean_ass.startswith("&h"):
+        if len(clean_ass) == 10 and bool(re.fullmatch(r"[0-9a-fA-F]{8}", clean_ass[2:])):
+            if alpha_hex is not None:
+                return f"&H{alpha_hex}{clean_ass[4:].upper()}"
+            return clean_ass.upper()
+        if len(clean_ass) == 8 and bool(_HEX6_RE.fullmatch(clean_ass[2:])):
+            a_str = alpha_hex if alpha_hex is not None else "00"
+            return f"&H{a_str}{clean_ass[2:].upper()}"
+
+    clean_hex = raw.removeprefix("#").strip()
+    if len(clean_hex) == 8 and bool(re.fullmatch(r"[0-9a-fA-F]{8}", clean_hex)):
+        r, g, b, a = clean_hex[0:2], clean_hex[2:4], clean_hex[4:6], clean_hex[6:8]
+        if alpha_hex is None:
+            css_a = int(a, 16)
+            alpha_hex = f"{(255 - css_a):02X}"
+        return f"&H{alpha_hex}{b}{g}{r}".upper()
+
+    lower_raw = raw.lower()
+    if lower_raw in _NAMED_ASS_COLORS:
+        base = _NAMED_ASS_COLORS[lower_raw]
+        if alpha_hex is not None:
+            return f"&H{alpha_hex}{base[4:]}".upper()
+        return base
+
+    bgr = _hex_to_ass_bgr(clean_hex, default="")
+    if bgr:
+        bgr_val = bgr[2:-1]
+        a_str = alpha_hex if alpha_hex is not None else "00"
+        return f"&H{a_str}{bgr_val}".upper()
+
     return default
 
 
@@ -143,6 +358,7 @@ class AssCaptionBurner:
     CHAT_TICKER_DURATION_SECONDS = 2.5
 
     def __init__(self, config: Config) -> None:
+        self.config = config
         raw_style = str(config.get("captions.style", "hormozi") or "hormozi").strip().lower()
         if raw_style not in _VALID_CAPTION_STYLES:
             logger.warning(
@@ -152,14 +368,15 @@ class AssCaptionBurner:
         self.style = raw_style
 
         self.words_per_group = _safe_int(
-            config.get("captions.words_per_group", 4), 4, minimum=1
+            config.get("captions.words_per_group", 3), 3, minimum=1
         )
-        raw_font = str(config.get("captions.font", "Arial") or "Arial")
-        self.font = (
+        raw_font = str(config.get("captions.font", "Impact") or "Impact")
+        clean_font = (
             raw_font.replace(",", " ").replace("\r", " ").replace("\n", " ").strip()
-            or "Arial"
+            or "Impact"
         )
-        self.font_size = _safe_int(config.get("captions.font_size", 72), 72, minimum=1)
+        self.font = resolve_font(clean_font)
+        self.font_size = _safe_int(config.get("captions.font_size", 82), 82, minimum=1)
         self.primary_color = _color_to_ass_style(
             config.get("captions.color", "white"), default="&H00FFFFFF"
         )
@@ -167,19 +384,70 @@ class AssCaptionBurner:
             config.get("captions.stroke_color", "black"), default="&H00000000"
         )
         stroke_val = _safe_float(
-            config.get("captions.stroke_width", 4), 4.0, minimum=0.0
+            config.get("captions.stroke_width", 8), 8.0, minimum=0.0
         )
         self.stroke_width: int | float = (
             int(stroke_val) if stroke_val.is_integer() else stroke_val
         )
 
-        raw_highlight = str(config.get("captions.highlight_color", "#FFD700") or "#FFD700")
-        highlight_bgr = _hex_to_ass_bgr(raw_highlight, default="")
-        if not highlight_bgr:
-            named_style = _NAMED_ASS_COLORS.get(raw_highlight.strip().lower())
-            highlight_bgr = f"&H{named_style[4:]}&" if named_style else "&H00D7FF&"
-        self.highlight_bgr = highlight_bgr
+        raw_highlight = str(config.get("captions.highlight_color", "#FFE600") or "#FFE600")
+        self.highlight_bgr = _resolve_highlight_bgr(raw_highlight, default="&H00E6FF&")
         self._ticker_font = self.font  # ChatTicker keeps the base font; presets never touch it
+
+        # Animation mode: none | pop | bounce | sweep | color_sweep
+        user_specified_anim = False
+        if hasattr(config, "is_user_specified") and callable(config.is_user_specified):
+            user_specified_anim = config.is_user_specified("captions.animation")
+
+        if user_specified_anim:
+            raw_anim = str(config.get("captions.animation", "bounce") or "bounce").strip().lower()
+        else:
+            if self.style == "pop":
+                raw_anim = "pop"
+            elif self.style == "bounce":
+                raw_anim = "bounce"
+            elif self.style in ("sentence", "single_word", "karaoke", "box"):
+                raw_anim = "none"
+            else:
+                raw_anim = str(config.get("captions.animation", "bounce") or "bounce").strip().lower()
+        if raw_anim not in _VALID_ANIMATIONS:
+            logger.warning("Unknown captions.animation %r; defaulting to 'bounce'.", raw_anim)
+            raw_anim = "bounce"
+        self.animation = raw_anim
+
+        self.animation_scale = _safe_float(
+            config.get("captions.animation_scale", 1.30), 1.30, minimum=1.0, maximum=3.0
+        )
+        self.animation_duration_ms = _safe_int(
+            config.get("captions.animation_duration_ms", 140), 140, minimum=20, maximum=2000
+        )
+
+        # Drop shadow configuration
+        shadow_val = _safe_float(
+            config.get("captions.shadow_offset", 6.0), 6.0, minimum=0.0, maximum=50.0
+        )
+        self.shadow_offset: int | float = (
+            int(shadow_val) if shadow_val.is_integer() else shadow_val
+        )
+        self.shadow_color = _color_to_ass_style_with_alpha(
+            config.get("captions.shadow_color", "&H90000000"), default="&H90000000"
+        )
+
+        # Background box configuration (BorderStyle=3)
+        self.box_style = bool(config.get("captions.box_style", False)) or (self.style == "box")
+        box_pad_val = _safe_float(
+            config.get("captions.box_padding", 6), 6.0, minimum=0.0, maximum=100.0
+        )
+        self.box_padding: int | float = (
+            int(box_pad_val) if box_pad_val.is_integer() else box_pad_val
+        )
+        self.box_opacity = _safe_float(
+            config.get("captions.box_opacity", 0.60), 0.60, minimum=0.0, maximum=1.0
+        )
+        raw_box_color = str(config.get("captions.box_color", "black") or "black")
+        self.box_color = _color_to_ass_style_with_alpha(
+            raw_box_color, opacity=self.box_opacity, default="&H99000000"
+        )
 
         self.codec = str(config.get("video.codec", "libx264") or "libx264").strip().lower()
         resolution = config.get("video.resolution", [1080, 1920])
@@ -195,34 +463,279 @@ class AssCaptionBurner:
         self.margin_v = round(self.height * (1.0 - pos_y_ratio))
         self.show_chat_ticker = bool(config.get("transformation.show_chat_ticker", True))
 
-    def generate_ass(self, *args: Any, style_preset: dict[str, Any] | None = None, **kwargs: Any) -> Path:
-        """Write the .ass file; `style_preset` ({font, primary_color, highlight_color, outline_color})
+    def generate_ass(
+        self,
+        *args: Any,
+        style_preset: dict[str, Any] | None = None,
+        caption_style: str | None = None,
+        moment_type: str | None = None,
+        **kwargs: Any,
+    ) -> Path:
+        """Write the .ass file; `style_preset`, `caption_style`, or `moment_type`
         overrides the word-caption and narration-card styles only (ChatTicker is left alone)."""
-        if not style_preset:
+        eff_preset = dict(style_preset) if style_preset else {}
+
+        target_style: str | None = None
+        if caption_style and str(caption_style).strip().lower() != "auto":
+            target_style = str(caption_style).strip().lower()
+        elif moment_type and str(moment_type).strip().lower() in MOMENT_TYPE_CAPTION_STYLES:
+            target_style = MOMENT_TYPE_CAPTION_STYLES[str(moment_type).strip().lower()]
+
+        if target_style and target_style in _VALID_CAPTION_STYLES:
+            eff_preset["style"] = target_style
+            if target_style == "bounce":
+                eff_preset["animation"] = "bounce"
+            elif target_style == "pop":
+                eff_preset["animation"] = "pop"
+            elif target_style == "box":
+                eff_preset["box_style"] = True
+                eff_preset["animation"] = "none"
+            elif target_style == "karaoke":
+                eff_preset["animation"] = "none"
+
+        if not eff_preset:
             return self._generate_ass(*args, **kwargs)
-        saved = (self.font, self.primary_color, self.stroke_color, self.highlight_bgr)
+        saved = (
+            self.style,
+            self.font,
+            self.primary_color,
+            self.stroke_color,
+            self.stroke_width,
+            self.highlight_bgr,
+            self.shadow_offset,
+            self.shadow_color,
+            self.box_style,
+            self.box_padding,
+            self.box_opacity,
+            self.box_color,
+            self.animation,
+            self.animation_scale,
+            self.animation_duration_ms,
+        )
         try:
-            font = re.sub(r"[,\r\n]+", " ", str(style_preset.get("font") or "")).strip()
+            if "style" in eff_preset and eff_preset["style"] is not None:
+                raw_s = str(eff_preset["style"]).strip().lower()
+                if raw_s in _VALID_CAPTION_STYLES:
+                    self.style = raw_s
+                    if self.style == "bounce":
+                        self.animation = "bounce"
+                    elif self.style == "pop":
+                        self.animation = "pop"
+                    elif self.style == "box":
+                        self.box_style = True
+                        self.animation = "none"
+                    elif self.style == "karaoke":
+                        self.animation = "none"
+            font = re.sub(r"[,\r\n]+", " ", str(eff_preset.get("font") or "")).strip()
             if font:
-                self.font = font
-            if style_preset.get("primary_color"):
+                self.font = resolve_font(font)
+            primary_col = eff_preset.get("primary_color") or eff_preset.get("color")
+            if primary_col:
                 self.primary_color = _color_to_ass_style(
-                    style_preset["primary_color"], default=self.primary_color
+                    primary_col, default=self.primary_color
                 )
-            if style_preset.get("outline_color"):
+            outline_col = eff_preset.get("outline_color") or eff_preset.get("stroke_color")
+            if outline_col:
                 self.stroke_color = _color_to_ass_style(
-                    style_preset["outline_color"], default=self.stroke_color
+                    outline_col, default=self.stroke_color
                 )
-            if style_preset.get("highlight_color"):
-                raw = str(style_preset["highlight_color"])
-                bgr = _hex_to_ass_bgr(raw, default="")
-                if not bgr:
-                    named = _NAMED_ASS_COLORS.get(raw.strip().lower())
-                    bgr = f"&H{named[4:]}&" if named else self.highlight_bgr
-                self.highlight_bgr = bgr
+            sw_raw = eff_preset.get("stroke_width") if "stroke_width" in eff_preset else eff_preset.get("outline_width")
+            if sw_raw is not None:
+                sw_val = _safe_float(sw_raw, float(self.stroke_width), minimum=0.0)
+                self.stroke_width = int(sw_val) if sw_val.is_integer() else sw_val
+            if eff_preset.get("highlight_color"):
+                self.highlight_bgr = _resolve_highlight_bgr(
+                    str(eff_preset["highlight_color"]), default=self.highlight_bgr
+                )
+            if "shadow_offset" in eff_preset and eff_preset["shadow_offset"] is not None:
+                s_val = _safe_float(eff_preset["shadow_offset"], float(self.shadow_offset), minimum=0.0)
+                self.shadow_offset = int(s_val) if s_val.is_integer() else s_val
+            if eff_preset.get("shadow_color"):
+                self.shadow_color = _color_to_ass_style_with_alpha(
+                    eff_preset["shadow_color"], default=self.shadow_color
+                )
+            if "box_style" in eff_preset and eff_preset["box_style"] is not None:
+                self.box_style = bool(eff_preset["box_style"])
+            if "box_padding" in eff_preset and eff_preset["box_padding"] is not None:
+                bp_val = _safe_float(eff_preset["box_padding"], float(self.box_padding), minimum=0.0)
+                self.box_padding = int(bp_val) if bp_val.is_integer() else bp_val
+            if "box_opacity" in eff_preset and eff_preset["box_opacity"] is not None:
+                self.box_opacity = _safe_float(eff_preset["box_opacity"], self.box_opacity, minimum=0.0, maximum=1.0)
+                if not eff_preset.get("box_color"):
+                    self.box_color = _color_to_ass_style_with_alpha(
+                        self.box_color, opacity=self.box_opacity, default=self.box_color
+                    )
+            if eff_preset.get("box_color"):
+                self.box_color = _color_to_ass_style_with_alpha(
+                    eff_preset["box_color"], opacity=self.box_opacity, default=self.box_color
+                )
+            if "animation" in eff_preset and eff_preset["animation"] is not None:
+                raw_a = str(eff_preset["animation"]).strip().lower()
+                if raw_a in _VALID_ANIMATIONS:
+                    self.animation = raw_a
+            if "animation_scale" in eff_preset and eff_preset["animation_scale"] is not None:
+                self.animation_scale = _safe_float(eff_preset["animation_scale"], self.animation_scale, minimum=1.0, maximum=3.0)
+            if "animation_duration_ms" in eff_preset and eff_preset["animation_duration_ms"] is not None:
+                self.animation_duration_ms = _safe_int(eff_preset["animation_duration_ms"], self.animation_duration_ms, minimum=20, maximum=2000)
             return self._generate_ass(*args, **kwargs)
         finally:
-            self.font, self.primary_color, self.stroke_color, self.highlight_bgr = saved
+            (
+                self.style,
+                self.font,
+                self.primary_color,
+                self.stroke_color,
+                self.stroke_width,
+                self.highlight_bgr,
+                self.shadow_offset,
+                self.shadow_color,
+                self.box_style,
+                self.box_padding,
+                self.box_opacity,
+                self.box_color,
+                self.animation,
+                self.animation_scale,
+                self.animation_duration_ms,
+            ) = saved
+
+    def _render_animated_tokens(
+        self,
+        tokens: list[str],
+        active_idx: int,
+        dur_ms: int,
+        primary_inline_bgr: str,
+        animation_override: str | None = None,
+    ) -> str:
+        """Render a list of tokens with active token highlighted and animated."""
+        anim = animation_override or self.animation
+        scale_pct = round(self.animation_scale * 100)
+        rendered_tokens: list[str] = []
+        for j, token in enumerate(tokens):
+            if j == active_idx:
+                safe_token = token + "\u200b" if token.endswith("\\") else token
+                if anim == "bounce":
+                    t1 = min(round(self.animation_duration_ms * 0.5), max(10, dur_ms // 3))
+                    t2 = min(self.animation_duration_ms, max(t1 + 10, (2 * dur_ms) // 3))
+                    t2 = min(t2, dur_ms)
+                    if t1 >= t2:
+                        t1 = max(5, dur_ms // 2)
+                        t2 = max(t1 + 1, dur_ms)
+                    anim_open = (
+                        rf"{{\c{self.highlight_bgr}\fscx100\fscy100"
+                        rf"\t(0,{t1},\fscx{scale_pct}\fscy{scale_pct})"
+                        rf"\t({t1},{t2},\fscx100\fscy100)}}"
+                    )
+                    anim_close = rf"{{\c{primary_inline_bgr}\fscx100\fscy100}}"
+                    rendered_tokens.append(anim_open + safe_token + anim_close)
+                elif anim == "pop":
+                    t_pop = min(self.animation_duration_ms, max(10, dur_ms // 2))
+                    t_pop = min(t_pop, dur_ms)
+                    anim_open = (
+                        rf"{{\c{self.highlight_bgr}\fscx{scale_pct}\fscy{scale_pct}"
+                        rf"\t(0,{t_pop},\fscx100\fscy100)}}"
+                    )
+                    anim_close = rf"{{\c{primary_inline_bgr}\fscx100\fscy100}}"
+                    rendered_tokens.append(anim_open + safe_token + anim_close)
+                elif anim in ("sweep", "color_sweep"):
+                    sweep_ms = min(self.animation_duration_ms, dur_ms)
+                    anim_open = (
+                        rf"{{\c{primary_inline_bgr}"
+                        rf"\t(0,{sweep_ms},\c{self.highlight_bgr})}}"
+                    )
+                    anim_close = rf"{{\c{primary_inline_bgr}}}"
+                    rendered_tokens.append(anim_open + safe_token + anim_close)
+                else:
+                    rendered_tokens.append(
+                        rf"{{\c{self.highlight_bgr}}}"
+                        + safe_token
+                        + rf"{{\c{primary_inline_bgr}}}"
+                    )
+            else:
+                rendered_tokens.append(token)
+        return " ".join(rendered_tokens)
+
+    def _generate_narration_chunk_events(
+        self,
+        text: str,
+        start_time: float,
+        end_time: float,
+        primary_inline_bgr: str,
+    ) -> list[str]:
+        """Split narration text into natural 2-3 word chunks and emit sequential ASS dialogue events.
+
+        Distributes chunks across [start_time, end_time] with active word highlighting and pop/bounce animation.
+        """
+        raw_words = [_escape_ass_text(w.strip().upper()) for w in str(text or "").split() if w.strip()]
+        if not raw_words or end_time <= start_time:
+            return []
+
+        chunk_size = max(1, self.words_per_group)
+        chunks = _chunk_words(raw_words, max_chunk_size=chunk_size)
+        total_dur = end_time - start_time
+        total_words = sum(len(c) for c in chunks)
+        if total_words == 0 or total_dur <= 0.0:
+            return []
+
+        word_dur = total_dur / total_words
+        events: list[str] = []
+        cur_time = start_time
+        word_counter = 0
+
+        narration_anim = self.animation if self.animation in ("pop", "bounce") else "pop"
+
+        for chunk in chunks:
+            upper_chunk = chunk
+            if self.style == "sentence":
+                chunk_start = cur_time
+                word_counter += len(upper_chunk)
+                chunk_end = end_time if word_counter == total_words else start_time + (word_counter * word_dur)
+                cur_time = chunk_end
+                start_ts = _sec_to_ass_time(chunk_start)
+                end_ts = _sec_to_ass_time(chunk_end)
+                chunk_text = " ".join(upper_chunk)
+                t_dur = max(20, round((chunk_end - chunk_start) * 1000))
+                scale_pct = round(self.animation_scale * 100)
+                if narration_anim == "bounce":
+                    t1 = min(round(self.animation_duration_ms * 0.5), max(10, t_dur // 3))
+                    t2 = min(self.animation_duration_ms, max(t1 + 10, (2 * t_dur) // 3))
+                    t2 = min(t2, t_dur)
+                    if t1 >= t2:
+                        t1 = max(5, t_dur // 2)
+                        t2 = max(t1 + 1, t_dur)
+                    anim_tag = (
+                        rf"{{\fscx100\fscy100"
+                        rf"\t(0,{t1},\fscx{scale_pct}\fscy{scale_pct})"
+                        rf"\t({t1},{t2},\fscx100\fscy100)}}"
+                    )
+                    events.append(f"Dialogue: 0,{start_ts},{end_ts},Hormozi,,0,0,0,,{anim_tag}{chunk_text}")
+                elif narration_anim == "pop":
+                    t_pop = min(self.animation_duration_ms, max(10, t_dur // 2))
+                    t_pop = min(t_pop, t_dur)
+                    anim_tag = rf"{{\fscx{scale_pct}\fscy{scale_pct}\t(0,{t_pop},\fscx100\fscy100)}}"
+                    events.append(f"Dialogue: 0,{start_ts},{end_ts},Hormozi,,0,0,0,,{anim_tag}{chunk_text}")
+                else:
+                    events.append(f"Dialogue: 0,{start_ts},{end_ts},Hormozi,,0,0,0,,{chunk_text}")
+                continue
+
+            for idx in range(len(upper_chunk)):
+                w_start = cur_time
+                word_counter += 1
+                w_end = end_time if word_counter == total_words else start_time + (word_counter * word_dur)
+                cur_time = w_end
+
+                start_ts = _sec_to_ass_time(w_start)
+                end_ts = _sec_to_ass_time(w_end)
+                dur_ms = max(20, round((w_end - w_start) * 1000))
+
+                line_text = self._render_animated_tokens(
+                    upper_chunk,
+                    active_idx=idx,
+                    dur_ms=dur_ms,
+                    primary_inline_bgr=primary_inline_bgr,
+                    animation_override=narration_anim,
+                )
+                events.append(f"Dialogue: 0,{start_ts},{end_ts},Hormozi,,0,0,0,,{line_text}")
+
+        return events
 
     def _generate_ass(
         self,
@@ -245,7 +758,15 @@ class AssCaptionBurner:
         target_path = Path(ass_path)
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
-        secondary_style_color = "&H00" + self.highlight_bgr[2:-1]
+        bgr_raw = self.highlight_bgr.strip().replace("&", "")
+        if bgr_raw.startswith("H") or bgr_raw.startswith("h"):
+            bgr_raw = bgr_raw[1:]
+        if len(bgr_raw) == 8:
+            secondary_style_color = f"&H{bgr_raw.upper()}"
+        elif len(bgr_raw) == 6:
+            secondary_style_color = f"&H00{bgr_raw.upper()}"
+        else:
+            secondary_style_color = "&H0000E6FF"
         hormozi_margin_v = self.margin_v
         ticker_align, ticker_margin_v = 9, 260
         caption_center: tuple[int, int] | None = None
@@ -255,8 +776,8 @@ class AssCaptionBurner:
             # Captions/cards sit in the upper part of caption_band, ticker in the lower part;
             # nothing is placed over game_box.
             cb = layout.caption_band
-            hormozi_margin_v = max(0, self.height - int(cb.y + 0.62 * cb.h))
-            ticker_margin_v = int(cb.y + 0.70 * cb.h)
+            hormozi_margin_v = max(0, self.height - int(cb.y + 0.38 * cb.h))
+            ticker_margin_v = int(cb.y + 0.72 * cb.h)
             if layout.kind == "blur_fill":
                 # Word captions / narration cards centre vertically in the caption band.
                 caption_center = (self.width // 2, int(cb.y + 0.5 * cb.h))
@@ -265,25 +786,47 @@ class AssCaptionBurner:
             callout_style = "Callout"
             callout_style_line = (
                 f"Style: Callout,{self.font},{max(1, int(self.font_size * 0.8))},"
-                f"{self.primary_color},{secondary_style_color},{self.stroke_color},&H80000000,"
-                f"-1,0,0,0,100,100,0,0,1,{self.stroke_width},0,8,60,60,{int(cb.y + 8)},1"
+                f"{self.primary_color},{secondary_style_color},{self.stroke_color},{self.shadow_color},"
+                f"-1,0,0,0,100,100,0,0,1,{self.stroke_width},{self.shadow_offset},8,60,60,{int(cb.y + 8)},1"
             )
         # Note: For BorderStyle=3 (opaque box) on ChatTicker, OutlineColour controls the box fill!
+        if self.box_style:
+            hormozi_border_style = 3
+            hormozi_outline = self.box_padding
+            hormozi_shadow = 0
+            hormozi_outline_col = self.box_color
+            hormozi_back_col = self.box_color
+        else:
+            hormozi_border_style = 1
+            hormozi_outline = self.stroke_width
+            hormozi_shadow = self.shadow_offset
+            hormozi_outline_col = self.stroke_color
+            hormozi_back_col = self.shadow_color
+
+        if self.style == "karaoke":
+            style_primary_col = secondary_style_color
+            style_secondary_col = self.primary_color
+        else:
+            style_primary_col = self.primary_color
+            style_secondary_col = secondary_style_color
+
         header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {self.width}
 PlayResY: {self.height}
 WrapStyle: 0
+ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Hormozi,{self.font},{self.font_size},{self.primary_color},{secondary_style_color},{self.stroke_color},&H80000000,-1,0,0,0,100,100,0,0,1,{self.stroke_width},0,2,60,60,{hormozi_margin_v},1
+Style: Hormozi,{self.font},{self.font_size},{style_primary_col},{style_secondary_col},{hormozi_outline_col},{hormozi_back_col},-1,0,0,0,100,100,0,0,{hormozi_border_style},{hormozi_outline},{hormozi_shadow},2,60,60,{hormozi_margin_v},1
 Style: ChatTicker,{self._ticker_font},34,&H00FFFFFF,&H00FFFFFF,&H99000000,&H99000000,-1,0,0,0,100,100,0,0,3,2,0,{ticker_align},40,40,{ticker_margin_v},1
 {callout_style_line}
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
         events: list[str] = []
+        primary_inline_bgr = "&H" + self.primary_color[4:].rstrip("&") + "&"
 
         # Determine narration exclusion windows to prevent muffled streamer words during ducked speech
         intro_cutoff = (
@@ -302,13 +845,12 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             else float("inf")
         )
 
-        # Emit tone-matched narration intro card during ducked intro window
+        # Emit tone-matched chunked narration intro cards during ducked intro window
         if narration_intro and intro_cutoff > 0.0:
-            intro_start_ts = _sec_to_ass_time(0.0)
-            intro_end_ts = _sec_to_ass_time(intro_cutoff)
-            safe_intro = _escape_ass_text(str(narration_intro).strip().upper())
-            events.append(
-                f"Dialogue: 0,{intro_start_ts},{intro_end_ts},Hormozi,,0,0,0,,{{\\c{self.highlight_bgr}}}{safe_intro}"
+            events.extend(
+                self._generate_narration_chunk_events(
+                    narration_intro, 0.0, intro_cutoff, primary_inline_bgr
+                )
             )
 
         # Filter streamer words: suppress speech during ducked intro & outro windows
@@ -354,7 +896,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             for i in range(0, len(cleaned_words), effective_group_size)
         ]
 
-        primary_inline_bgr = "&H" + self.primary_color[4:] + "&"
+        primary_inline_bgr = "&H" + self.primary_color[4:].rstrip("&") + "&"
         for group in groups:
             upper_words = [_escape_ass_text(w.text.strip().upper()) for w in group]
             if self.style == "sentence":
@@ -362,8 +904,68 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 end_sec = max(start_sec, group[-1].end - clip_start_offset)
                 start_ts = _sec_to_ass_time(start_sec)
                 end_ts = _sec_to_ass_time(end_sec)
+                text_content = " ".join(upper_words)
+                t_dur = max(20, round((end_sec - start_sec) * 1000))
+                scale_pct = round(self.animation_scale * 100)
+                if self.animation == "bounce":
+                    t1 = min(round(self.animation_duration_ms * 0.5), max(10, t_dur // 3))
+                    t2 = min(self.animation_duration_ms, max(t1 + 10, (2 * t_dur) // 3))
+                    t2 = min(t2, t_dur)
+                    if t1 >= t2:
+                        t1 = max(5, t_dur // 2)
+                        t2 = max(t1 + 1, t_dur)
+                    anim_tag = (
+                        rf"{{\fscx100\fscy100"
+                        rf"\t(0,{t1},\fscx{scale_pct}\fscy{scale_pct})"
+                        rf"\t({t1},{t2},\fscx100\fscy100)}}"
+                    )
+                    events.append(
+                        f"Dialogue: 0,{start_ts},{end_ts},Hormozi,,0,0,0,,{anim_tag}{text_content}"
+                    )
+                elif self.animation == "pop":
+                    t_pop = min(self.animation_duration_ms, max(10, t_dur // 2))
+                    t_pop = min(t_pop, t_dur)
+                    anim_tag = rf"{{\fscx{scale_pct}\fscy{scale_pct}\t(0,{t_pop},\fscx100\fscy100)}}"
+                    events.append(
+                        f"Dialogue: 0,{start_ts},{end_ts},Hormozi,,0,0,0,,{anim_tag}{text_content}"
+                    )
+                else:
+                    events.append(
+                        f"Dialogue: 0,{start_ts},{end_ts},Hormozi,,0,0,0,,{text_content}"
+                    )
+                continue
+
+            if self.style == "karaoke":
+                start_sec = max(0.0, group[0].start - clip_start_offset)
+                raw_max_end = max(float(w.end) for w in group)
+                parts: list[str] = []
+                total_cs = 0
+                for i, w in enumerate(group):
+                    raw_text = _escape_ass_text(w.text.strip().upper())
+                    w_text = raw_text + "\u200b" if raw_text.endswith("\\") else raw_text
+                    dur_val = w.end - w.start
+                    dur_cs = max(1, round(dur_val * 100)) if math.isfinite(dur_val) else 1
+                    if i > 0:
+                        prev_end = group[i - 1].end
+                        gap_val = w.start - prev_end
+                        gap_sec = max(0.0, gap_val) if math.isfinite(gap_val) else 0.0
+                        gap_cs = round(gap_sec * 100)
+                        if gap_cs > 0:
+                            parts.append(rf"{{\k{gap_cs}}} ")
+                            total_cs += gap_cs
+                        else:
+                            parts.append(" ")
+                    parts.append(rf"{{\kf{dur_cs}}}{w_text}")
+                    total_cs += dur_cs
+                end_sec = max(
+                    start_sec,
+                    raw_max_end - clip_start_offset,
+                    start_sec + (total_cs / 100.0),
+                )
+                start_ts = _sec_to_ass_time(start_sec)
+                end_ts = _sec_to_ass_time(end_sec)
                 events.append(
-                    f"Dialogue: 0,{start_ts},{end_ts},Hormozi,,0,0,0,,{' '.join(upper_words)}"
+                    f"Dialogue: 0,{start_ts},{end_ts},Hormozi,,0,0,0,,{''.join(parts)}"
                 )
                 continue
 
@@ -372,18 +974,14 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 end_sec = max(start_sec, active_word.end - clip_start_offset)
                 start_ts = _sec_to_ass_time(start_sec)
                 end_ts = _sec_to_ass_time(end_sec)
-                rendered_tokens: list[str] = []
-                for j, token in enumerate(upper_words):
-                    if j == idx:
-                        safe_token = token + "\u200b" if token.endswith("\\") else token
-                        rendered_tokens.append(
-                            rf"{{\c{self.highlight_bgr}}}"
-                            + safe_token
-                            + rf"{{\c{primary_inline_bgr}}}"
-                        )
-                    else:
-                        rendered_tokens.append(token)
-                line_text = " ".join(rendered_tokens)
+                dur_ms = max(20, round((end_sec - start_sec) * 1000))
+
+                line_text = self._render_animated_tokens(
+                    upper_words,
+                    active_idx=idx,
+                    dur_ms=dur_ms,
+                    primary_inline_bgr=primary_inline_bgr,
+                )
                 events.append(
                     f"Dialogue: 0,{start_ts},{end_ts},Hormozi,,0,0,0,,{line_text}"
                 )
@@ -408,17 +1006,17 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                     f"{callout_style},,0,0,0,,{{\\c{self.highlight_bgr}}}{safe_c}"
                 )
 
-        # Emit tone-matched narration outro card during ducked outro window
+        # Emit tone-matched chunked narration outro cards during ducked outro window
         if (
             narration_outro
             and outro_start_cutoff < float("inf")
             and clip_duration is not None
+            and float(clip_duration) > outro_start_cutoff
         ):
-            outro_start_ts = _sec_to_ass_time(outro_start_cutoff)
-            outro_end_ts = _sec_to_ass_time(clip_duration)
-            safe_outro = _escape_ass_text(str(narration_outro).strip().upper())
-            events.append(
-                f"Dialogue: 0,{outro_start_ts},{outro_end_ts},Hormozi,,0,0,0,,{{\\c{self.highlight_bgr}}}{safe_outro}"
+            events.extend(
+                self._generate_narration_chunk_events(
+                    narration_outro, outro_start_cutoff, float(clip_duration), primary_inline_bgr
+                )
             )
 
         if self.show_chat_ticker and chat_burst:
@@ -484,13 +1082,32 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         output_video: Path,
         codec: str,
         crf: int,
+        preset: str | None = None,
+        bitrate: str | None = None,
+        maxrate: str | None = None,
+        bufsize: str | None = None,
+        pix_fmt: str | None = None,
     ) -> list[str]:
         """Build FFmpeg command with codec-appropriate quality flags."""
         normalized_codec = str(codec or "libx264").strip().lower()
         if normalized_codec == "h264_nvenc":
-            v_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", str(crf)]
+            eff_preset = preset or "p4"
+            v_args = ["-c:v", "h264_nvenc", "-preset", eff_preset, "-cq", str(crf)]
+            if bitrate:
+                v_args.extend(["-rc:v", "vbr", "-b:v", str(bitrate)])
+                if maxrate:
+                    v_args.extend(["-maxrate", str(maxrate)])
+                if bufsize:
+                    v_args.extend(["-bufsize", str(bufsize)])
+                v_args.extend(["-spatial-aq", "1", "-temporal-aq", "1"])
+            if pix_fmt:
+                v_args.extend(["-pix_fmt", str(pix_fmt)])
         else:
             v_args = ["-c:v", "libx264", "-crf", str(crf)]
+            if preset and preset not in ("p1", "p2", "p3", "p4", "p5", "p6", "p7"):
+                v_args.extend(["-preset", str(preset)])
+            if pix_fmt:
+                v_args.extend(["-pix_fmt", str(pix_fmt)])
 
         escaped_ass = _escape_ffmpeg_ass_filename(ass_filename)
         return [
@@ -511,8 +1128,13 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         input_video: Path,
         ass_path: Path,
         output_video: Path,
-        crf: int = 23,
+        crf: int = 19,
         codec: str | None = None,
+        preset: str | None = None,
+        bitrate: str | None = None,
+        maxrate: str | None = None,
+        bufsize: str | None = None,
+        pix_fmt: str | None = None,
     ) -> Path:
         """Burn .ass captions into video in a single Windows-safe FFmpeg pass.
 
@@ -529,9 +1151,26 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         selected_codec = str(codec or self.codec).strip().lower()
+        selected_preset = preset or self.config.get("video.preset")
+        if selected_codec != "h264_nvenc" and selected_preset in ("p1", "p2", "p3", "p4", "p5", "p6", "p7"):
+            selected_preset = self.config.get("video.libx264_preset", "medium")
+        selected_bitrate = bitrate or self.config.get("video.bitrate")
+        selected_maxrate = maxrate or self.config.get("video.maxrate")
+        selected_bufsize = bufsize or self.config.get("video.bufsize")
+        selected_pix_fmt = pix_fmt or self.config.get("video.pix_fmt", "yuv420p")
+
         work_dir = str(ass_file.resolve().parent)
         cmd = self._build_ffmpeg_cmd(
-            input_path, ass_file.name, output_path, selected_codec, crf
+            input_path,
+            ass_file.name,
+            output_path,
+            selected_codec,
+            crf,
+            preset=selected_preset,
+            bitrate=selected_bitrate,
+            maxrate=selected_maxrate,
+            bufsize=selected_bufsize,
+            pix_fmt=selected_pix_fmt,
         )
         try:
             subprocess.run(
@@ -555,7 +1194,13 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 "FFmpeg h264_nvenc caption burn-in failed; falling back to libx264."
             )
             fallback_cmd = self._build_ffmpeg_cmd(
-                input_path, ass_file.name, output_path, "libx264", crf
+                input_path,
+                ass_file.name,
+                output_path,
+                "libx264",
+                crf,
+                preset=self.config.get("video.libx264_preset", "medium"),
+                pix_fmt=selected_pix_fmt,
             )
             subprocess.run(
                 fallback_cmd,

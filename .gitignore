@@ -35,4 +35,8 @@ config.yaml
 # Cache
 .cache/
 *.cache
+.pytest_cache/
 .venv-tts/
+*.venv-tts/
+GTA6-Clipper.venv-tts/
+youtube_banner_*.png

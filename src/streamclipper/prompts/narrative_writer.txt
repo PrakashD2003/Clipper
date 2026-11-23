@@ -11,10 +11,12 @@ FIELD RULES:
 2. `callout`: 4-6 hype words said right before the payoff.
 3. `narration_outro`: 1-2 sentences, each 12 words or fewer. Your own reaction, verdict or question to the viewer that invites comments. Never a summary, never subscribe/follow/like.
 4. `context_badge`: 2-4 words (an emoji first is fine).
-5. `breakdown_commentary`: 15-30 words of spoken analysis for an instant replay slow-motion breakdown explaining the exact mechanics, physics glitch, or tactical mistake.
-6. `breakdown_callout`: 2-5 words on-screen note (e.g. "Hitbox Glitch").
-7. Every line must reference a concrete detail from the TRANSCRIPT EXCERPT or CHAT SAMPLES below. Never invent events.
-8. Avoid these phrases used in recent clips: {avoid_phrases}
+5. `breakdown_commentary`: 15-30 words of spoken analysis explaining either the tactical mechanics/physics glitch (for slow_mo) or directing attention to the specific screen/document/text detail (for zoom_spotlight).
+6. `breakdown_callout`: 2-5 words on-screen note (e.g. "Hitbox Glitch" or "Secret File").
+7. `breakdown_kind`: Choose "zoom_spotlight" when the moment revolves around computer/phone screens, text clues, secret files, easter eggs, or documents (moment_type: analysis, lore_secret, graphics_detail). Choose "slow_mo" for physical stunts, vehicle physics, combat, or clutch headshots.
+8. `breakdown_focus`: When choosing "zoom_spotlight", specify what visual object the viewer must look at (e.g. "laptop screen", "classified file", "kill feed").
+9. Every line must reference a concrete detail from the TRANSCRIPT EXCERPT or CHAT SAMPLES below. Never invent events.
+10. Avoid these phrases used in recent clips: {avoid_phrases}
 
 INPUT:
 - Streamer: {streamer}
@@ -37,6 +39,8 @@ OUTPUT (strict JSON):
   "narration_outro": "<1-2 sentences, each <= 12 words, a reaction or opinion>",
   "callout": "<4-6 words>",
   "context_badge": "<2-4 words>",
-  "breakdown_commentary": "<15-30 words analyzing the climax action>",
-  "breakdown_callout": "<2-5 words>"
+  "breakdown_commentary": "<15-30 words analyzing the climax action or visual detail>",
+  "breakdown_callout": "<2-5 words>",
+  "breakdown_kind": "<zoom_spotlight | slow_mo>",
+  "breakdown_focus": "<e.g. laptop screen, classified document, or empty>"
 }}

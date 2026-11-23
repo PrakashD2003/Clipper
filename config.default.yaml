@@ -39,7 +39,7 @@ transcription:
 analysis:
   chunk_minutes: 12
   min_clip_seconds: 15
-  max_clip_seconds: 35
+  max_clip_seconds: 90
   hard_max_clip_seconds: 180          # Ranges longer than this are rejected outright (Shorts limit)
   adjust_clip_bounds: true            # Widen short / trim long moments instead of rejecting them
   max_clips_per_stream: 5
@@ -96,23 +96,38 @@ video:
   audio_codec: "aac"
   game_fit: "full"          # full (16:9 game area) | balanced (4:3 centre crop, taller game area)
   blur_fill_game_scale: 1.15  # blur_fill layout: game width as a multiple of frame width (centre-cropped horizontally; 1.0-1.3). Higher = taller game, more cropped sides
-  crf: 23                   # quality (libx264 -crf / h264_nvenc -cq, lower = better, 18-28 range)
+  crf: 19                   # quality (libx264 -crf / h264_nvenc -cq, lower = better, 18-28 range; 19 = high quality)
+  preset: "p4"              # nvenc preset (p1-p7, p4 = balanced) / libx264 preset (medium)
+  libx264_preset: "medium"  # preset when libx264 encoder is used (ultrafast, veryfast, medium, slow)
+  bitrate: "12M"            # target video bitrate for high-motion gaming (12 Mbps)
+  maxrate: "16M"            # maximum video bitrate (16 Mbps)
+  bufsize: "24M"            # rate control buffer size (24 Mbps)
 
 captions:
-  style: "hormozi"           # hormozi | single_word | sentence
-  words_per_group: 4         # words visible at once (hormozi style)
-  font: "Arial"
-  font_size: 72
+  style: "hormozi"           # hormozi | single_word | sentence | bounce | pop | karaoke | box
+  words_per_group: 3         # words visible at once (hormozi/bounce/pop/karaoke/box style)
+  font: "Impact"
+  font_size: 82
   color: "white"
-  highlight_color: "#FFD700"  # gold for active word (converted dynamically to ASS BGR &H00D7FF&)
+  highlight_color: "#FFE600"  # electric gold for active word (converted dynamically to ASS BGR &H00E6FF&)
   stroke_color: "black"
-  stroke_width: 4
+  stroke_width: 8
+  shadow_offset: 6           # Drop shadow depth in pixels (6 = deep 3D shadow; 0 = disabled)
+  shadow_color: "&H90000000" # Drop shadow color (#RRGGBB, named color, or ASS &HAABBGGRR)
+  box_style: false           # Render subtitles with background box (BorderStyle=3)
+  box_color: "black"         # Background box color when box_style is true
+  box_opacity: 0.60          # Background box opacity (0.0 transparent to 1.0 fully opaque)
+  box_padding: 6             # Padding around text for background box
+  animation: "bounce"        # none | pop | bounce | sweep (word pop/bounce scaling or color sweep)
+  animation_scale: 1.30      # Scale multiplier for pop/bounce animation (1.30 = 130%)
+  animation_duration_ms: 140 # Duration of animation phase in milliseconds
   position_y_ratio: 0.75     # 75% down the screen
   rotate_styles: true        # Rotate style_presets per streamer so clips don't share one template look
   style_presets:             # Word-caption / narration-card looks (font falls back automatically if missing)
-    - {font: "Arial", primary_color: "#FFFFFF", highlight_color: "#FFD700", outline_color: "#000000"}      # white + gold
-    - {font: "Arial Black", primary_color: "#FFFFFF", highlight_color: "#00E5FF", outline_color: "#000000"} # bold white + cyan
-    - {font: "Segoe UI Black", primary_color: "#FFEB3B", highlight_color: "#FF4081", outline_color: "#000000"} # yellow + pink
+    - {font: "Impact", primary_color: "#FFFFFF", highlight_color: "#00FF66", outline_color: "#000000", stroke_width: 8, shadow_offset: 6, shadow_color: "&H90000000", animation: "bounce"}      # Neon Green Pop
+    - {font: "Impact", primary_color: "#FFFFFF", highlight_color: "#FFE600", outline_color: "#000000", stroke_width: 8, shadow_offset: 6, shadow_color: "&H90000000", animation: "pop"}         # Electric Gold Pop
+    - {font: "Impact", primary_color: "#FFFFFF", highlight_color: "#00F0FF", outline_color: "#000000", stroke_width: 8, shadow_offset: 6, shadow_color: "&H90000000", animation: "bounce"}      # Cyber Cyan Pop
+    - {font: "Impact", primary_color: "#FFFFFF", highlight_color: "#FF2A2A", outline_color: "#000000", stroke_width: 8, shadow_offset: 6, shadow_color: "&H90000000", animation: "pop"}         # Fire Crimson Pop
 
 hook_title:
   enabled: true
@@ -139,7 +154,7 @@ output:
   filename_template: "clip_{index:02d}"
   save_metadata_json: true
   save_transcript_txt: true
-  max_final_seconds: 59                # Hard cap on final clip length (Shorts)
+  max_final_seconds: 180               # Hard cap on final clip length (Shorts limit up to 3m)
   max_clips_per_streamer_per_day: 3    # Extra clips are routed to queued_dir
   queued_dir: "queued"                 # Sub-folder for clips over the daily cap
   write_post_file: true                # Write a ready-to-paste post .txt next to each clip
@@ -168,10 +183,18 @@ transformation:
   replay_duration_seconds: 5.0         # Climax duration replayed in instant replay
   replay_badge_text: "🔴 INSTANT REPLAY"
   breakdown:
+    default_kind: "auto"              # auto | slow_mo | zoom_spotlight
     replay_window: 5.0
     slow_mo: 0.5
     freeze_duration: 4.0
     freeze_zoom: 1.35
+    zoom_spotlight:
+      duration: 5.7                   # Matched to breakdown voiceover duration
+      zoom_scale: 2.2                 # 2.2x zoom into target ROI
+      ease_in_seconds: 1.2            # Sinusoidal ease-in zoom
+      ease_out_seconds: 1.0           # Sinusoidal ease-out zoom
+      badge_text: "🔍 EVIDENCE BREAKDOWN"
+      fullscreen_takeover: true       # Full 9:16 vertical takeover for mobile legibility
   narration_style: "intro_and_breakdown" # intro_and_breakdown | breakdown_only
   tts_engine: "auto"                   # auto (kokoro -> edge-tts) | kokoro | edge-tts | elevenlabs | none
   tts_voice: "am_puck"                 # Energetic Kokoro voice ID (fallback: am_fenrir)
@@ -179,7 +202,9 @@ transformation:
   elevenlabs_voice_id: ""              # ElevenLabs voice for English narration (uses ELEVENLABS_API_KEY from env or .env)
   elevenlabs_hinglish_voice_id: ""     # ElevenLabs voice for Hinglish narration ("" = use elevenlabs_voice_id)
   elevenlabs_model_id: "eleven_v4"     # Use the model your ElevenLabs voices were designed with (eleven_v4, eleven_v4_turbo, eleven_v3, eleven_multilingual_v2)
-  elevenlabs_voice_settings: {}        # {} = use the settings saved on the voice in ElevenLabs; or e.g. {stability: 0.4, similarity_boost: 0.8, style: 0.3, use_speaker_boost: true}
+  elevenlabs_voice_settings:
+    stability: 0.40        # Matched to dashboard screenshot
+    similarity_boost: 0.85 # Matched to dashboard screenshot
   elevenlabs_output_format: "mp3_44100_128"
   tts_engines: [chatterbox, kokoro, edge-tts]  # Fallback chain, tried in order; ElevenLabs is auto-prepended when ELEVENLABS_API_KEY (env or .env) and elevenlabs_voice_id are set
   narration_language: "auto"            # auto | english | hinglish (auto = Hinglish when the transcript is Hindi/Urdu)
@@ -188,11 +213,11 @@ transformation:
   hinglish_edge_tts_voice: "en-IN-PrabhatNeural" # Indian-English Edge voice reads Roman Hinglish best
   tts_external_python: ".venv-tts/Scripts/python.exe"  # Separate venv for engines with conflicting deps
   tts_reference_wav: ""                # Voice-clone reference WAV ("" = engine default voice)
-  tts_speed: 1.1
+  tts_speed: 1.0           # Native 1.0x speed matching dashboard
   tts_retries: 1                       # Extra full passes over the TTS engine chain (0.5 s apart) when every engine failed
   edge_tts_rate: "+10%"
   target_lufs: -14                     # Final loudness normalization target
-  narration_gain_db: 3                 # Narration level above the ducked stream bed
+  narration_gain_db: 0.0   # Clean unity gain (no artificial digital boost)
   crossfade_seconds: 0.25              # Ramp at every duck transition
   callout_enabled: true                # Short spoken callout over the key moment
   persona: "high-energy gamer friend reacting live — hyped, funny, talks straight to the viewer"
@@ -205,6 +230,23 @@ transformation:
   punch_in_zoom: 1.20                  # 1.20x center zoom around peak_time (1.0 = disabled)
   zoom_duration_seconds: 3.5           # Duration of punch-in zoom at peak moment
   show_chat_ticker: true               # Render real live_chat burst overlay during spike
+
+refinement:
+  enabled: true                        # Enable 5-minute context refinement
+  window_before: 120.0                 # Seconds before proposed timestamp (Sheet 1 buildup)
+  window_after: 60.0                   # Seconds after proposed timestamp (Sheet 2 climax/reaction)
+  engine: "auto"                       # auto (gemini if GEMINI_API_KEY set, else ollama) | gemini | ollama | mcp
+  gemini_model: "gemini-2.5-flash"     # Free-tier Gemini model for boundary refinement
+  gemini_api_key_env: "GEMINI_API_KEY" # Env var name for the API key
+  chat_bucket_seconds: 5.0             # Chat velocity bucket size for context window
+  chat_latency_compensation: 18.0      # Seconds to shift chat spikes backward
+  finale_window_minutes: 20            # Always include last N minutes as candidates
+  vision:
+    compulsory: true                   # Always extract & verify visual contact sheets
+    proxy_height: 360                  # Fast lightweight 360p download (~5-8 MB)
+    grid: 3                            # 3x3 tiles per contact sheet
+    sheet_seconds: 90.0                # 90s per sheet (1 tile every 10s)
+    label_timestamps: true             # Burn yellow MM:SS labels on each tile
 
 library:
   db_path: ""                      # "" = <general.cache_dir>/library.sqlite
@@ -232,7 +274,7 @@ topics:
   max_clip_seconds: 20
   max_official_clip_seconds: 10
   short_min_seconds: 35
-  short_max_seconds: 60
+  short_max_seconds: 180
 
 longform:
   width: 1920

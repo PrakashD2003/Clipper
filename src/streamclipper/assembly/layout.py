@@ -40,7 +40,7 @@ _TABLE: dict[
     tuple[str, str],
     tuple[tuple[int, int], tuple[int, int] | None, tuple[int, int], tuple[int, int]],
 ] = {
-    ("stacked", "full"): ((0, 180), (180, 880), (880, 1488), (1488, 1920)),
+    ("stacked", "full"): ((0, 180), (180, 660), (660, 1268), (1268, 1920)),
     ("stacked", "balanced"): ((0, 180), (180, 680), (680, 1490), (1490, 1920)),
     ("reaction", "full"): ((0, 180), (0, 960), (960, 1568), (1568, 1920)),
     ("reaction", "balanced"): ((0, 180), (0, 960), (960, 1568), (1568, 1920)),

@@ -113,3 +113,46 @@ def test_elevenlabs_voice_settings_override_is_optional() -> None:
     custom = ElevenLabsTTS("v", "eleven_v4_turbo", voice_settings={"stability": 0.4}, output_format="")
     assert custom.model_id == "eleven_v4_turbo"
     assert custom.voice_settings == {"stability": 0.4} and custom.output_format == ""
+
+
+def test_elevenlabs_synthesize_populates_voice_settings(monkeypatch, tmp_path: Path) -> None:
+    import io
+    import json
+    from unittest.mock import MagicMock, patch
+
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "test-key-123")
+    eng = ElevenLabsTTS("voice_abc")
+
+    captured_req: list = []
+
+    def mock_urlopen(req, timeout=30.0):
+        captured_req.append(req)
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.code = 200
+        mock_resp.read.return_value = b"ID3fake-mp3-bytes"
+        mock_ctx = MagicMock()
+        mock_ctx.__enter__.return_value = mock_resp
+        mock_ctx.__exit__.return_value = None
+        return mock_ctx
+
+    out_wav = tmp_path / "test.wav"
+
+    with (
+        patch("urllib.request.urlopen", side_effect=mock_urlopen),
+        patch("streamclipper.assembly.tts_engines._mp3_to_wav", side_effect=lambda src, dst: dst.write_bytes(b"RIFF") and True),
+    ):
+        res = eng.synthesize("Hello world", out_wav)
+        assert res == out_wav
+        assert len(captured_req) == 1
+        payload = json.loads(captured_req[0].data.decode("utf-8"))
+        assert payload["voice_settings"] == {"stability": 0.40, "similarity_boost": 0.85}
+        assert payload["model_id"] == "eleven_v4"
+
+        # Explicit custom voice settings take precedence
+        eng_custom = ElevenLabsTTS("voice_abc", voice_settings={"stability": 0.75, "similarity_boost": 0.95})
+        res_custom = eng_custom.synthesize("Custom voice settings test", out_wav)
+        assert res_custom == out_wav
+        payload_custom = json.loads(captured_req[-1].data.decode("utf-8"))
+        assert payload_custom["voice_settings"] == {"stability": 0.75, "similarity_boost": 0.95}
+

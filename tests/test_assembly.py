@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 import shutil
 import subprocess
 from typing import Any
@@ -13,11 +14,16 @@ import yaml
 
 from streamclipper.assembly.captions import (
     AssCaptionBurner,
+    _chunk_words,
     _color_to_ass_style,
+    _color_to_ass_style_with_alpha,
     _escape_ass_text,
     _escape_ffmpeg_ass_filename,
     _hex_to_ass_bgr,
+    _is_font_installed,
+    _resolve_highlight_bgr,
     _sec_to_ass_time,
+    resolve_font,
 )
 from streamclipper.assembly.composer import VideoComposer, remap_timeline_for_beats
 from streamclipper.assembly.hooks import HookTitleOverlay
@@ -192,12 +198,13 @@ class TestAssGeneration:
         assert "PlayResX: 1080" in content
         assert "PlayResY: 1920" in content
         assert "WrapStyle: 0" in content
-        assert "Style: Hormozi,Arial,72,&H00FFFFFF,&H0000D7FF,&H00000000,&H80000000" in content
+        assert "ScaledBorderAndShadow: yes" in content
+        assert "Style: Hormozi,Impact,82,&H00FFFFFF,&H0000E6FF,&H00000000,&H90000000" in content
         # MarginV = round(1920 * (1.0 - 0.75)) = 480
-        assert ",4,0,2,60,60,480,1" in content
+        assert ",1,8,6,2,60,60,480,1" in content
         # ChatTicker uses BorderStyle=3 with semi-transparent OutlineColour=&H99000000
         assert (
-            "Style: ChatTicker,Arial,34,&H00FFFFFF,&H00FFFFFF,&H99000000,&H99000000,"
+            "Style: ChatTicker,Impact,34,&H00FFFFFF,&H00FFFFFF,&H99000000,&H99000000,"
             "-1,0,0,0,100,100,0,0,3,2,0,9,40,40,260,1"
         ) in content
 
@@ -205,23 +212,23 @@ class TestAssGeneration:
         chat_lines = [ln for ln in content.splitlines() if ",ChatTicker,," in ln]
 
         assert len(hormozi_lines) == 6
-        # Group 1 (4 words), active word highlighted in gold BGR &H00D7FF& and reset to white &HFFFFFF&
+        # Group 1 (3 words), active word highlighted in electric gold BGR &H00E6FF& with bounce pop animation
         assert (
             hormozi_lines[0]
-            == r"Dialogue: 0,0:00:00.00,0:00:00.30,Hormozi,,0,0,0,,{\c&H00D7FF&}OH{\c&HFFFFFF&} MY GOD BRO"
+            == r"Dialogue: 0,0:00:00.00,0:00:00.30,Hormozi,,0,0,0,,{\c&H00E6FF&\fscx100\fscy100\t(0,70,\fscx130\fscy130)\t(70,140,\fscx100\fscy100)}OH{\c&HFFFFFF&\fscx100\fscy100} MY GOD"
         )
         assert (
             hormozi_lines[2]
-            == r"Dialogue: 0,0:00:00.60,0:00:01.00,Hormozi,,0,0,0,,OH MY {\c&H00D7FF&}GOD{\c&HFFFFFF&} BRO"
+            == r"Dialogue: 0,0:00:00.60,0:00:01.00,Hormozi,,0,0,0,,OH MY {\c&H00E6FF&\fscx100\fscy100\t(0,70,\fscx130\fscy130)\t(70,140,\fscx100\fscy100)}GOD{\c&HFFFFFF&\fscx100\fscy100}"
         )
-        # Group 2 (remaining 2 words)
+        # Group 2 (remaining 3 words)
         assert (
             hormozi_lines[4]
-            == r"Dialogue: 0,0:00:01.50,0:00:01.80,Hormozi,,0,0,0,,{\c&H00D7FF&}NO{\c&HFFFFFF&} WAY"
+            == r"Dialogue: 0,0:00:01.50,0:00:01.80,Hormozi,,0,0,0,,BRO {\c&H00E6FF&\fscx100\fscy100\t(0,70,\fscx130\fscy130)\t(70,140,\fscx100\fscy100)}NO{\c&HFFFFFF&\fscx100\fscy100} WAY"
         )
         assert (
             hormozi_lines[5]
-            == r"Dialogue: 0,0:00:01.80,0:00:02.20,Hormozi,,0,0,0,,NO {\c&H00D7FF&}WAY{\c&HFFFFFF&}"
+            == r"Dialogue: 0,0:00:01.80,0:00:02.20,Hormozi,,0,0,0,,BRO NO {\c&H00E6FF&\fscx100\fscy100\t(0,70,\fscx130\fscy130)\t(70,140,\fscx100\fscy100)}WAY{\c&HFFFFFF&\fscx100\fscy100}"
         )
 
         # ChatTicker dialogue events on Layer 1 with 2.5s duration & escaped characters
@@ -266,16 +273,23 @@ class TestAssGeneration:
         content = ass_path.read_text(encoding="utf-8")
         hormozi_lines = [ln for ln in content.splitlines() if ",Hormozi,," in ln]
 
-        # Intro narration card emitted at 0.0 -> 2.0s
-        assert any(
-            "0:00:00.00,0:00:02.00,Hormozi" in ln and "LOOK AT THIS INSANE MOVE" in ln
-            for ln in hormozi_lines
-        )
-        # Outro narration card emitted at 8.0 -> 10.0s (10.0 - 2.0 = 8.0s)
-        assert any(
-            "0:00:08.00,0:00:10.00,Hormozi" in ln and "HE ACTUALLY PULLED IT OFF" in ln
-            for ln in hormozi_lines
-        )
+        # Intro narration chunk events emitted across 0.0 -> 2.0s
+        intro_events = [ln for ln in hormozi_lines if "LOOK" in ln or "INSANE" in ln]
+        assert len(intro_events) == 5
+        clean_intro = [re.sub(r"\{.*?\}", "", ln) for ln in intro_events]
+        assert any("LOOK AT THIS" in ln for ln in clean_intro)
+        assert any("INSANE MOVE" in ln for ln in clean_intro)
+        assert any("0:00:00.00," in ln for ln in intro_events)
+        assert any(",0:00:02.00,Hormozi" in ln for ln in intro_events)
+
+        # Outro narration chunk events emitted across 8.0 -> 10.0s
+        outro_events = [ln for ln in hormozi_lines if "ACTUALLY" in ln or "PULLED" in ln or "OFF" in ln]
+        assert len(outro_events) == 5
+        clean_outro = [re.sub(r"\{.*?\}", "", ln) for ln in outro_events]
+        assert any("HE ACTUALLY PULLED" in ln for ln in clean_outro)
+        assert any("IT OFF" in ln for ln in clean_outro)
+        assert any("0:00:08.00," in ln for ln in outro_events)
+        assert any(",0:00:10.00,Hormozi" in ln for ln in outro_events)
 
         # Climax streamer words ("CLIMAX", "REACTION") are present
         assert any("CLIMAX" in ln for ln in hormozi_lines)
@@ -316,6 +330,9 @@ class TestAssGeneration:
                     "stroke_color": "red",
                     "stroke_width": 6,
                     "position_y_ratio": 0.80,
+                    "animation": "none",
+                    "shadow_offset": 0,
+                    "shadow_color": "&H80000000",
                 }
             },
         )
@@ -361,8 +378,8 @@ class TestAssGeneration:
             ln for ln in ass_path.read_text(encoding="utf-8").splitlines() if ",Hormozi,," in ln
         ]
         assert hormozi_lines == [
-            r"Dialogue: 0,0:00:00.00,0:00:00.40,Hormozi,,0,0,0,,{\c&H00D7FF&}BOOM{\c&HFFFFFF&}",
-            r"Dialogue: 0,0:00:00.40,0:00:01.00,Hormozi,,0,0,0,,{\c&H00D7FF&}HEADSHOT{\c&HFFFFFF&}",
+            r"Dialogue: 0,0:00:00.00,0:00:00.40,Hormozi,,0,0,0,,{\c&H00E6FF&}BOOM{\c&HFFFFFF&}",
+            r"Dialogue: 0,0:00:00.40,0:00:01.00,Hormozi,,0,0,0,,{\c&H00E6FF&}HEADSHOT{\c&HFFFFFF&}",
         ]
 
     def test_sentence_style(self, tmp_path: Path) -> None:
@@ -444,8 +461,8 @@ class TestAssGeneration:
         assert hormozi_lines[0].startswith("Dialogue: 0,0:00:00.00,0:00:00.00,Hormozi,,")
         # Escaped braces
         assert r"\{WOW\}" in hormozi_lines[0]
-        # Trailing backslash separated from closing {\c&HFFFFFF&} by ZWSP
-        assert "BACK\\\u200b{\\c&HFFFFFF&}" in hormozi_lines[1]
+        # Trailing backslash separated from closing {\c&HFFFFFF&...} by ZWSP
+        assert "BACK\\\u200b{\\c&HFFFFFF&" in hormozi_lines[1]
         # \N neutralized without doubling backslash
         assert "A\\\u200bNB" in hormozi_lines[2]
 
@@ -483,9 +500,9 @@ class TestAssGeneration:
         )
         burner = AssCaptionBurner(cfg)
         assert burner.style == "hormozi"
-        assert burner.words_per_group == 4
-        assert burner.font_size == 72
-        assert burner.stroke_width == 4
+        assert burner.words_per_group == 3
+        assert burner.font_size == 82
+        assert burner.stroke_width == 8
         assert (burner.width, burner.height) == (1080, 1920)
         assert burner.margin_v == 480
 
@@ -494,8 +511,8 @@ class TestAssGeneration:
         content = ass_path.read_text(encoding="utf-8")
         assert "None" not in content
         assert (
-            "Style: Hormozi,Arial,72,&H00FFFFFF,&H0000D7FF,&H00000000,&H80000000,"
-            "-1,0,0,0,100,100,0,0,1,4,0,2,60,60,480,1"
+            "Style: Hormozi,Impact,82,&H00FFFFFF,&H0000E6FF,&H00000000,&H90000000,"
+            "-1,0,0,0,100,100,0,0,1,8,6,2,60,60,480,1"
         ) in content
 
     def test_integrates_with_composer_remap_timeline_for_beats(self, tmp_path: Path) -> None:
@@ -2189,3 +2206,1083 @@ def test_v3_strip_unrenderable_removes_emoji_for_overlays() -> None:
     assert strip_unrenderable("GG ❤️ wp \U0001f468‍\U0001f4bb") == "GG wp"
     assert strip_unrenderable("") == ""
     assert _escape_ass_text("hype \U0001f525 {x}") == r"hype \{x\}"
+
+
+class TestModernCaptionStyles:
+    """Tests for modern short-form subtitle styles, pop/bounce animations, color sweeps, box & shadow."""
+
+    def test_bounce_style_and_animation(self, tmp_path: Path) -> None:
+        cfg = _make_config(
+            tmp_path,
+            overrides={
+                "captions": {
+                    "style": "bounce",
+                    "words_per_group": 3,
+                    "animation_scale": 1.20,
+                    "animation_duration_ms": 140,
+                }
+            },
+        )
+        burner = AssCaptionBurner(cfg)
+        assert burner.style == "bounce"
+        assert burner.animation == "bounce"
+        assert burner.animation_scale == 1.20
+        assert burner.animation_duration_ms == 140
+
+        words = [
+            WordTimestamp("look", 0.0, 0.4),
+            WordTimestamp("at", 0.4, 0.7),
+            WordTimestamp("this", 0.7, 1.2),
+        ]
+        ass_path = tmp_path / "bounce.ass"
+        burner.generate_ass(words, clip_start_offset=0.0, ass_path=ass_path)
+        content = ass_path.read_text(encoding="utf-8")
+        hormozi_lines = [ln for ln in content.splitlines() if ",Hormozi,," in ln]
+
+        assert len(hormozi_lines) == 3
+        # First word 'LOOK' has bounce animation: 100% -> 120% at t1, then 120% -> 100% at t2
+        assert r"\fscx100\fscy100" in hormozi_lines[0]
+        assert r"\t(0,70,\fscx120\fscy120)" in hormozi_lines[0]
+        assert r"\t(70,140,\fscx100\fscy100)" in hormozi_lines[0]
+        assert "LOOK" in hormozi_lines[0]
+        # Active word closes with reset to primary color and 100% scale
+        assert r"{\c&HFFFFFF&\fscx100\fscy100} AT THIS" in hormozi_lines[0]
+
+        # Second word 'AT' active
+        assert r"LOOK {\c&H00E6FF&\fscx100\fscy100" in hormozi_lines[1]
+        assert "AT" in hormozi_lines[1]
+
+    def test_pop_style_and_animation(self, tmp_path: Path) -> None:
+        cfg = _make_config(
+            tmp_path,
+            overrides={
+                "captions": {
+                    "style": "pop",
+                    "animation_scale": 1.25,
+                    "animation_duration_ms": 100,
+                }
+            },
+        )
+        burner = AssCaptionBurner(cfg)
+        assert burner.style == "pop"
+        assert burner.animation == "pop"
+
+        words = [WordTimestamp("insane", 1.0, 1.5)]
+        ass_path = tmp_path / "pop.ass"
+        burner.generate_ass(words, clip_start_offset=1.0, ass_path=ass_path)
+        content = ass_path.read_text(encoding="utf-8")
+        hormozi_lines = [ln for ln in content.splitlines() if ",Hormozi,," in ln]
+
+        assert len(hormozi_lines) == 1
+        # Pop: starts at 125% and scales down to 100% over 100ms
+        assert r"\fscx125\fscy125\t(0,100,\fscx100\fscy100)" in hormozi_lines[0]
+        assert "INSANE" in hormozi_lines[0]
+        assert r"{\c&HFFFFFF&\fscx100\fscy100}" in hormozi_lines[0]
+
+    def test_color_sweep_animation(self, tmp_path: Path) -> None:
+        cfg = _make_config(
+            tmp_path,
+            overrides={
+                "captions": {
+                    "style": "hormozi",
+                    "animation": "sweep",
+                    "animation_duration_ms": 150,
+                    "color": "white",
+                    "highlight_color": "#FFD700",
+                }
+            },
+        )
+        burner = AssCaptionBurner(cfg)
+        assert burner.animation == "sweep"
+
+        words = [WordTimestamp("speed", 2.0, 2.5), WordTimestamp("run", 2.5, 3.0)]
+        ass_path = tmp_path / "sweep.ass"
+        burner.generate_ass(words, clip_start_offset=2.0, ass_path=ass_path)
+        content = ass_path.read_text(encoding="utf-8")
+        hormozi_lines = [ln for ln in content.splitlines() if ",Hormozi,," in ln]
+
+        assert len(hormozi_lines) == 2
+        # Color sweep: active word transitions smoothly from primary color to highlight color
+        assert r"{\c&HFFFFFF&\t(0,150,\c&H00D7FF&)}SPEED{\c&HFFFFFF&} RUN" in hormozi_lines[0]
+
+    def test_karaoke_style_progressive_fill(self, tmp_path: Path) -> None:
+        cfg = _make_config(
+            tmp_path,
+            overrides={
+                "captions": {
+                    "style": "karaoke",
+                    "words_per_group": 3,
+                }
+            },
+        )
+        burner = AssCaptionBurner(cfg)
+        assert burner.style == "karaoke"
+
+        words = [
+            WordTimestamp("epic", 0.0, 0.35),
+            WordTimestamp("clutch", 0.35, 0.80),
+            WordTimestamp("win", 0.80, 1.10),
+        ]
+        ass_path = tmp_path / "karaoke.ass"
+        burner.generate_ass(words, clip_start_offset=0.0, ass_path=ass_path)
+        content = ass_path.read_text(encoding="utf-8")
+        hormozi_lines = [ln for ln in content.splitlines() if ",Hormozi,," in ln]
+
+        # Karaoke emits single dialogue event per group with \kf tags
+        assert len(hormozi_lines) == 1
+        line = hormozi_lines[0]
+        assert "0:00:00.00,0:00:01.10,Hormozi" in line
+        # 0.35s -> 35cs, 0.45s -> 45cs, 0.30s -> 30cs
+        assert r"{\kf35}EPIC {\kf45}CLUTCH {\kf30}WIN" in line
+
+        # Verify karaoke style definition line:
+        # In ASS karaoke (\kf), SecondaryColour is the unsung initial color (white)
+        # and PrimaryColour is the sung target fill color (gold &H0000E6FF)
+        style_line = [ln for ln in content.splitlines() if ln.startswith("Style: Hormozi,")][0]
+        assert "Style: Hormozi,Impact,82,&H0000E6FF,&H00FFFFFF," in style_line
+
+    def test_background_box_styling(self, tmp_path: Path) -> None:
+        cfg = _make_config(
+            tmp_path,
+            overrides={
+                "captions": {
+                    "style": "box",
+                    "box_padding": 8,
+                    "box_color": "black",
+                    "box_opacity": 0.60,
+                }
+            },
+        )
+        burner = AssCaptionBurner(cfg)
+        assert burner.box_style is True
+        assert burner.box_padding == 8
+
+        words = [WordTimestamp("boxed", 0.0, 0.5)]
+        ass_path = tmp_path / "box.ass"
+        burner.generate_ass(words, clip_start_offset=0.0, ass_path=ass_path)
+        content = ass_path.read_text(encoding="utf-8")
+
+        # In ASS V4+ Styles for BorderStyle=3 (box):
+        # Format: ..., BorderStyle, Outline, Shadow, Alignment, ...
+        # BorderStyle = 3, Outline = 8 (padding), Shadow = 0
+        style_line = [ln for ln in content.splitlines() if ln.startswith("Style: Hormozi,")][0]
+        # Box opacity 0.60 -> alpha = round(0.40 * 255) = 102 = 0x66 -> &H66000000
+        assert "&H66000000" in style_line
+        assert ",3,8,0,2," in style_line
+
+    def test_drop_shadow_styling(self, tmp_path: Path) -> None:
+        cfg = _make_config(
+            tmp_path,
+            overrides={
+                "captions": {
+                    "style": "hormozi",
+                    "stroke_width": 4,
+                    "shadow_offset": 3.5,
+                    "shadow_color": "#FF0000",  # red shadow
+                }
+            },
+        )
+        burner = AssCaptionBurner(cfg)
+        assert burner.shadow_offset == 3.5
+        assert burner.shadow_color == "&H000000FF"
+
+        words = [WordTimestamp("shadow", 0.0, 0.5)]
+        ass_path = tmp_path / "shadow.ass"
+        burner.generate_ass(words, clip_start_offset=0.0, ass_path=ass_path)
+        content = ass_path.read_text(encoding="utf-8")
+
+        style_line = [ln for ln in content.splitlines() if ln.startswith("Style: Hormozi,")][0]
+        # BorderStyle = 1, Outline = 4, Shadow = 3.5
+        assert ",&H000000FF," in style_line
+        assert ",1,4,3.5,2," in style_line
+
+    def test_style_preset_overrides_animation_and_box_and_shadow(self, tmp_path: Path) -> None:
+        cfg = _make_config(tmp_path)
+        burner = AssCaptionBurner(cfg)
+        assert burner.animation == "bounce"
+        assert burner.box_style is False
+        assert burner.shadow_offset == 6
+
+        preset = {
+            "font": "Impact",
+            "primary_color": "#00FF00",
+            "highlight_color": "#FF00FF",
+            "outline_color": "#000000",
+            "animation": "pop",
+            "animation_scale": 1.30,
+            "animation_duration_ms": 110,
+            "box_style": True,
+            "box_padding": 10,
+            "box_color": "black",
+            "box_opacity": 0.50,
+            "shadow_offset": 2,
+        }
+
+        words = [WordTimestamp("override", 0.0, 0.5)]
+        ass_path = tmp_path / "preset_override.ass"
+        burner.generate_ass(words, clip_start_offset=0.0, ass_path=ass_path, style_preset=preset)
+        content = ass_path.read_text(encoding="utf-8")
+
+        # Verify preset settings applied to ASS
+        assert "Style: Hormozi,Impact," in content
+        # Box style was set in preset -> BorderStyle 3, Outline 10
+        assert ",3,10,0,2," in content
+        # Pop animation was set in preset -> fscx130
+        assert r"\fscx130\fscy130\t(0,110,\fscx100\fscy100)" in content
+
+        # Verify burner state was completely restored
+        assert burner.animation == "bounce"
+        assert burner.box_style is False
+        assert burner.shadow_offset == 6
+        assert burner.font == "Impact"
+
+    def test_defensive_init_new_caption_keys(self, tmp_path: Path) -> None:
+        cfg = _make_config(
+            tmp_path,
+            overrides={
+                "captions": {
+                    "animation": "invalid_anim",
+                    "animation_scale": "not_a_number",
+                    "animation_duration_ms": None,
+                    "shadow_offset": None,
+                    "shadow_color": None,
+                    "box_style": "invalid_bool_fallback",
+                    "box_padding": None,
+                    "box_opacity": None,
+                    "box_color": None,
+                }
+            },
+        )
+        burner = AssCaptionBurner(cfg)
+        assert burner.animation == "bounce"
+        assert burner.animation_scale == 1.30
+        assert burner.animation_duration_ms == 140
+        assert burner.shadow_offset == 6
+        assert burner.shadow_color == "&H90000000"
+        assert burner.box_padding == 6
+        assert burner.box_opacity == 0.60
+
+    def test_real_ffmpeg_burns_new_styles_without_syntax_errors(self, tmp_path: Path) -> None:
+        """Verify FFmpeg libass burns modern styles (bounce, pop, karaoke, box, shadow) without errors."""
+        if shutil.which("ffmpeg") is None:
+            pytest.skip("ffmpeg not available on PATH")
+
+        video_path = tmp_path / "input.mp4"
+        # Generate a tiny 1-second 320x240 synthetic test video
+        subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-f", "lavfi", "-i", "color=c=blue:s=320x240:d=1:r=15",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                str(video_path),
+            ],
+            check=True,
+            capture_output=True,
+        )
+
+        test_configs = [
+            ("bounce", {"captions": {"style": "bounce", "animation_scale": 1.2}}),
+            ("pop", {"captions": {"style": "pop", "animation_scale": 1.15}}),
+            ("sweep", {"captions": {"style": "hormozi", "animation": "sweep"}}),
+            ("karaoke", {"captions": {"style": "karaoke"}}),
+            ("box", {"captions": {"style": "box", "box_padding": 4, "box_opacity": 0.5}}),
+            ("shadow", {"captions": {"style": "hormozi", "shadow_offset": 2}}),
+        ]
+
+        words = [
+            WordTimestamp("hello", 0.0, 0.4),
+            WordTimestamp("world", 0.4, 0.8),
+        ]
+
+        for name, overrides in test_configs:
+            cfg = _make_config(
+                tmp_path,
+                overrides={
+                    **overrides,
+                    "video": {"resolution": [320, 240]},
+                },
+            )
+            burner = AssCaptionBurner(cfg)
+            ass_path = tmp_path / f"{name}.ass"
+            burner.generate_ass(words, clip_start_offset=0.0, ass_path=ass_path)
+            assert ass_path.is_file()
+
+            out_path = tmp_path / f"out_{name}.mp4"
+            result = burner.burn_captions(
+                input_video=video_path,
+                ass_path=ass_path,
+                output_video=out_path,
+                codec="libx264",
+            )
+            assert result.is_file()
+            assert result.stat().st_size > 1000
+
+    def test_rapid_speech_short_word_animation_bounds_clamped(self, tmp_path: Path) -> None:
+        """Verify that rapid speech or short Whisper alignments (< 50ms) never cause animation overshoots."""
+        cfg = _make_config(
+            tmp_path,
+            overrides={
+                "captions": {
+                    "style": "bounce",
+                    "animation_duration_ms": 140,
+                    "animation_scale": 1.20,
+                }
+            },
+        )
+        burner = AssCaptionBurner(cfg)
+        # 30ms word and 50ms word
+        words = [
+            WordTimestamp("quick", 0.00, 0.03),
+            WordTimestamp("shot", 0.03, 0.08),
+        ]
+        ass_path = tmp_path / "rapid.ass"
+        burner.generate_ass(words, clip_start_offset=0.0, ass_path=ass_path)
+        content = ass_path.read_text(encoding="utf-8")
+        hormozi_lines = [ln for ln in content.splitlines() if ",Hormozi,," in ln]
+
+        assert len(hormozi_lines) == 2
+        # Word 1: dur_ms is 30ms.
+        # Bounce keyframes t1, t2 must satisfy 0 < t1 < t2 <= 30
+        match1 = re.search(r"\\t\(0,(\d+),\\fscx\d+\\fscy\d+\)\\t\((\d+),(\d+),\\fscx100\\fscy100\)", hormozi_lines[0])
+        assert match1 is not None
+        t0_1, t1_1, t2_1 = int(match1.group(1)), int(match1.group(2)), int(match1.group(3))
+        assert t0_1 == t1_1
+        assert 0 < t1_1 < t2_1 <= 30
+
+        # Word 2: dur_ms is 50ms.
+        match2 = re.search(r"\\t\(0,(\d+),\\fscx\d+\\fscy\d+\)\\t\((\d+),(\d+),\\fscx100\\fscy100\)", hormozi_lines[1])
+        assert match2 is not None
+        _, t1_2, t2_2 = int(match2.group(1)), int(match2.group(2)), int(match2.group(3))
+        assert 0 < t1_2 < t2_2 <= 50
+
+    def test_sentence_style_bounce_animation(self, tmp_path: Path) -> None:
+        """Verify sentence style produces valid two-phase bounce animation when configured."""
+        cfg = _make_config(
+            tmp_path,
+            overrides={
+                "captions": {
+                    "style": "sentence",
+                    "animation": "bounce",
+                    "animation_scale": 1.15,
+                    "animation_duration_ms": 120,
+                }
+            },
+        )
+        burner = AssCaptionBurner(cfg)
+        words = [WordTimestamp("full", 0.0, 0.5), WordTimestamp("sentence", 0.5, 1.0)]
+        ass_path = tmp_path / "sentence_bounce.ass"
+        burner.generate_ass(words, clip_start_offset=0.0, ass_path=ass_path)
+        content = ass_path.read_text(encoding="utf-8")
+        hormozi_lines = [ln for ln in content.splitlines() if ",Hormozi,," in ln]
+
+        assert len(hormozi_lines) == 1
+        line = hormozi_lines[0]
+        assert r"\fscx100\fscy100\t(0,60,\fscx115\fscy115)\t(60,120,\fscx100\fscy100)" in line
+        assert "FULL SENTENCE" in line
+
+    def test_shadow_color_rgba_and_alpha(self, tmp_path: Path) -> None:
+        """Verify 8-digit RGBA hex and ASS &HAABBGGRR parse cleanly for drop shadow."""
+        cfg = _make_config(
+            tmp_path,
+            overrides={
+                "captions": {
+                    "style": "hormozi",
+                    "shadow_offset": 3,
+                    "shadow_color": "#00000080",  # CSS RGBA: semi-transparent black
+                }
+            },
+        )
+        burner = AssCaptionBurner(cfg)
+        # CSS alpha 0x80 (128) -> ASS inverted alpha 255 - 128 = 127 = 0x7F -> &H7F000000
+        assert burner.shadow_color == "&H7F000000"
+        words = [WordTimestamp("test", 0.0, 0.5)]
+        ass_path = tmp_path / "shadow_rgba.ass"
+        burner.generate_ass(words, clip_start_offset=0.0, ass_path=ass_path)
+        content = ass_path.read_text(encoding="utf-8")
+        assert ",&H7F000000," in content
+
+    def test_color_to_ass_style_with_alpha_boundaries(self) -> None:
+        """Verify boundary and opacity conversions for CSS RGBA hex, named colors, and ASS formats."""
+        # CSS 8-digit hex #RRGGBBAA: #11223380 -> CSS alpha 128 -> ASS alpha 127 = 0x7F -> &H7F332211
+        assert _color_to_ass_style_with_alpha("#11223380") == "&H7F332211"
+        assert _color_to_ass_style_with_alpha("#11223300") == "&HFF332211"
+        assert _color_to_ass_style_with_alpha("#112233FF") == "&H00332211"
+
+        # 6-digit hex with opacity
+        assert _color_to_ass_style_with_alpha("#112233", opacity=0.0) == "&HFF332211"
+        assert _color_to_ass_style_with_alpha("#112233", opacity=1.0) == "&H00332211"
+        assert _color_to_ass_style_with_alpha("#112233", opacity=0.5) == "&H80332211"
+
+        # Named colors and ASS style colors
+        assert _color_to_ass_style_with_alpha("&H80332211") == "&H80332211"
+        assert _color_to_ass_style_with_alpha("white", opacity=0.5) == "&H80FFFFFF"
+        assert _color_to_ass_style_with_alpha("black", opacity=0.6) == "&H66000000"
+        assert _color_to_ass_style_with_alpha("", default="&H99000000") == "&H99000000"
+        assert _color_to_ass_style_with_alpha("invalid_color", default="&H99000000") == "&H99000000"
+
+    def test_zero_duration_and_inverted_words(self, tmp_path: Path) -> None:
+        """Verify zero-duration and inverted timestamp anomalies clamp gracefully without error."""
+        cfg = _make_config(
+            tmp_path,
+            overrides={
+                "captions": {
+                    "style": "bounce",
+                    "animation_duration_ms": 120,
+                    "animation_scale": 1.25,
+                }
+            },
+        )
+        burner = AssCaptionBurner(cfg)
+        words = [
+            WordTimestamp("ZERO", 1.0, 1.0),
+            WordTimestamp("INVERTED", 2.5, 2.0),
+            WordTimestamp("NORMAL", 3.0, 3.5),
+        ]
+        ass_path = tmp_path / "zero_inv.ass"
+        burner.generate_ass(words, clip_start_offset=0.0, ass_path=ass_path)
+        content = ass_path.read_text(encoding="utf-8")
+        lines = [ln for ln in content.splitlines() if ",Hormozi,," in ln]
+        assert len(lines) == 3
+
+        m_zero = re.search(r"\\t\(0,(\d+).*?\\t\((\d+),(\d+)", lines[0])
+        assert m_zero is not None
+        t1, t1_b, t2 = int(m_zero.group(1)), int(m_zero.group(2)), int(m_zero.group(3))
+        assert t1 == t1_b
+        assert 0 < t1 < t2
+
+    def test_special_chars_and_formatting_injection(self, tmp_path: Path) -> None:
+        """Verify braces, slashes, and control characters do not break ASS syntax."""
+        cfg = _make_config(tmp_path, overrides={"captions": {"style": "pop"}})
+        burner = AssCaptionBurner(cfg)
+        words = [
+            WordTimestamp("hello {\\b1} bold", 0.0, 0.5),
+            WordTimestamp("newline \\N next", 0.5, 1.0),
+            WordTimestamp("slash \\ end\\", 1.0, 1.5),
+            WordTimestamp("emoji 🎮🔥 test", 1.5, 2.0),
+        ]
+        ass_path = tmp_path / "special.ass"
+        burner.generate_ass(words, clip_start_offset=0.0, ass_path=ass_path)
+        content = ass_path.read_text(encoding="utf-8")
+        assert r"\{" in content
+        assert r"\}" in content
+        lines = [ln for ln in content.splitlines() if ",Hormozi,," in ln]
+        assert len(lines) == 4
+
+    def test_multiline_box_custom_resolutions(self, tmp_path: Path) -> None:
+        """Verify long multi-line sentences with box styling on non-standard vertical resolutions."""
+        resolutions = [[720, 1280], [1080, 1920], [1440, 2560], [1080, 1080]]
+        long_sentence = [
+            WordTimestamp(f"w{i}", i * 0.2, (i + 1) * 0.2) for i in range(25)
+        ]
+
+        for res in resolutions:
+            cfg = _make_config(
+                tmp_path,
+                overrides={
+                    "captions": {
+                        "style": "sentence",
+                        "box_style": True,
+                        "box_padding": 12,
+                        "box_color": "#112233",
+                        "box_opacity": 0.8,
+                    },
+                    "video": {"resolution": res},
+                },
+            )
+            burner = AssCaptionBurner(cfg)
+            assert burner.width == res[0]
+            assert burner.height == res[1]
+
+            ass_path = tmp_path / f"box_{res[0]}x{res[1]}.ass"
+            burner.generate_ass(long_sentence, clip_start_offset=0.0, ass_path=ass_path)
+            content = ass_path.read_text(encoding="utf-8")
+
+            assert f"PlayResX: {res[0]}" in content
+            assert f"PlayResY: {res[1]}" in content
+            assert ",3,12,0,2," in content
+            assert "&H33332211" in content
+
+    def test_full_pipeline_elements_concurrent_with_animated_captions(self, tmp_path: Path) -> None:
+        """Verify bounce captions render concurrently with narration intro/outro cards and chat ticker."""
+        cfg = _make_config(
+            tmp_path,
+            overrides={
+                "captions": {
+                    "style": "bounce",
+                    "animation_scale": 1.25,
+                    "shadow_offset": 3,
+                    "shadow_color": "#000000AA",
+                },
+                "transformation": {
+                    "show_chat_ticker": True,
+                },
+            },
+        )
+        burner = AssCaptionBurner(cfg)
+        words = [
+            WordTimestamp("intro_overlap", 0.5, 1.5),
+            WordTimestamp("mid_word_1", 2.5, 3.0),
+            WordTimestamp("mid_word_2", 3.0, 3.5),
+            WordTimestamp("outro_overlap", 6.5, 7.5),
+        ]
+        chat_burst = [
+            {"author": "Chatter1", "message": "POGGERS!", "offset_seconds": 2.8},
+            {"author": "Chatter2", "message": "LMAO", "offset_seconds": 3.2},
+        ]
+        ass_path = tmp_path / "concurrent.ass"
+        burner.generate_ass(
+            words=words,
+            clip_start_offset=0.0,
+            ass_path=ass_path,
+            chat_burst=chat_burst,
+            narration_intro="Look at this insane play!",
+            narration_outro="Did you see that ending?!",
+            intro_dur=2.0,
+            outro_dur=2.0,
+            clip_duration=8.0,
+        )
+        content = ass_path.read_text(encoding="utf-8")
+
+        clean_lines = [re.sub(r"\{.*?\}", "", ln) for ln in content.splitlines()]
+        assert any("LOOK AT THIS" in ln for ln in clean_lines)
+        assert any("INSANE PLAY" in ln for ln in clean_lines)
+        assert any("DID YOU SEE" in ln for ln in clean_lines)
+        assert any("THAT ENDING" in ln for ln in clean_lines)
+        assert r"\fscx" in content
+        assert "INTRO_OVERLAP" not in content
+        assert "OUTRO_OVERLAP" not in content
+        assert "MID_WORD_1" in content
+        assert "MID_WORD_2" in content
+        assert "Chatter1: POGGERS!" in content
+        assert "Chatter2: LMAO" in content
+
+    def test_whisper_sub_10ms_word_durations(self, tmp_path: Path) -> None:
+        """Test extreme 1ms - 8ms Whisper timestamp anomalies do not cause arithmetic errors."""
+        cfg = _make_config(
+            tmp_path,
+            overrides={
+                "captions": {
+                    "style": "bounce",
+                    "animation_duration_ms": 120,
+                    "animation_scale": 1.15,
+                }
+            },
+        )
+        burner = AssCaptionBurner(cfg)
+        words = [
+            WordTimestamp("sub_1ms", 1.000, 1.001),
+            WordTimestamp("sub_5ms", 1.001, 1.006),
+            WordTimestamp("sub_8ms", 1.006, 1.014),
+        ]
+        ass_path = tmp_path / "extreme_short.ass"
+        burner.generate_ass(words, clip_start_offset=0.0, ass_path=ass_path)
+        content = ass_path.read_text(encoding="utf-8")
+
+        lines = [ln for ln in content.splitlines() if ",Hormozi,," in ln]
+        assert len(lines) == 3
+        for ln in lines:
+            m = re.search(r"\\t\(0,(\d+).*?\\t\((\d+),(\d+)", ln)
+            assert m is not None
+            t1, t1_b, t2 = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            assert t1 == t1_b
+            assert 0 < t1 < t2
+
+    def test_karaoke_dead_air_pauses_wipe(self, tmp_path: Path) -> None:
+        """Verify that in karaoke mode, dead air between words pauses the wipe rather than skipping silence."""
+        cfg = _make_config(
+            tmp_path,
+            overrides={"captions": {"style": "karaoke", "words_per_group": 4}},
+        )
+        burner = AssCaptionBurner(cfg)
+        words = [
+            WordTimestamp("wait", 1.0, 1.5),
+            WordTimestamp("for", 3.0, 3.4),
+            WordTimestamp("it", 3.4, 3.8),
+        ]
+        ass_path = tmp_path / "karaoke_gap.ass"
+        burner.generate_ass(words, clip_start_offset=0.0, ass_path=ass_path)
+        content = ass_path.read_text(encoding="utf-8")
+        lines = [ln for ln in content.splitlines() if ",Hormozi,," in ln]
+        assert len(lines) == 1
+        line = lines[0]
+        # First word: 0.5s = 50cs wipe
+        # Gap between word 0 and word 1: 1.5s = 150cs pause
+        # Second word: 0.4s = 40cs wipe
+        # Third word contiguous: 0.4s = 40cs wipe
+        assert r"{\kf50}WAIT{\k150} {\kf40}FOR {\kf40}IT" in line
+
+    def test_color_conversion_ass_formats_and_inline_bgr(self) -> None:
+        """Verify ASS style colors with trailing ampersands and inline BGR hex formats parse correctly."""
+        from streamclipper.assembly.captions import _color_to_ass_style
+        # ASS 10-char with trailing ampersand: &H8000D7FF& -> &H8000D7FF
+        assert _color_to_ass_style("&H8000D7FF&") == "&H8000D7FF"
+        assert _color_to_ass_style_with_alpha("&H8000D7FF&") == "&H8000D7FF"
+        assert _color_to_ass_style_with_alpha("&H8000D7FF&", opacity=1.0) == "&H0000D7FF"
+
+        # ASS inline BGR: &H00D7FF (or &H00D7FF&) -> &H0000D7FF
+        assert _color_to_ass_style("&H00D7FF") == "&H0000D7FF"
+        assert _color_to_ass_style("&H00D7FF&") == "&H0000D7FF"
+        assert _color_to_ass_style_with_alpha("&H00D7FF") == "&H0000D7FF"
+        assert _color_to_ass_style_with_alpha("&H00D7FF&", opacity=0.5) == "&H8000D7FF"
+
+    def test_style_preset_box_opacity_alone_recomputes_box_color(self, tmp_path: Path) -> None:
+        """Verify that style_preset with box_opacity alone updates box_color alpha without requiring box_color."""
+        cfg = _make_config(
+            tmp_path,
+            overrides={"captions": {"box_style": True, "box_color": "black", "box_opacity": 0.60}},
+        )
+        burner = AssCaptionBurner(cfg)
+        assert burner.box_color == "&H66000000"
+
+        # Override box_opacity to 0.10 (almost transparent: 0.9 * 255 = 230 = 0xE6)
+        words = [WordTimestamp("test", 0.0, 0.5)]
+        ass_path = tmp_path / "preset_box_op.ass"
+        burner.generate_ass(words, clip_start_offset=0.0, ass_path=ass_path, style_preset={"box_opacity": 0.10})
+        content = ass_path.read_text(encoding="utf-8")
+        hormozi_line = [ln for ln in content.splitlines() if ln.startswith("Style: Hormozi,")][0]
+        assert ",&HE6000000,&HE6000000," in hormozi_line
+        assert burner.box_color == "&H66000000"  # State fully restored
+
+    def test_style_preset_style_and_stroke_width_override(self, tmp_path: Path) -> None:
+        """Verify style_preset can override style (e.g. karaoke) and stroke_width and restore state."""
+        cfg = _make_config(tmp_path, overrides={"captions": {"style": "hormozi", "stroke_width": 4}})
+        burner = AssCaptionBurner(cfg)
+        assert burner.style == "hormozi"
+        assert burner.stroke_width == 4
+
+        words = [WordTimestamp("sing", 1.0, 1.5), WordTimestamp("song", 1.5, 2.0)]
+        ass_path = tmp_path / "preset_karaoke.ass"
+        burner.generate_ass(
+            words,
+            clip_start_offset=0.0,
+            ass_path=ass_path,
+            style_preset={"style": "karaoke", "stroke_width": 6},
+        )
+        content = ass_path.read_text(encoding="utf-8")
+        hormozi_lines = [ln for ln in content.splitlines() if ",Hormozi,," in ln]
+        assert len(hormozi_lines) == 1
+        assert r"{\kf50}SING {\kf50}SONG" in hormozi_lines[0]
+        style_line = [ln for ln in content.splitlines() if ln.startswith("Style: Hormozi,")][0]
+        assert ",1,6,6,2," in style_line
+
+        # State fully restored
+        assert burner.style == "hormozi"
+        assert burner.stroke_width == 4
+
+    def test_karaoke_overlapping_timestamps_and_trailing_backslash(self, tmp_path: Path) -> None:
+        """Verify karaoke mode handles overlapping timestamps by extending dialogue duration and sanitizes backslashes."""
+        cfg = _make_config(
+            tmp_path,
+            overrides={"captions": {"style": "karaoke", "words_per_group": 2}},
+        )
+        burner = AssCaptionBurner(cfg)
+        # Word 0: 1.0 -> 2.5 (150cs), Word 1: 2.0 -> 3.0 (100cs, overlaps with word 0)
+        # Total wipe = 150cs + 100cs = 250cs (2.5s). Starts at 1.0s -> ends at least at 3.5s
+        words = [
+            WordTimestamp("escape\\", 1.0, 2.5),
+            WordTimestamp("next", 2.0, 3.0),
+        ]
+        ass_path = tmp_path / "karaoke_overlap.ass"
+        burner.generate_ass(words, clip_start_offset=0.0, ass_path=ass_path)
+        content = ass_path.read_text(encoding="utf-8")
+        hormozi_lines = [ln for ln in content.splitlines() if ",Hormozi,," in ln]
+        assert len(hormozi_lines) == 1
+        line = hormozi_lines[0]
+
+        # Trailing backslash escaped with zero-width space so {\kf does not get corrupted
+        assert "ESCAPE\\\u200b" in line
+        assert r"{\kf100}NEXT" in line
+        # Dialogue line should extend to at least 0:00:03.50 (not cut off at 0:00:03.00)
+        m = re.search(r"Dialogue: \d+,([^,]+),([^,]+),Hormozi", line)
+        assert m is not None
+        start_ts, end_ts = m.group(1), m.group(2)
+        assert start_ts == "0:00:01.00"
+        assert end_ts == "0:00:03.50"
+
+    def test_resolve_caption_style_moment_type_mapping_and_overrides(self) -> None:
+        """Verify resolve_caption_style maps moment_types and respects explicit overrides."""
+        from streamclipper.assembly.captions import resolve_caption_style
+
+        # 1. Automatic mapping based on moment_type
+        for m in ("funny", "chat_chaos", "fail"):
+            assert resolve_caption_style("auto", moment_type=m) == "bounce"
+            assert resolve_caption_style(None, moment_type=m) == "bounce"
+            assert resolve_caption_style("", moment_type=m) == "bounce"
+
+        for m in ("hype", "clutch"):
+            assert resolve_caption_style("auto", moment_type=m) == "pop"
+            assert resolve_caption_style(None, moment_type=m) == "pop"
+
+        for m in ("graphics_detail", "analysis", "lore_secret"):
+            assert resolve_caption_style("auto", moment_type=m) == "box"
+            assert resolve_caption_style(None, moment_type=m) == "box"
+
+        # Fallback / unmapped moment_types use default_style
+        assert resolve_caption_style("auto", moment_type="reaction", default_style="hormozi") == "hormozi"
+        assert resolve_caption_style("auto", moment_type="unknown", default_style="sentence") == "sentence"
+        assert resolve_caption_style("auto", moment_type=None, default_style="hormozi") == "hormozi"
+
+        # 2. Explicit overrides override moment_type
+        assert resolve_caption_style("karaoke", moment_type="funny") == "karaoke"
+        assert resolve_caption_style("pop", moment_type="fail") == "pop"
+        assert resolve_caption_style("box", moment_type="hype") == "box"
+        assert resolve_caption_style("bounce", moment_type="graphics_detail") == "bounce"
+        assert resolve_caption_style("single_word", moment_type="clutch") == "single_word"
+
+    def test_generate_ass_auto_resolves_from_moment_type(self, tmp_path: Path) -> None:
+        """Verify generate_ass applies moment_type subtitle styling when caption_style='auto'."""
+        cfg = _make_config(tmp_path, overrides={"captions": {"style": "hormozi"}})
+        burner = AssCaptionBurner(cfg)
+        words = [WordTimestamp("look", 0.0, 0.5), WordTimestamp("here", 0.5, 1.0)]
+
+        # funny -> bounce
+        p_funny = tmp_path / "funny.ass"
+        burner.generate_ass(words, clip_start_offset=0.0, ass_path=p_funny, moment_type="funny")
+        c_funny = p_funny.read_text(encoding="utf-8")
+        assert r"\fscx100\fscy100" in c_funny
+        assert r"\t(0," in c_funny
+
+        # hype -> pop
+        p_hype = tmp_path / "hype.ass"
+        burner.generate_ass(words, clip_start_offset=0.0, ass_path=p_hype, moment_type="hype")
+        c_hype = p_hype.read_text(encoding="utf-8")
+        assert r"\fscx" in c_hype
+        assert r"\t(0," in c_hype
+
+        # graphics_detail -> box (BorderStyle=3)
+        p_box = tmp_path / "box.ass"
+        burner.generate_ass(words, clip_start_offset=0.0, ass_path=p_box, moment_type="graphics_detail")
+        c_box = p_box.read_text(encoding="utf-8")
+        # Style: Hormozi with BorderStyle=3
+        hormozi_style = [ln for ln in c_box.splitlines() if ln.startswith("Style: Hormozi,")][0]
+        parts = hormozi_style.split(",")
+        # Format field 15 is BorderStyle (0-indexed: index 15 is BorderStyle)
+        assert parts[15] == "3"
+
+    def test_generate_ass_explicit_caption_style_override(self, tmp_path: Path) -> None:
+        """Verify explicit caption_style takes precedence over moment_type in generate_ass."""
+        cfg = _make_config(tmp_path, overrides={"captions": {"style": "hormozi"}})
+        burner = AssCaptionBurner(cfg)
+        words = [WordTimestamp("karaoke", 0.0, 0.5), WordTimestamp("test", 0.5, 1.0)]
+
+        # Explicit karaoke on funny moment -> emits \kf karaoke tags, NOT bounce
+        p_kar = tmp_path / "explicit_karaoke.ass"
+        burner.generate_ass(
+            words,
+            clip_start_offset=0.0,
+            ass_path=p_kar,
+            caption_style="karaoke",
+            moment_type="funny",
+        )
+        c_kar = p_kar.read_text(encoding="utf-8")
+        assert r"\kf" in c_kar
+
+        # Burner attributes restored cleanly after invocation
+        assert burner.style == "hormozi"
+
+    def test_generate_ass_style_preset_blends_with_moment_type_and_caption_style(
+        self, tmp_path: Path
+    ) -> None:
+        """Verify style_preset (font/colors) blends with moment_type / caption_style animation."""
+        cfg = _make_config(tmp_path, overrides={"captions": {"style": "hormozi"}})
+        burner = AssCaptionBurner(cfg)
+        words = [WordTimestamp("speed", 0.0, 0.5), WordTimestamp("test", 0.5, 1.0)]
+
+        # 1. Preset 0 has animation: "none", but funny moment_type MUST still bounce!
+        p_funny = tmp_path / "preset_funny.ass"
+        burner.generate_ass(
+            words,
+            clip_start_offset=0.0,
+            ass_path=p_funny,
+            style_preset={"font": "CustomFont", "primary_color": "#FFEB3B", "animation": "none"},
+            moment_type="funny",
+        )
+        c_funny = p_funny.read_text(encoding="utf-8")
+        assert "CustomFont" in c_funny
+        assert r"\fscx100\fscy100" in c_funny
+        assert r"\t(0," in c_funny  # Bounce animation tag generated!
+
+        # 2. Preset 2 has animation: "bounce", but graphics_detail moment_type MUST be static boxed text
+        p_box = tmp_path / "preset_box.ass"
+        burner.generate_ass(
+            words,
+            clip_start_offset=0.0,
+            ass_path=p_box,
+            style_preset={"font": "DetailFont", "animation": "bounce"},
+            moment_type="graphics_detail",
+        )
+        c_box = p_box.read_text(encoding="utf-8")
+        assert "DetailFont" in c_box
+        hormozi_style = [ln for ln in c_box.splitlines() if ln.startswith("Style: Hormozi,")][0]
+        assert hormozi_style.split(",")[15] == "3"  # BorderStyle=3
+        # Should NOT contain bounce animation
+        events = [ln for ln in c_box.splitlines() if ln.startswith("Dialogue: ") and ",Hormozi,," in ln]
+        for ev in events:
+            assert r"\t(0," not in ev
+
+        # 3. Preset with animation: "none", but explicit caption_style="pop" MUST pop!
+        p_pop = tmp_path / "preset_pop.ass"
+        burner.generate_ass(
+            words,
+            clip_start_offset=0.0,
+            ass_path=p_pop,
+            style_preset={"font": "HypeFont", "animation": "none"},
+            caption_style="pop",
+        )
+        c_pop = p_pop.read_text(encoding="utf-8")
+        assert "HypeFont" in c_pop
+        assert r"\fscx" in c_pop
+        assert r"\t(0," in c_pop
+
+        # 4. Unmapped moment_type="reaction" preserves preset's animation
+        p_react = tmp_path / "preset_react.ass"
+        burner.generate_ass(
+            words,
+            clip_start_offset=0.0,
+            ass_path=p_react,
+            style_preset={"font": "ReactFont", "animation": "pop"},
+            moment_type="reaction",
+        )
+        c_react = p_react.read_text(encoding="utf-8")
+        assert "ReactFont" in c_react
+        assert r"\fscx" in c_react
+
+    def test_font_fallback_to_arial_black_when_impact_unavailable(self) -> None:
+        """When Impact is not installed, resolve_font falls back automatically to Arial Black."""
+        def fake_installed(font_family: str) -> bool:
+            return font_family.lower() == "arial black"
+
+        with patch("streamclipper.assembly.captions._is_font_installed", side_effect=fake_installed):
+            resolved = resolve_font("Impact")
+            assert resolved == "Arial Black"
+
+        # Explicit custom font preserved even if not found in system
+        with patch("streamclipper.assembly.captions._is_font_installed", return_value=False):
+            assert resolve_font("CustomStreamerFont") == "CustomStreamerFont"
+
+    def test_chunk_words_balancing(self) -> None:
+        """Word chunking balances into natural 2-3 word segments without 1-word trailing orphans."""
+        assert _chunk_words(["HELLO", "WORLD"], max_chunk_size=3) == [["HELLO", "WORLD"]]
+        assert _chunk_words(["ONE", "TWO", "THREE"], max_chunk_size=3) == [["ONE", "TWO", "THREE"]]
+        # 4 words -> 2 and 2 (borrowing avoids trailing orphan)
+        assert _chunk_words(["ONE", "TWO", "THREE", "FOUR"], max_chunk_size=3) == [
+            ["ONE", "TWO"],
+            ["THREE", "FOUR"],
+        ]
+        # 5 words -> 3 and 2
+        assert _chunk_words(["A", "B", "C", "D", "E"], max_chunk_size=3) == [
+            ["A", "B", "C"],
+            ["D", "E"],
+        ]
+
+    def test_modernized_creator_style_presets(self, tmp_path: Path) -> None:
+        """Verify modern creator palettes (Neon Green, Electric Gold, Cyber Cyan, Fire Crimson) with 3D depth."""
+        cfg = _make_config(tmp_path)
+        presets = cfg.get("captions.style_presets")
+        assert len(presets) == 4
+
+        # Preset 1: Neon Green Pop
+        p1 = presets[0]
+        assert p1["font"] == "Impact"
+        assert p1["primary_color"] == "#FFFFFF"
+        assert p1["highlight_color"] == "#00FF66"
+        assert p1["outline_color"] == "#000000"
+        assert p1["stroke_width"] == 8
+        assert p1["shadow_offset"] == 6
+        assert p1["shadow_color"] == "&H90000000"
+        assert p1["animation"] == "bounce"
+
+        # Preset 2: Electric Gold Pop
+        p2 = presets[1]
+        assert p2["highlight_color"] == "#FFE600"
+        assert p2["animation"] == "pop"
+
+        # Preset 3: Cyber Cyan Pop
+        p3 = presets[2]
+        assert p3["highlight_color"] == "#00F0FF"
+        assert p3["animation"] == "bounce"
+
+        # Preset 4: Fire Crimson Pop
+        p4 = presets[3]
+        assert p4["highlight_color"] == "#FF2A2A"
+        assert p4["animation"] == "pop"
+
+        # Test ASS rendering with Preset 1 (Neon Green)
+        burner = AssCaptionBurner(cfg)
+        words = [WordTimestamp("viral", 0.0, 0.4), WordTimestamp("shorts", 0.4, 0.8)]
+        ass_path = tmp_path / "preset_neon.ass"
+        burner.generate_ass(words, clip_start_offset=0.0, ass_path=ass_path, style_preset=p1)
+        content = ass_path.read_text(encoding="utf-8")
+
+        assert "ScaledBorderAndShadow: yes" in content
+        # #00FF66 in BGR is &H66FF00& -> ASS style &H0066FF00
+        assert "Style: Hormozi,Impact,82,&H00FFFFFF,&H0066FF00,&H00000000,&H90000000" in content
+        assert ",1,8,6,2," in content
+        assert r"\fscx130\fscy130" in content
+
+    def test_chunked_narration_intro_outro_dynamic_flow(self, tmp_path: Path) -> None:
+        """Narration intro/outro splits 15+ word commentary into 2-3 word chunks with active highlighting and pop animation."""
+        cfg = _make_config(tmp_path)
+        burner = AssCaptionBurner(cfg)
+        long_intro = "Look closely at the water physics and insane car handling in this brand new GTA 6 clip"
+        long_outro = "He survived the entire five star chase without even scratching the paint"
+
+        ass_path = tmp_path / "chunked_flow.ass"
+        burner.generate_ass(
+            words=[],
+            clip_start_offset=0.0,
+            ass_path=ass_path,
+            narration_intro=long_intro,
+            narration_outro=long_outro,
+            intro_dur=4.5,
+            outro_dur=3.5,
+            clip_duration=20.0,
+        )
+        content = ass_path.read_text(encoding="utf-8")
+        hormozi_lines = [ln for ln in content.splitlines() if ",Hormozi,," in ln]
+
+        # Intro has 17 words -> 17 dialogue lines (one per active word highlight within its 2-3 word chunk)
+        # Outro has 12 words -> 12 dialogue lines
+        assert len(hormozi_lines) == 29
+
+        # Verify no single dialogue line contains the entire sentence (no 5-line static wall of text)
+        for ln in hormozi_lines:
+            # Strip ASS override tags to count words in the displayed subtitle line
+            clean_text = re.sub(r"\{.*?\}", "", ln.split(",,")[-1]).strip()
+            word_count = len(clean_text.split())
+            assert word_count <= 3, f"Line has too many words ({word_count}): {clean_text}"
+
+        # Verify active word pop animation tags are present on every dialogue line
+        for ln in hormozi_lines:
+            assert r"\fscx130\fscy130" in ln, f"Missing pop animation in: {ln}"
+            assert r"\c&H" in ln, f"Missing active highlight in: {ln}"
+
+        # Verify time boundaries
+        # First intro chunk starts at 0:00:00.00
+        assert hormozi_lines[0].startswith("Dialogue: 0,0:00:00.00,")
+        # Last intro line ends at 4.5s -> 0:00:04.50
+        assert "0:00:04.50,Hormozi" in hormozi_lines[16]
+
+        # First outro chunk starts at (20.0 - 3.5 = 16.5s) -> 0:00:16.50
+        assert hormozi_lines[17].startswith("Dialogue: 0,0:00:16.50,")
+        # Last outro line ends at 20.0s -> 0:00:20.00
+        assert "0:00:20.00,Hormozi" in hormozi_lines[-1]
+
+    def test_resolve_highlight_bgr_formats(self) -> None:
+        """Verify hex, named, and ASS formats parse cleanly to inline ASS BGR tag."""
+        assert _resolve_highlight_bgr("#FFE600") == "&H00E6FF&"
+        assert _resolve_highlight_bgr("yellow") == "&H00FFFF&"
+        assert _resolve_highlight_bgr("&H00FF66&") == "&H00FF66&"
+        assert _resolve_highlight_bgr("&H0066FF00") == "&H66FF00&"
+        assert _resolve_highlight_bgr("", default="&H00E6FF&") == "&H00E6FF&"
+        assert _resolve_highlight_bgr("invalid_color", default="&H00E6FF&") == "&H00E6FF&"
+
+    def test_style_preset_aliased_keys(self, tmp_path: Path) -> None:
+        """Verify style_preset accepts color/stroke_color/outline_width aliases."""
+        cfg = _make_config(tmp_path)
+        burner = AssCaptionBurner(cfg)
+        preset = {
+            "color": "#112233",
+            "stroke_color": "#445566",
+            "outline_width": 10,
+            "highlight_color": "&H00FF88&",
+        }
+        words = [WordTimestamp("alias", 0.0, 0.5)]
+        ass_path = tmp_path / "aliased.ass"
+        burner.generate_ass(words, clip_start_offset=0.0, ass_path=ass_path, style_preset=preset)
+        content = ass_path.read_text(encoding="utf-8")
+        # PrimaryColour from #112233 -> &H00332211
+        # OutlineColour from #445566 -> &H00665544
+        # Outline width = 10
+        assert "&H00332211" in content
+        assert "&H00665544" in content
+        assert ",1,10,6,2," in content
+        assert r"\c&H00FF88&" in content
+
+    def test_speech_caption_words_per_group_three(self, tmp_path: Path) -> None:
+        """Verify speech words are grouped cleanly by words_per_group=3."""
+        cfg = _make_config(tmp_path)
+        burner = AssCaptionBurner(cfg)
+        words = [
+            WordTimestamp("one", 0.0, 0.3),
+            WordTimestamp("two", 0.3, 0.6),
+            WordTimestamp("three", 0.6, 0.9),
+            WordTimestamp("four", 0.9, 1.2),
+        ]
+        ass_path = tmp_path / "grouped_speech.ass"
+        burner.generate_ass(words, clip_start_offset=0.0, ass_path=ass_path)
+        content = ass_path.read_text(encoding="utf-8")
+        hormozi_lines = [ln for ln in content.splitlines() if ",Hormozi,," in ln]
+
+        assert len(hormozi_lines) == 4
+        clean_lines = [re.sub(r"\{.*?\}", "", ln.split(",,")[-1]).strip() for ln in hormozi_lines]
+        assert clean_lines[0] == "ONE TWO THREE"
+        assert clean_lines[1] == "ONE TWO THREE"
+        assert clean_lines[2] == "ONE TWO THREE"
+        assert clean_lines[3] == "FOUR"
+
+    def test_callout_style_inherits_3d_shadow(self, tmp_path: Path) -> None:
+        """Verify Style: Callout inherits shadow_offset and shadow_color for 3D depth."""
+        cfg = _make_config(
+            tmp_path,
+            overrides={
+                "captions": {
+                    "shadow_offset": 6,
+                    "shadow_color": "&H90000000",
+                    "stroke_width": 8,
+                }
+            },
+        )
+        burner = AssCaptionBurner(cfg)
+        from streamclipper.assembly.layout import LayoutGeometry, Box
+        dummy_layout = LayoutGeometry(
+            kind="blur_fill",
+            width=1080,
+            height=1920,
+            hook_band=Box(0, 0, 1080, 100),
+            facecam_box=None,
+            game_box=Box(0, 480, 1080, 960),
+            caption_band=Box(0, 1440, 1080, 480),
+        )
+        words = [WordTimestamp("test", 0.0, 0.5)]
+        ass_path = tmp_path / "callout_3d.ass"
+        burner.generate_ass(
+            words,
+            clip_start_offset=0.0,
+            ass_path=ass_path,
+            layout=dummy_layout,
+            callout="NICE PLAY",
+            callout_window=(0.0, 1.0),
+        )
+        content = ass_path.read_text(encoding="utf-8")
+        callout_style_line = [ln for ln in content.splitlines() if ln.startswith("Style: Callout")][0]
+        # Outline 8, Shadow 6, BackColour &H90000000
+        assert "&H90000000" in callout_style_line
+        assert ",1,8,6,8," in callout_style_line
+
+    def test_sentence_style_chunked_narration_animation(self, tmp_path: Path) -> None:
+        """Narration chunks in sentence style receive pop/bounce animation tags."""
+        cfg = _make_config(
+            tmp_path,
+            overrides={
+                "captions": {
+                    "style": "sentence",
+                    "animation": "pop",
+                    "animation_scale": 1.30,
+                    "animation_duration_ms": 140,
+                }
+            },
+        )
+        burner = AssCaptionBurner(cfg)
+        events = burner._generate_narration_chunk_events(
+            "Look at this crazy car handling",
+            start_time=0.0,
+            end_time=3.0,
+            primary_inline_bgr="&HFFFFFF&",
+        )
+        assert len(events) >= 2
+        for ev in events:
+            assert r"\fscx130\fscy130" in ev
+
+
+

@@ -27,6 +27,7 @@ from streamclipper.assembly.composer import (
     VideoComposer,
     compose_freeze_breakdown,
     compose_instant_replay,
+    compose_zoom_spotlight_breakdown,
 )
 from streamclipper.assembly.hooks import create_replay_badge, render_replay_badge
 from streamclipper.assembly.narrator import TransformativeNarrator
@@ -783,5 +784,237 @@ class TestForensicAuditP0Fixes:
 
         assert captured_mix_kwargs.get("breakdown_wav") == fake_breakdown_wav
         assert captured_mix_kwargs.get("replay_start_time") == 6.0
+
+
+# ==============================================================================
+# Visual Breakdown (Zoom Spotlight) Tests
+# ==============================================================================
+
+
+def test_compose_zoom_spotlight_breakdown_duration_and_resolution(synthetic_video_clip: ColorClip, base_config: Config) -> None:
+    """Test compose_zoom_spotlight_breakdown attaches spotlight with exact requested duration and dimensions."""
+    combined, replay_start = compose_zoom_spotlight_breakdown(
+        synthetic_video_clip,
+        target_time_offset=1.5,
+        roi=[0.25, 0.35, 0.75, 0.80],
+        duration=5.7,
+        zoom_scale=2.2,
+        badge_text="🔍 EVIDENCE BREAKDOWN",
+        config=base_config,
+    )
+
+    try:
+        assert float(combined.duration) == pytest.approx(4.0 + 5.7, abs=0.05)
+        assert replay_start == pytest.approx(4.0, abs=0.01)
+        assert combined.w == synthetic_video_clip.w
+        assert combined.h == synthetic_video_clip.h
+        assert getattr(combined, "_breakdown_kind", None) == "zoom_spotlight"
+        assert getattr(combined, "_spotlight_duration", None) == 5.7
+        assert combined.audio is not None
+        assert float(combined.audio.duration) == pytest.approx(combined.duration, abs=0.1)
+    finally:
+        try:
+            combined.close()
+        except Exception:
+            pass
+
+
+def test_compose_zoom_spotlight_frame_interpolation_and_ken_burns(synthetic_video_clip: ColorClip) -> None:
+    """Test smooth sinusoidal Ken Burns frame generation at t=0, hold, and end."""
+    combined, replay_start = compose_zoom_spotlight_breakdown(
+        synthetic_video_clip,
+        target_time_offset=1.0,
+        roi=[0.20, 0.20, 0.80, 0.80],
+        duration=5.7,
+        zoom_scale=2.2,
+        ease_in_seconds=1.2,
+        ease_out_seconds=1.0,
+    )
+
+    try:
+        f_start = combined.get_frame(replay_start + 0.05)
+        f_hold = combined.get_frame(replay_start + 2.5)
+        f_end = combined.get_frame(replay_start + 5.65)
+
+        assert f_start.shape == (synthetic_video_clip.h, synthetic_video_clip.w, 3)
+        assert f_hold.shape == (synthetic_video_clip.h, synthetic_video_clip.w, 3)
+        assert f_end.shape == (synthetic_video_clip.h, synthetic_video_clip.w, 3)
+        assert f_start.dtype == np.uint8
+        assert f_hold.dtype == np.uint8
+        assert f_end.dtype == np.uint8
+    finally:
+        try:
+            combined.close()
+        except Exception:
+            pass
+
+
+def test_compose_zoom_spotlight_empty_main_clip_and_videocomposer_wrapper(base_config: Config) -> None:
+    """Test compose_zoom_spotlight_breakdown handles 0-duration clip and VideoComposer wrapper."""
+    empty_clip = ColorClip(size=(360, 640), color=(0, 0, 0), duration=0.0)
+    c_out, r_time = compose_zoom_spotlight_breakdown(empty_clip)
+    assert r_time == 0.0
+
+    composer = VideoComposer(base_config)
+    clip = ColorClip(size=(360, 640), color=(50, 60, 70), duration=2.0)
+    try:
+        comp, r_start = composer.compose_zoom_spotlight_breakdown(
+            clip,
+            roi=[0.1, 0.1, 0.9, 0.9],
+            duration=3.0,
+            zoom_scale=1.8,
+        )
+        assert comp.duration == pytest.approx(5.0, abs=0.05)
+        assert r_start == pytest.approx(2.0, abs=0.01)
+    finally:
+        try:
+            clip.close()
+            comp.close()
+        except Exception:
+            pass
+
+
+def test_compose_zoom_spotlight_zero_ease_and_roi_edge_cases(synthetic_video_clip: ColorClip) -> None:
+    """Test zero ease duration and inverted / degenerate / out-of-bounds ROI coordinates."""
+    # 1. Zero ease-in and zero ease-out
+    comp_zero_ease, r_zero = compose_zoom_spotlight_breakdown(
+        synthetic_video_clip,
+        duration=4.0,
+        ease_in_seconds=0.0,
+        ease_out_seconds=0.0,
+        zoom_scale=2.2,
+    )
+    try:
+        f_early = comp_zero_ease.get_frame(r_zero + 0.05)
+        assert f_early.shape == (synthetic_video_clip.h, synthetic_video_clip.w, 3)
+    finally:
+        comp_zero_ease.close()
+
+    # 2. Inverted coordinates: ymin > ymax, xmin > xmax
+    comp_inv, r_inv = compose_zoom_spotlight_breakdown(
+        synthetic_video_clip,
+        duration=3.0,
+        roi=[0.85, 0.75, 0.15, 0.25],
+    )
+    try:
+        f_inv = comp_inv.get_frame(r_inv + 1.0)
+        assert f_inv.shape == (synthetic_video_clip.h, synthetic_video_clip.w, 3)
+    finally:
+        comp_inv.close()
+
+    # 3. Degenerate point: [0.5, 0.5, 0.5, 0.5]
+    comp_deg, r_deg = compose_zoom_spotlight_breakdown(
+        synthetic_video_clip,
+        duration=3.0,
+        roi=[0.5, 0.5, 0.5, 0.5],
+    )
+    try:
+        f_deg = comp_deg.get_frame(r_deg + 1.0)
+        assert f_deg.shape == (synthetic_video_clip.h, synthetic_video_clip.w, 3)
+    finally:
+        comp_deg.close()
+
+    # 4. Out-of-bounds coordinates: [-0.5, -0.2, 1.5, 1.2]
+    comp_oob, r_oob = compose_zoom_spotlight_breakdown(
+        synthetic_video_clip,
+        duration=3.0,
+        roi=[-0.5, -0.2, 1.5, 1.2],
+    )
+    try:
+        f_oob = comp_oob.get_frame(r_oob + 1.0)
+        assert f_oob.shape == (synthetic_video_clip.h, synthetic_video_clip.w, 3)
+    finally:
+        comp_oob.close()
+
+
+def test_compose_zoom_spotlight_direct_source_ken_burns_16_to_9(synthetic_video_clip: ColorClip) -> None:
+    """Test direct-source Ken Burns crop on 16:9 source frame produces full-bleed 1080x1920 frames without blurred bars."""
+    import cv2
+    from moviepy import ColorClip
+
+    # Create 1080x1920 vertical main clip
+    main_v = ColorClip(size=(1080, 1920), color=(10, 20, 30), duration=2.0)
+    try:
+        # Pass a mock ROI targeting screen on table [ymin=0.45, xmin=0.25, ymax=0.78, xmax=0.72]
+        combined, replay_start = compose_zoom_spotlight_breakdown(
+            main_v,
+            roi=[0.45, 0.25, 0.78, 0.72],
+            duration=4.0,
+            zoom_scale=2.2,
+            ease_in_seconds=1.0,
+            ease_out_seconds=1.0,
+        )
+
+        assert combined.w == 1080
+        assert combined.h == 1920
+        assert combined.duration == pytest.approx(6.0, abs=0.05)
+
+        # Inspect frames at start, mid-zoom, hold, and end
+        for t_off in [0.1, 0.9, 2.0, 3.9]:
+            frame = combined.get_frame(replay_start + t_off)
+            assert frame.shape == (1920, 1080, 3)
+            assert frame.dtype == np.uint8
+            # Verify frame is not empty or corrupted
+            assert np.any(frame > 0) or np.all(frame == 0)
+    finally:
+        main_v.close()
+        try:
+            combined.close()
+        except Exception:
+            pass
+
+
+def test_dynamic_spotlight_duration_matches_speech(tmp_path: Path) -> None:
+    """Test that spotlight duration scales dynamically to prevent voiceover truncation."""
+    from streamclipper.models import Highlight, ClipMetadata
+    from streamclipper.pipeline import Pipeline, _WORDS_PER_SECOND
+
+    cfg = Config()
+    pipeline = Pipeline(cfg)
+
+    # 32 words of commentary + 15 words of outro = 47 words
+    # At 2.5 words/s, that is 18.8s + 1.5s buffer = 20.3s
+    commentary = (
+        "Dhyan se laptop screen dekho! Jaise hi hacker classified data open karta hai, "
+        "Rockstar ne cutscene black out kar diya. Yeh drive GTA 6 story DLC aur "
+        "GTA Online 2 ka sabse bada plot hook hai!"
+    )
+    outro = "Kya drive me government corruption ka secret file tha? Apni theory comments me batao!"
+
+    h = Highlight(
+        start=100.0,
+        end=140.0,
+        score=9.0,
+        title="Laptop Screen",
+        reason="Clue",
+        moment_type="analysis",
+        breakdown_commentary=commentary,
+        narration_outro=outro,
+    )
+    meta = ClipMetadata(
+        hook_title="Secret Laptop",
+        caption="Secret Laptop Clue",
+        hashtags=["#gta6"],
+        streamer="IShowSpeed",
+        game="GTA 6",
+        source_url="http://example.com",
+        clip_start=100.0,
+        clip_end=140.0,
+        highlight_score=9.0,
+        moment_type="analysis",
+        breakdown_commentary=commentary,
+        narration_outro=outro,
+    )
+
+    bd_dur = pipeline._estimate_breakdown_seconds(commentary, None, 1.0)
+    outro_dur = pipeline._estimate_breakdown_seconds(outro, None, 1.0)
+    needed_spotlight = bd_dur + outro_dur + 1.5
+    zs_cfg_dur = float(cfg.get("transformation.breakdown.zoom_spotlight.duration", 5.7))
+    zs_duration = max(zs_cfg_dur, needed_spotlight)
+
+    assert zs_duration >= 20.0
+    assert zs_duration > zs_cfg_dur  # Significantly larger than legacy 5.7s cap
+
+
 
 

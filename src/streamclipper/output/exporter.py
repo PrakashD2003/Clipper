@@ -79,8 +79,14 @@ class Exporter:
         ).strip().lower()
         raw_fps = config.get("video.fps", 30)
         self.fps = int(raw_fps) if raw_fps is not None else 30
-        raw_crf = config.get("video.crf", 23)
-        self.crf = int(raw_crf) if raw_crf is not None else 23
+        raw_crf = config.get("video.crf", 19)
+        self.crf = int(raw_crf) if raw_crf is not None else 19
+        self.preset = str(config.get("video.preset", "p4") or "p4").strip()
+        self.libx264_preset = str(config.get("video.libx264_preset", "medium") or "medium").strip()
+        self.bitrate = str(config.get("video.bitrate", "12M") or "12M").strip()
+        self.maxrate = str(config.get("video.maxrate", "16M") or "16M").strip()
+        self.bufsize = str(config.get("video.bufsize", "24M") or "24M").strip()
+        self.pix_fmt = str(config.get("video.pix_fmt", "yuv420p") or "yuv420p").strip()
         self.temp_dir = Path(config.get("general.temp_dir", "./temp"))
         self.caption_burner = AssCaptionBurner(config)
         self.narrator = TransformativeNarrator(config)
@@ -128,9 +134,26 @@ class Exporter:
         """Build single-pass FFmpeg finalization command when ASS burn-in is not needed."""
         normalized_codec = str(codec or "libx264").strip().lower()
         if normalized_codec == "h264_nvenc":
-            v_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", str(self.crf)]
+            eff_p = self.preset or "p4"
+            v_args = ["-c:v", "h264_nvenc", "-preset", eff_p, "-cq", str(self.crf)]
+            if self.bitrate:
+                v_args.extend(["-rc:v", "vbr", "-b:v", str(self.bitrate)])
+                if self.maxrate:
+                    v_args.extend(["-maxrate", str(self.maxrate)])
+                if self.bufsize:
+                    v_args.extend(["-bufsize", str(self.bufsize)])
+                v_args.extend(["-spatial-aq", "1", "-temporal-aq", "1"])
+            if self.pix_fmt:
+                v_args.extend(["-pix_fmt", str(self.pix_fmt)])
         else:
             v_args = ["-c:v", "libx264", "-crf", str(self.crf)]
+            eff_p = self.preset
+            if eff_p in ("p1", "p2", "p3", "p4", "p5", "p6", "p7"):
+                eff_p = getattr(self, "libx264_preset", "medium") or "medium"
+            if eff_p:
+                v_args.extend(["-preset", str(eff_p)])
+            if self.pix_fmt:
+                v_args.extend(["-pix_fmt", str(self.pix_fmt)])
         return [
             "ffmpeg",
             "-y",
@@ -193,6 +216,8 @@ class Exporter:
         duck_full: bool = False,
         language: str | None = None,
         style_preset: dict[str, Any] | None = None,
+        caption_style: str | None = None,
+        moment_type: str | None = None,
     ) -> Path:
         """Render composed clip, mix narrator ducking, burn ASS captions+chat ticker, and release handles."""
         self.last_export_info = self._empty_export_info()
@@ -291,30 +316,52 @@ class Exporter:
                         self.narrator.enabled = True
                         self.narrator.mode = effective_mode
 
-                    intro_wav, outro_wav = self.narrator.prepare_narration_tracks(
-                        narration_intro=narration_intro,
-                        narration_outro=narration_outro,
-                        voice_intro_path=voice_intro_path,
-                        voice_outro_path=voice_outro_path,
-                        temp_dir=work_dir,
-                        clip_duration=clip_duration or None,
-                    )
+                    prep_kwargs: dict[str, Any] = {
+                        "narration_intro": narration_intro,
+                        "narration_outro": narration_outro,
+                        "voice_intro_path": voice_intro_path,
+                        "voice_outro_path": voice_outro_path,
+                        "temp_dir": work_dir,
+                        "clip_duration": clip_duration or None,
+                    }
+                    if language is not None:
+                        prep_kwargs["language"] = language
+                    try:
+                        intro_wav, outro_wav = self.narrator.prepare_narration_tracks(**prep_kwargs)
+                    except TypeError:
+                        prep_kwargs.pop("language", None)
+                        intro_wav, outro_wav = self.narrator.prepare_narration_tracks(**prep_kwargs)
+
                     breakdown_wav = None
                     if effective_mode == "breakdown" and (
                         (breakdown_commentary and str(breakdown_commentary).strip())
                         or voice_breakdown_path is not None
                     ):
-                        breakdown_wav = self.narrator.prepare_breakdown_track(
-                            breakdown_commentary=breakdown_commentary,
-                            voice_breakdown_path=voice_breakdown_path,
-                            temp_dir=work_dir,
-                        )
+                        bd_kwargs: dict[str, Any] = {
+                            "breakdown_commentary": breakdown_commentary,
+                            "voice_breakdown_path": voice_breakdown_path,
+                            "temp_dir": work_dir,
+                        }
+                        if language is not None:
+                            bd_kwargs["language"] = language
+                        try:
+                            breakdown_wav = self.narrator.prepare_breakdown_track(**bd_kwargs)
+                        except TypeError:
+                            bd_kwargs.pop("language", None)
+                            breakdown_wav = self.narrator.prepare_breakdown_track(**bd_kwargs)
 
                     callout_wav = None
                     if callout and str(callout).strip():
                         prep_callout = getattr(self.narrator, "prepare_callout_track", None)
                         if callable(prep_callout):
-                            callout_wav = prep_callout(callout, temp_dir=work_dir)
+                            co_kwargs: dict[str, Any] = {"temp_dir": work_dir}
+                            if language is not None:
+                                co_kwargs["language"] = language
+                            try:
+                                callout_wav = prep_callout(callout, **co_kwargs)
+                            except TypeError:
+                                co_kwargs.pop("language", None)
+                                callout_wav = prep_callout(callout, **co_kwargs)
 
                     if (
                         intro_wav is not None
@@ -457,6 +504,14 @@ class Exporter:
                 if has_callout_card:
                     layout_kwargs["callout"] = callout
                     layout_kwargs["callout_window"] = callout_window
+                burner_style_kwargs: dict[str, Any] = {}
+                if style_preset:
+                    burner_style_kwargs["style_preset"] = style_preset
+                if caption_style:
+                    burner_style_kwargs["caption_style"] = caption_style
+                if moment_type:
+                    burner_style_kwargs["moment_type"] = moment_type
+
                 self.caption_burner.generate_ass(
                     words=words or [],
                     clip_start_offset=clip_start_offset,
@@ -470,7 +525,7 @@ class Exporter:
                     breakdown_callout="" if is_raw else breakdown_callout,
                     breakdown_window=None if is_raw else breakdown_window,
                     **layout_kwargs,
-                    **({"style_preset": style_preset} if style_preset else {}),
+                    **burner_style_kwargs,
                 )
                 try:
                     result_path = self.caption_burner.burn_captions(

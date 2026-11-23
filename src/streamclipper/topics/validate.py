@@ -215,7 +215,7 @@ def validate_plan(config: Config, plan: TopicPlan) -> list[str]:
 
     valid_indexes = {p.index for p in plan.points}
     short_min = float(config.get("topics.short_min_seconds", 35))
-    short_max = float(config.get("topics.short_max_seconds", 60))
+    short_max = float(config.get("topics.short_max_seconds", 180))
 
     teaser = next((s for s in plan.shorts if s.slot == "teaser"), None)
     short_a = next((s for s in plan.shorts if s.slot == "short_a"), None)

@@ -178,10 +178,17 @@ class Highlight(SerializableModel):
     sub_clips: list[dict[str, Any]] = field(default_factory=list)   # Optional [{"start": s, "end": e, "label": "Setup"}]
     breakdown_commentary: str = ""     # Spoken breakdown analyzing mechanics/physics/mistake during replay
     breakdown_callout: str = ""        # 2-5 word on-screen callout note
+    breakdown_kind: str = "auto"       # auto | slow_mo | zoom_spotlight
+    breakdown_target_time: float | None = None  # Exact stream second of visual detail
+    breakdown_roi: list[float] = field(default_factory=list)  # [ymin, xmin, ymax, xmax] (0.0 - 1.0)
+    breakdown_zoom: float = 2.2        # Zoom magnification factor into ROI
+    breakdown_focus: str = ""          # e.g. "laptop screen", "classified file"
     music_risk: str = "CLEAN"          # CLEAN | LOW | UNKNOWN | HIGH_MUSIC_DETECTED
     music_confidence: float = 0.0      # Harmonic-percussive music confidence 0.0-1.0
     bounds_adjustment: str = ""        # How the clip range was fitted to length limits ("" = unchanged)
     callout: str = ""                  # 4-6 word voiced callout said during the build-up
+    transformation_mode: str = "auto"  # auto | narrative | story | breakdown | raw
+    caption_style: str = "auto"        # auto | hormozi | bounce | pop | karaoke | box | single_word | sentence
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Highlight":
@@ -216,12 +223,25 @@ class Highlight(SerializableModel):
             sub_clips=list(data.get("sub_clips") or []),
             breakdown_commentary=data.get("breakdown_commentary") or "",
             breakdown_callout=data.get("breakdown_callout") or "",
+            breakdown_kind=str(data.get("breakdown_kind") or "auto"),
+            breakdown_target_time=(
+                float(data["breakdown_target_time"])
+                if data.get("breakdown_target_time") is not None
+                else None
+            ),
+            breakdown_roi=[float(x) for x in (data.get("breakdown_roi") or [])],
+            breakdown_zoom=float(
+                data.get("breakdown_zoom") if data.get("breakdown_zoom") is not None else 2.2
+            ),
+            breakdown_focus=str(data.get("breakdown_focus") or ""),
             music_risk=data.get("music_risk") or "CLEAN",
             music_confidence=float(
                 data.get("music_confidence") if data.get("music_confidence") is not None else 0.0
             ),
             bounds_adjustment=data.get("bounds_adjustment") or "",
             callout=data.get("callout") or "",
+            transformation_mode=str(data.get("transformation_mode") or data.get("mode") or "auto"),
+            caption_style=str(data.get("caption_style") or "auto"),
         )
 
 
@@ -265,10 +285,16 @@ class ClipMetadata(SerializableModel):
     transformation_mode: str = "narrative"
     breakdown_commentary: str = ""
     breakdown_callout: str = ""
+    breakdown_kind: str = "auto"
+    breakdown_target_time: float | None = None
+    breakdown_roi: list[float] = field(default_factory=list)
+    breakdown_zoom: float = 2.2
+    breakdown_focus: str = ""
     music_risk: str = "CLEAN"
     music_confidence: float = 0.0
     callout: str = ""
     narration_language: str = ""
+    caption_style: str = "auto"
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ClipMetadata":
@@ -289,12 +315,24 @@ class ClipMetadata(SerializableModel):
             transformation_mode=data.get("transformation_mode") or "narrative",
             breakdown_commentary=data.get("breakdown_commentary") or "",
             breakdown_callout=data.get("breakdown_callout") or "",
+            breakdown_kind=str(data.get("breakdown_kind") or "auto"),
+            breakdown_target_time=(
+                float(data["breakdown_target_time"])
+                if data.get("breakdown_target_time") is not None
+                else None
+            ),
+            breakdown_roi=[float(x) for x in (data.get("breakdown_roi") or [])],
+            breakdown_zoom=float(
+                data.get("breakdown_zoom") if data.get("breakdown_zoom") is not None else 2.2
+            ),
+            breakdown_focus=str(data.get("breakdown_focus") or ""),
             music_risk=data.get("music_risk") or "CLEAN",
             music_confidence=float(
                 data.get("music_confidence") if data.get("music_confidence") is not None else 0.0
             ),
             callout=data.get("callout") or "",
             narration_language=data.get("narration_language", "") or "",
+            caption_style=str(data.get("caption_style") or "auto"),
         )
 
 

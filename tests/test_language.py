@@ -186,3 +186,97 @@ def test_L4_elevenlabs_uses_per_language_voice(tmp_path, monkeypatch):
     # Unset Hinglish voice falls back to the main voice.
     n3 = _narrator(tmp_path, '  elevenlabs_voice_id: "en_voice"\n')
     assert n3._elevenlabs_voice_for("hinglish") == "en_voice"
+
+
+def test_L4_english_elevenlabs_prioritized_with_fallbacks(tmp_path, monkeypatch):
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "test_key_123")
+    n = _narrator(
+        tmp_path,
+        '  elevenlabs_voice_id: "el_voice"\n  tts_engines: [kokoro, elevenlabs, edge-tts]\n',
+    )
+    chain = n._engine_chain("english")
+    assert chain[0] == "elevenlabs"
+    assert "kokoro" in chain
+    assert "edge-tts" in chain
+
+    # Test fallback execution when ElevenLabs fails during synthesis
+    called: list[str] = []
+
+    def fake_run(name, text, out_wav, language=None):
+        called.append(name)
+        if name == "edge-tts":
+            out_wav = Path(out_wav)
+            out_wav.write_bytes(b"RIFFxxxx")
+            return out_wav
+        return None
+
+    monkeypatch.setattr(n, "_run_engine", fake_run)
+    res = n.synthesize_speech("Test fallback speech", tmp_path / "fallback.wav", language="english")
+    assert res is not None
+    assert called == ["elevenlabs", "kokoro", "edge-tts"]
+
+
+def test_L4_english_elevenlabs_prepended_when_not_in_chain(tmp_path, monkeypatch):
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "test_key_123")
+    n = _narrator(
+        tmp_path,
+        '  elevenlabs_voice_id: "el_voice"\n  tts_engines: [chatterbox, kokoro, edge-tts]\n',
+    )
+    chain = n._engine_chain("english")
+    assert chain[0] == "elevenlabs"
+    assert chain[1:] == ["chatterbox", "kokoro", "edge-tts"]
+
+
+def test_L4_english_elevenlabs_omitted_when_unconfigured(tmp_path, monkeypatch):
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "test_key_123")
+    n = _narrator(
+        tmp_path,
+        '  elevenlabs_voice_id: ""\n  tts_engines: [kokoro, edge-tts]\n',
+    )
+    chain = n._engine_chain("english")
+    assert "elevenlabs" not in chain
+    assert chain == ["kokoro", "edge-tts"]
+
+
+def test_exporter_forwards_language_cleanly_and_tolerates_legacy_mocks(tmp_path):
+    from unittest.mock import patch
+    from streamclipper.output.exporter import Exporter
+
+    cfg = Config()
+    exporter = Exporter(cfg)
+
+    # 1. Calling export with language="hinglish" updates narrator.language
+    passed_args: dict = {}
+
+    def fake_prep(*args, **kwargs):
+        passed_args.update(kwargs)
+        return None, None
+
+    class FakeClip:
+        duration = 10.0
+        audio = None
+
+        def write_videofile(self, *a, **kw):
+            pass
+
+        def close(self):
+            pass
+
+    with (
+        patch.object(exporter.narrator, "prepare_narration_tracks", side_effect=fake_prep),
+        patch.object(exporter, "_finalize_without_captions", side_effect=lambda inp, out: out),
+    ):
+        exporter.export(
+            clip=FakeClip(),
+            words=[],
+            clip_start_offset=0.0,
+            output_path=tmp_path / "lang_test.mp4",
+            narration_intro="Intro text",
+            mode="narrative",
+            language="hinglish",
+        )
+
+    assert exporter.narrator.language == "hinglish"
+    assert passed_args.get("language") == "hinglish"
+
+

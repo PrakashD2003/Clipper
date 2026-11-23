@@ -492,14 +492,14 @@ class TestRemapTimelineForBeats:
         assert comp.duration == pytest.approx(6.0)
         assert comp._layout.kind == "stacked"
         gb = comp._layout.game_box
-        assert (gb.y, gb.h) == (880, 608)
+        assert (gb.y, gb.h) == (660, 608)
 
         plain = composer.compose(clip, facecam=facecam)
         zoomed_frame = comp.get_frame(2.5)
         plain_frame = plain.get_frame(2.5)
         # Outside game_box: identical
-        assert np.array_equal(zoomed_frame[:880], plain_frame[:880])
-        assert np.array_equal(zoomed_frame[1488:], plain_frame[1488:])
+        assert np.array_equal(zoomed_frame[:660], plain_frame[:660])
+        assert np.array_equal(zoomed_frame[1268:], plain_frame[1268:])
         # Inside game_box the punch-in occurred (the red/blue edge moved)
         assert not np.array_equal(
             zoomed_frame[gb.y : gb.y2, :], plain_frame[gb.y : gb.y2, :]

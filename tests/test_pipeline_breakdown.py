@@ -762,7 +762,9 @@ class TestOutputQualityV3Pipeline:
         assert "callout" not in info["export"].call_args[1]
 
     def test_E5_budget_shrinks_replay_before_moment(self, tmp_path: Path) -> None:
-        pipeline = Pipeline(_make_config(tmp_path))
+        cfg = _make_config(tmp_path)
+        cfg._data.setdefault("output", {})["max_final_seconds"] = 59
+        pipeline = Pipeline(cfg)
         plan = pipeline._plan_budget(
             moment_dur=50.0, mode="breakdown", replay_window=5.0, replay_speed=0.5
         )
@@ -771,7 +773,9 @@ class TestOutputQualityV3Pipeline:
         assert plan["total"] <= 59.0 + 1e-6
 
     def test_E5_budget_trims_moment_when_replay_at_minimum(self, tmp_path: Path) -> None:
-        pipeline = Pipeline(_make_config(tmp_path))
+        cfg = _make_config(tmp_path)
+        cfg._data.setdefault("output", {})["max_final_seconds"] = 59
+        pipeline = Pipeline(cfg)
         plan = pipeline._plan_budget(
             moment_dur=80.0, mode="breakdown", replay_window=5.0, replay_speed=0.5
         )
@@ -788,7 +792,7 @@ class TestOutputQualityV3Pipeline:
             narration_seconds=6.0,
             callout_seconds=1.0,
         )
-        assert plan["moment"] < 40.0
+        assert plan["moment"] == 40.0  # Gameplay trimming removed — preserves full event context
         raw = pipeline._plan_budget(moment_dur=40.0, mode="raw")
         assert raw["moment"] == 40.0
         out = tmp_path / "clip.json"
@@ -864,4 +868,194 @@ class TestOutputQualityV3Pipeline:
         cfg._data.setdefault("output", {})["write_post_file"] = False
         _run_assemble(tmp_path, config=cfg)
         assert not (tmp_path / "out_post.txt").exists()
+
+    def test_pipeline_auto_resolves_zoom_spotlight_by_moment_type(self, tmp_path: Path) -> None:
+        """Highlight with moment_type 'analysis' or 'graphics_detail' resolves to zoom_spotlight."""
+        cfg = _make_config(tmp_path)
+        pipeline = Pipeline(cfg)
+
+        h_analysis = Highlight(
+            start=10.0, end=25.0, score=8.5, title="Screen Analysis", reason="Examining clue",
+            moment_type="analysis", breakdown_commentary="Analyzing this clue.", peak_time=15.0,
+            breakdown_kind="auto",
+        )
+        mode, _ = pipeline._resolve_highlight_mode("auto", h_analysis)
+        assert mode == "breakdown"
+        assert h_analysis.breakdown_kind == "zoom_spotlight"
+
+        h_graphics = Highlight(
+            start=100.0, end=130.0, score=8.5, title="Texture Detail", reason="Found hidden file",
+            moment_type="graphics_detail", breakdown_commentary="Look at this texture detail.", peak_time=115.0,
+            breakdown_kind="auto",
+        )
+        mode, _ = pipeline._resolve_highlight_mode("breakdown", h_graphics)
+        assert mode == "breakdown"
+        assert h_graphics.breakdown_kind == "zoom_spotlight"
+
+        # lore_secret sets breakdown_kind to zoom_spotlight even when downgraded to narrative
+        h_lore = Highlight(
+            start=100.0, end=130.0, score=8.5, title="Secret Easter Egg", reason="Found secret",
+            moment_type="lore_secret", breakdown_commentary="Secret easter egg.", peak_time=115.0,
+            breakdown_kind="auto",
+        )
+        mode_lore, _ = pipeline._resolve_highlight_mode("auto", h_lore)
+        assert mode_lore == "narrative"
+        assert h_lore.breakdown_kind == "zoom_spotlight"
+
+    def test_pipeline_auto_resolves_zoom_spotlight_by_keywords(self, tmp_path: Path) -> None:
+        """Highlight with commentary mentioning 'screen', 'laptop', or 'file' resolves to zoom_spotlight."""
+        cfg = _make_config(tmp_path)
+        pipeline = Pipeline(cfg)
+
+        h = Highlight(
+            start=19169.0, end=19204.0, score=9.0, title="Laptop Clue", reason="Laptop open",
+            moment_type="clutch",
+            breakdown_commentary="Dhyan se laptop screen dekho! Hacker classified file open karta hai.",
+            peak_time=19195.0,
+            breakdown_kind="auto",
+        )
+        mode, _ = pipeline._resolve_highlight_mode("auto", h)
+        assert mode == "breakdown"
+        assert h.breakdown_kind == "zoom_spotlight"
+
+    def test_pipeline_resolves_slow_mo_for_physical_action(self, tmp_path: Path) -> None:
+        """Action/combat breakdown without keywords resolves to slow_mo."""
+        cfg = _make_config(tmp_path)
+        pipeline = Pipeline(cfg)
+
+        h = Highlight(
+            start=50.0, end=80.0, score=8.0, title="Car Stunt", reason="Insane jump",
+            moment_type="fail",
+            breakdown_commentary="Notice how the vehicle physics flipped upside down on the curb.",
+            peak_time=65.0,
+            breakdown_kind="auto",
+        )
+        mode, _ = pipeline._resolve_highlight_mode("breakdown", h)
+        assert mode == "breakdown"
+        assert h.breakdown_kind == "slow_mo"
+
+    def test_pipeline_visual_localization_tier1_and_tier4(self, tmp_path: Path) -> None:
+        """Test 4-tier visual localization cascade for Tier 1 (explicit) and Tier 4 (heuristic)."""
+        cfg = _make_config(tmp_path)
+        pipeline = Pipeline(cfg)
+
+        # Tier 1: Explicit target time and ROI
+        h_explicit = Highlight(
+            start=100.0, end=130.0, score=8.0, title="Document", reason="Doc",
+            breakdown_target_time=102.5,
+            breakdown_roi=[0.3, 0.4, 0.7, 0.8],
+        )
+        t1, roi1 = pipeline._resolve_breakdown_target_time_and_roi(h_explicit, None, 100.0, 130.0)
+        assert t1 == 102.5
+        assert roi1 == [0.3, 0.4, 0.7, 0.8]
+
+        # Tier 1 Reverse-Angle Guard: t=19188.0s (camera behind laptop lid) falls back to setup phase
+        h_reverse = Highlight(
+            start=19169.0, end=19204.0, score=9.0, title="Secret Cutscene", reason="Laptop scene",
+            breakdown_target_time=19188.0,
+            breakdown_roi=[],
+            breakdown_commentary="Dhyan se laptop screen dekho!",
+        )
+        t_rev, roi_rev = pipeline._resolve_breakdown_target_time_and_roi(h_reverse, None, 19169.0, 19204.0)
+        assert t_rev == pytest.approx(19171.0, abs=0.01)
+        assert roi_rev == [0.45, 0.25, 0.78, 0.72]
+
+        # Tier 4: Fallback to Setup Heuristic (t = clip_start + min(2.0s, 0.20 * duration) = 19171.0s)
+        # Screen-focus keyword in title isolates screen ROI [0.45, 0.25, 0.78, 0.72]
+        h_clip06 = Highlight(
+            start=19169.0, end=19204.0, score=9.0, title="Laptop Screen", reason="Laptop open",
+        )
+        t4, roi4 = pipeline._resolve_breakdown_target_time_and_roi(h_clip06, None, 19169.0, 19204.0)
+        assert t4 == pytest.approx(19171.0, abs=0.01)
+        assert len(roi4) == 4
+        assert roi4 == [0.45, 0.25, 0.78, 0.72]
+
+        # Non-screen moment without screen keywords returns generic center ROI
+        h_action = Highlight(
+            start=10.0, end=30.0, score=7.0, title="Car Chase", reason="Fast driving",
+        )
+        t_act, roi_act = pipeline._resolve_breakdown_target_time_and_roi(h_action, None, 10.0, 30.0)
+        assert t_act == pytest.approx(12.0, abs=0.01)
+        assert roi_act == [0.20, 0.20, 0.80, 0.80]
+
+    def test_pipeline_assembles_zoom_spotlight_call(self, tmp_path: Path) -> None:
+        """Verify that _assemble_highlight dispatches to compose_zoom_spotlight_breakdown when breakdown_kind is zoom_spotlight."""
+        from unittest.mock import patch, MagicMock
+        from moviepy import ColorClip
+        cfg = _make_config(tmp_path)
+        pipeline = Pipeline(cfg)
+
+        h = Highlight(
+            start=10.0, end=30.0, score=8.5, title="Laptop Screen Detail", reason="Clue",
+            moment_type="analysis",
+            breakdown_commentary="Check out the text on the laptop screen.",
+            breakdown_kind="zoom_spotlight",
+            breakdown_target_time=13.5,
+            breakdown_roi=[0.25, 0.35, 0.75, 0.80],
+            peak_time=20.0,
+        )
+        metadata = ClipMetadata(
+            hook_title="Laptop Screen Detail",
+            caption="Check out this detail",
+            hashtags=["#gta6"],
+            streamer="TestStreamer",
+            game="GTA 6",
+            source_url="https://youtube.com/watch?v=abc12345",
+            clip_start=10.0,
+            clip_end=30.0,
+            highlight_score=8.5,
+            moment_type="analysis",
+            breakdown_commentary="Check out the text on the laptop screen.",
+            breakdown_kind="zoom_spotlight",
+            breakdown_target_time=13.5,
+            breakdown_roi=[0.25, 0.35, 0.75, 0.80],
+            transformation_mode="breakdown",
+        )
+
+        fake_comp = ColorClip(size=(1080, 1920), color=(0, 0, 0), duration=20.0)
+        fake_comp._trim_start = 0.0
+        fake_comp._source_clips = [fake_comp]
+        fake_comp._source_clip = fake_comp
+        fake_comp._layout = None
+
+        spot_comp = ColorClip(size=(1080, 1920), color=(0, 0, 0), duration=25.7)
+        spot_comp._source_clips = [fake_comp]
+        spot_comp._source_clip = fake_comp
+        spot_comp._layout = None
+
+        clip_file = tmp_path / "clip.mp4"
+        clip_file.write_bytes(b"dummy")
+
+        fake_res = ClipResult(
+            video_path=clip_file,
+            metadata_path=None,
+            metadata=metadata,
+            duration_seconds=25.7,
+        )
+
+        with patch("streamclipper.assembly.facecam.FacecamDetector.detect", return_value=None), \
+             patch("streamclipper.assembly.composer.VideoComposer.compose", return_value=fake_comp), \
+             patch("streamclipper.assembly.composer.VideoComposer.compose_zoom_spotlight_breakdown", return_value=(spot_comp, 20.0)) as mock_spotlight, \
+             patch("streamclipper.output.exporter.Exporter.export", return_value=clip_file) as mock_export, \
+             patch("streamclipper.output.organizer.FileOrganizer.save_clip", return_value=fake_res), \
+             patch.object(pipeline, "_hard_trim", return_value=25.7), \
+             patch.object(pipeline, "_narration_gate_reason", return_value=""), \
+             patch("pathlib.Path.is_file", return_value=True):
+
+            res = pipeline._assemble_highlight(
+                highlight=h,
+                metadata=metadata,
+                segment_paths=[tmp_path / "seg.mp4"],
+                clip_index=1,
+                mode="breakdown",
+                voice_intro_path=None,
+                voice_outro_path=None,
+            )
+
+            assert mock_spotlight.called
+            call_kwargs = mock_spotlight.call_args[1]
+            assert call_kwargs["target_time_offset"] == pytest.approx(6.5, abs=0.1)  # 13.5 - actual_start (7.0)
+            assert call_kwargs["roi"] == [0.25, 0.35, 0.75, 0.80]
+            assert mock_export.called
+            assert mock_export.call_args[1]["replay_start"] == 20.0
 

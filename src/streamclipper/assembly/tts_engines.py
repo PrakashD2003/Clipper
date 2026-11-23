@@ -183,6 +183,10 @@ class ElevenLabsTTS:
     name = "elevenlabs"
 
     DEFAULT_MODEL = "eleven_v4"
+    DEFAULT_VOICE_SETTINGS: dict[str, Any] = {
+        "stability": 0.40,
+        "similarity_boost": 0.85,
+    }
 
     def __init__(
         self,
@@ -193,7 +197,7 @@ class ElevenLabsTTS:
     ) -> None:
         self.voice_id = (voice_id or "").strip()
         self.model_id = model_id or self.DEFAULT_MODEL
-        # None/empty = let ElevenLabs use the settings saved on the voice itself.
+        # None/empty = fall back to DEFAULT_VOICE_SETTINGS during synthesis
         self.voice_settings = dict(voice_settings) if voice_settings else None
         self.output_format = (output_format or "").strip()
 
@@ -216,8 +220,13 @@ class ElevenLabsTTS:
             "Accept": "audio/mpeg",
         }
         payload: dict[str, Any] = {"text": text, "model_id": self.model_id}
-        if self.voice_settings:
-            payload["voice_settings"] = self.voice_settings
+        settings = (
+            self.voice_settings
+            if self.voice_settings
+            else self.DEFAULT_VOICE_SETTINGS
+        )
+        if settings:
+            payload["voice_settings"] = dict(settings)
         try:
             req = urllib.request.Request(
                 url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST"

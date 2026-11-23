@@ -62,6 +62,8 @@ Return a JSON array of highlight objects. Return an EMPTY array `[]` if nothing 
     "narration_intro": "<optional in Pass 1: 12-25 word spoken setup, or empty>",
     "narration_outro": "<optional in Pass 1: 12-25 word spoken punchline, or empty>",
     "context_badge": "<optional in Pass 1: 2-4 word pill matching moment_type, or empty>",
+    "breakdown_kind": "<optional in Pass 1: zoom_spotlight | slow_mo | auto>",
+    "breakdown_focus": "<optional in Pass 1: e.g. laptop screen, secret document, or empty>",
     "breakdown_commentary": "<optional in Pass 1: 15-30 word spoken breakdown analyzing mechanics/physics/mistake, or empty>",
     "breakdown_callout": "<optional in Pass 1: 2-5 word on-screen callout note, or empty>",
     "sub_clips": [
@@ -75,7 +77,11 @@ CRITICAL ANTI-HALLUCINATION GUARD:
 If the Transcript text above is empty, whitespace-only, or contains no actual spoken words/dialogue (e.g. only silence, countdowns, or waiting screens), YOU MUST RETURN AN EMPTY ARRAY `[]`. If you must score a moment where transcript is absent, force score=0 and title="NO_TRANSCRIPT". NEVER fabricate gameplay events, police chases, dialogue, quotes, or descriptions from the game title or stream metadata alone when transcript dialogue is missing.
 
 NOTE ON TWO-PASS SCORING:
-Focus on finding candidate moments (start, end, score, title, reason, best_quote, optional sub_clips). For 4B-8B local models, narrative fields ("narration_intro", "narration_outro", "context_badge", "breakdown_commentary", "breakdown_callout") are optional in Pass 1; Pass 2 (narrative_writer.txt) synthesizes them for the top picks.
+Focus on finding candidate moments (start, end, score, title, reason, best_quote, optional sub_clips). For 4B-8B local models, narrative fields ("narration_intro", "narration_outro", "context_badge", "breakdown_commentary", "breakdown_callout", "breakdown_kind", "breakdown_focus") are optional in Pass 1; Pass 2 (narrative_writer.txt) synthesizes them for the top picks.
+
+BREAKDOWN ARCHETYPE RULES:
+- "breakdown_kind": Choose "zoom_spotlight" when the moment revolves around computer/phone screens, text clues, secret files, easter eggs, or documents (moment_type: analysis, lore_secret, graphics_detail). Choose "slow_mo" for physical stunts, vehicle physics, combat, or clutch headshots.
+- "breakdown_focus": When choosing "zoom_spotlight", specify what visual object the viewer must look at (e.g., "laptop screen", "classified file", "kill feed").
 
 NOTE ON `sub_clips`: Only populate `sub_clips` (2-3 ordered, non-overlapping beats, each >= 3 seconds) if there is >= 5 seconds of dead air/wandering between the setup and payoff that should be cut out. Otherwise return `"sub_clips": []` for a clean single cut.
 

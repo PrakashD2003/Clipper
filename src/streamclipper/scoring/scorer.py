@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 
 
 WIDEN_SETUP_RATIO = 0.65  # share of added context placed before the moment (setup > aftermath)
+CHAT_LATENCY_COMPENSATION = 18.0  # seconds viewers lag behind broadcast before typing
+FINALE_WINDOW_SECONDS = 1200.0   # always include last 20 minutes of stream as candidates
 
 
 @dataclass
@@ -161,14 +163,64 @@ class Scorer(ABC):
         ``get_transcript_chunks`` tool.
         """
         chunks = self._chunk_transcript(transcript, chunk_minutes=chunk_minutes)
+
+        refinement_enabled = bool(
+            self.config.get("refinement.enabled", True)
+            if hasattr(self, "config") and self.config
+            else True
+        )
+        latency_comp = float(
+            self.config.get("refinement.chat_latency_compensation", CHAT_LATENCY_COMPENSATION)
+            if hasattr(self, "config") and self.config and refinement_enabled
+            else (CHAT_LATENCY_COMPENSATION if refinement_enabled else 0.0)
+        )
+        finale_minutes = float(
+            self.config.get("refinement.finale_window_minutes", 20.0)
+            if hasattr(self, "config") and self.config and refinement_enabled
+            else (20.0 if refinement_enabled else 0.0)
+        )
+        finale_window_sec = finale_minutes * 60.0
+
+        stream_duration = (
+            transcript.segments[-1].end if transcript.segments else 0.0
+        )
+        # Only apply finale window if stream is long enough (>= 2.5x the finale window)
+        # so a 20-minute finale window does not swallow short 30-36 minute test streams
+        has_finale_window = (
+            refinement_enabled
+            and finale_window_sec > 0
+            and stream_duration >= finale_window_sec * 2.5
+        )
+        finale_start = max(0.0, stream_duration - finale_window_sec) if has_finale_window else 0.0
+
+        # Create latency-compensated chat spikes for overlap matching (viewers react 15-25s late)
+        compensated_chat = [
+            TimeRange(
+                start=max(0.0, s.start - latency_comp),
+                end=max(0.0, s.end - latency_comp),
+                score=s.score,
+                signal_type=s.signal_type,
+                metadata=s.metadata,
+            )
+            for s in chat_spikes
+        ] if (chat_spikes and latency_comp > 0) else []
+
         candidates: list[tuple[TranscriptChunk, list[TimeRange], list[TimeRange]]] = []
         for chunk in chunks:
             chunk_loudness = self._find_overlapping(loudness_spikes, chunk)
             chunk_chat = self._find_overlapping(chat_spikes, chunk)
+            compensated_overlap = self._find_overlapping(compensated_chat, chunk)
+            is_finale = (
+                has_finale_window
+                and chunk.end >= finale_start
+            )
+
             if (
                 only_with_signals
                 and not chunk_loudness
                 and not chunk_chat
+                and not compensated_overlap
+                and not is_finale
                 and not (heatmap_spikes and self._find_overlapping(heatmap_spikes, chunk))
             ):
                 continue
@@ -294,6 +346,21 @@ class Scorer(ABC):
         selected = sorted(deduped, key=lambda h: h.final_score, reverse=True)[:limit]
 
         for h in selected:
+            if not h.sub_clips:
+                nearby_words = self._extract_words_for_range(
+                    transcript,
+                    max(0.0, h.start - 10.0),
+                    h.end + 10.0,
+                )
+                if nearby_words:
+                    snapped_s, snapped_e = self.snap_to_speech_bounds(
+                        h.start,
+                        h.end,
+                        nearby_words,
+                        min_dur=float(self.min_clip_seconds),
+                        max_dur=float(self.max_clip_seconds),
+                    )
+                    h.start, h.end = snapped_s, snapped_e
             h.word_timestamps = self._extract_words_for_range(transcript, h.start, h.end)
             scoped_text = self._extract_transcript_for_range(transcript, h.start, h.end)
             if scoped_text:
@@ -302,6 +369,81 @@ class Scorer(ABC):
             h.chat_burst = self._extract_chat_burst(h, chat_spikes)
 
         return selected
+
+    @staticmethod
+    def snap_to_speech_bounds(
+        start: float,
+        end: float,
+        words: list[WordTimestamp],
+        *,
+        min_dur: float = 15.0,
+        max_dur: float = 35.0,
+        pre_search: float = 6.0,
+        post_buffer: float = 1.2,
+        gap_threshold: float = 0.4,
+    ) -> tuple[float, float]:
+        """Snap clip boundaries to natural speech pauses.
+
+        - Searches backward up to pre_search seconds for a sentence boundary
+          (punctuation or silence gap >= gap_threshold).
+        - Searches forward up to post_buffer seconds past end for end of sentence.
+        - Clamps result to [min_dur, max_dur].
+        """
+        if not words:
+            return float(start), float(end)
+
+        # Snap start: find nearest sentence start before `start`
+        snapped_start = float(start)
+        for idx in range(len(words) - 1, -1, -1):
+            w = words[idx]
+            if w.end < start - pre_search:
+                break
+            if w.end <= start:
+                text = w.text.strip()
+                if text and text[-1] in ".!?":
+                    snapped_start = w.end + 0.1
+                    break
+                if idx + 1 < len(words):
+                    gap = words[idx + 1].start - w.end
+                    if gap >= gap_threshold:
+                        snapped_start = w.end + 0.05
+                        break
+
+        # Snap end: find nearest sentence end after `end` (punctuation or natural silence gap)
+        snapped_end = float(end)
+        for idx in range(len(words)):
+            w = words[idx]
+            if w.start > end + pre_search:
+                break
+            if w.end >= end - post_buffer:
+                text = w.text.strip()
+                if text and text[-1] in ".!?":
+                    snapped_end = w.end + post_buffer
+                    break
+                if idx + 1 < len(words):
+                    gap = words[idx + 1].start - w.end
+                    if gap >= gap_threshold and w.end >= end - 0.5:
+                        snapped_end = w.end + post_buffer
+                        break
+                elif w.end >= end:
+                    snapped_end = w.end + post_buffer
+                    break
+
+        # Safety: avoid cutting words mid-utterance at boundary points
+        for w in words:
+            if w.start < snapped_start < w.end:
+                snapped_start = max(0.0, w.start - 0.05)
+            if w.start < snapped_end < w.end:
+                snapped_end = w.end + post_buffer
+
+        # Clamp duration
+        dur = snapped_end - snapped_start
+        if dur < min_dur:
+            snapped_end = snapped_start + min_dur
+        elif dur > max_dur:
+            snapped_end = snapped_start + max_dur
+
+        return round(snapped_start, 3), round(snapped_end, 3)
 
     def fit_highlight_bounds(
         self,

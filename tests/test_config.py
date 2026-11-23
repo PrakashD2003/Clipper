@@ -282,7 +282,7 @@ class TestConfigSystem:
         assert cfg.get("analysis.weights.heatmap") == 0.20
         assert cfg.get("analysis.weights.llm_score") == 0.40
         assert cfg.get("video.resolution") == [1080, 1920]
-        assert cfg.get("captions.highlight_color") == "#FFD700"
+        assert cfg.get("captions.highlight_color") == "#FFE600"
         assert cfg.get("nonexistent.nested.key", "fallback") == "fallback"
         assert cfg.hardware_profile == profile
 
@@ -776,10 +776,10 @@ def test_F1_default_config_has_v3_keys_and_hardware_stays_auto() -> None:
     assert cfg.get("facecam.min_detection_ratio") == 0.6
     assert cfg.get("facecam.max_center_jitter") == 0.05
     assert cfg.get("facecam.overrides") == {}
-    assert cfg.get("analysis.max_clip_seconds") == 35
+    assert cfg.get("analysis.max_clip_seconds") == 90
     assert cfg.get("analysis.skip_intro_minutes") == 5
     assert cfg.get("content_gate.enabled") is True
-    assert cfg.get("output.max_final_seconds") == 59
+    assert cfg.get("output.max_final_seconds") == 180
     assert cfg.get("output.queued_dir") == "queued"
     assert cfg.get("transformation.tts_engines") == ["chatterbox", "kokoro", "edge-tts"]
     assert cfg.get("transformation.target_lufs") == -14
@@ -807,3 +807,22 @@ def test_F2_game_fit_and_top3_mode_validation(tmp_path: Path) -> None:
     cfg = Config(user_config_path=ok)
     assert cfg.get("video.game_fit") == "balanced"
     assert cfg.get("transformation.mode") == "top3"
+
+
+def test_repo_user_config_fallback_when_running_outside_repo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When working directory is outside repo and has no config.yaml, fall back to repo-root config.yaml."""
+    outside_dir = tmp_path / "outside_cwd"
+    outside_dir.mkdir()
+    repo_cfg = tmp_path / "repo_config.yaml"
+    repo_cfg.write_text(
+        "transformation:\n  elevenlabs_voice_id: 'fallback_voice_id'\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(config_mod, "USER_CONFIG_PATH", Path("config.yaml"))
+    monkeypatch.setattr(config_mod, "_REPO_USER_CONFIG_PATH", repo_cfg)
+    monkeypatch.chdir(outside_dir)
+
+    cfg = Config()
+    assert cfg.get("transformation.elevenlabs_voice_id") == "fallback_voice_id"
+

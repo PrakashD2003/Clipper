@@ -371,8 +371,8 @@ transformation:
             body = json.loads(req.data.decode("utf-8"))
             assert body["text"] == "ElevenLabs voiceover test"
             assert body["model_id"] == "eleven_multilingual_v2"
-            # No override: ElevenLabs uses the settings saved on the voice.
-            assert "voice_settings" not in body
+            # Voice settings are populated with naturalness settings.
+            assert body["voice_settings"] == {"stability": 0.40, "similarity_boost": 0.85}
             assert "output_format=mp3_44100_128" in req.full_url
 
     def test_unknown_engine_falls_back_to_auto(self, base_config: Config, tmp_path: Path) -> None:
@@ -596,8 +596,8 @@ class TestShortClipOverlapClamping:
             intro_dur=4.0, outro_dur=4.0, clip_duration=6.0
         )
         assert input_count == 3
-        assert "[1:a]aresample=48000,aformat=channel_layouts=stereo,atrim=0:2.25,asetpts=PTS-STARTPTS[a1]" in fg
-        assert "[2:a]aresample=48000,aformat=channel_layouts=stereo,atrim=0:2.25,asetpts=PTS-STARTPTS,adelay=3750|3750[a2]" in fg
+        assert "[1:a]aresample=48000,aformat=channel_layouts=stereo,atrim=0:2.25,asetpts=PTS-STARTPTS,afade=t=out:st=2.10:d=0.15[a1]" in fg
+        assert "[2:a]aresample=48000,aformat=channel_layouts=stereo,atrim=0:2.25,asetpts=PTS-STARTPTS,afade=t=out:st=2.10:d=0.15,adelay=3750|3750[a2]" in fg
 
         # Verify FFmpeg executes the clamped filtergraph cleanly on real media
         in_video = create_synthetic_mp4(tmp_path / "short_clip.mp4", duration_sec=3.0)
@@ -945,8 +945,9 @@ def test_C4_finalize_graph_has_callout_gain_ramps_and_loudnorm(tmp_path: Path) -
     assert count == 4
     assert ":eval=frame" in fg
     assert "clip(min(" in fg and "max(" in fg  # smooth ramps across three windows
-    assert fg.count("loudnorm=I=-16:TP=-1.5:LRA=11") == 3
-    assert fg.count("volume=3.0dB") == 3
+    # Clean studio bypass: no track-level loudnorm or volume boost on voice tracks
+    assert "loudnorm=I=-16:TP=-1.5:LRA=11" not in fg
+    assert "volume=3.0dB" not in fg
     assert "[3:a]" in fg and "adelay=8000|8000" in fg
     assert "amix=inputs=4:duration=first:normalize=0[amixed]" in fg
     assert fg.endswith("[amixed]loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000,aformat=channel_layouts=stereo[aout]")
@@ -1009,3 +1010,38 @@ def test_C5_normalize_audio_copies_video_and_loudnorms(base_config: Config, tmp_
     # in-place
     n.normalize_audio(vid, vid)
     assert vid.stat().st_size > 0
+
+
+def test_truncate_to_budget_guarantees_terminal_punctuation() -> None:
+    # 1. Text without terminal punctuation gets '.' appended
+    truncated = TransformativeNarrator._fit_text_to_budget(
+        "One two three four five six seven eight nine ten", max_seconds=1.5
+    )
+    assert truncated.endswith(".")
+    assert TransformativeNarrator._truncate_to_budget == TransformativeNarrator._fit_text_to_budget
+
+    # 2. Text already ending in '!' or '?' is preserved
+    excl = TransformativeNarrator._fit_text_to_budget("Great play! Extra words here", max_seconds=1.5)
+    assert excl.endswith("!")
+
+    # 3. Text already within budget is returned without alteration
+    short = "Within budget."
+    assert TransformativeNarrator._fit_text_to_budget(short, max_seconds=10.0) == short
+
+    # 4. Text ending with a comma or dash before truncation gets cleanly terminated without ',.'
+    comma_text = TransformativeNarrator._fit_text_to_budget(
+        "One two, three four five six seven", max_seconds=0.8
+    )
+    assert not comma_text.endswith(",.")
+    assert comma_text.endswith(".")
+
+
+def test_trim_includes_smooth_afade_out(base_config: Config) -> None:
+    narrator = TransformativeNarrator(base_config)
+    fg, _ = narrator._build_ducking_filtergraph(
+        intro_dur=5.0, outro_dur=5.0, clip_duration=6.0
+    )
+    # 6s clip -> combined 4.5s max -> eff_intro = 2.25s, eff_outro = 2.25s
+    # st = max(0.0, 2.25 - 0.15) = 2.10
+    assert "atrim=0:2.25,asetpts=PTS-STARTPTS,afade=t=out:st=2.10:d=0.15" in fg
+

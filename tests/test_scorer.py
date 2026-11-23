@@ -207,6 +207,45 @@ class TestModelBackwardCompat:
         assert cm2.moment_type == "fail"
         assert cm2.transformation_mode == "story"
 
+    def test_highlight_caption_style_defaults_and_roundtrip(self):
+        """Highlight caption_style defaults to 'auto' and round-trips cleanly."""
+        data_legacy = {
+            "start": 0.0, "end": 30.0, "score": 9.0, "title": "Legacy", "reason": "r",
+        }
+        h_legacy = Highlight.from_dict(data_legacy)
+        assert h_legacy.caption_style == "auto"
+
+        data_with_style = {
+            "start": 0.0, "end": 30.0, "score": 9.0, "title": "Style", "reason": "r",
+            "caption_style": "karaoke",
+        }
+        h_styled = Highlight.from_dict(data_with_style)
+        assert h_styled.caption_style == "karaoke"
+
+        d = h_styled.to_dict()
+        assert d["caption_style"] == "karaoke"
+        h_roundtrip = Highlight.from_dict(d)
+        assert h_roundtrip.caption_style == "karaoke"
+
+    def test_clip_metadata_caption_style_defaults_and_roundtrip(self):
+        """ClipMetadata caption_style defaults to 'auto' and round-trips cleanly."""
+        data_legacy = {
+            "hook_title": "T", "caption": "C", "hashtags": [], "streamer": "S",
+            "game": "G", "source_url": "U", "clip_start": 0.0, "clip_end": 30.0,
+            "highlight_score": 9.0,
+        }
+        cm_legacy = ClipMetadata.from_dict(data_legacy)
+        assert cm_legacy.caption_style == "auto"
+
+        data_styled = dict(data_legacy, caption_style="box")
+        cm_styled = ClipMetadata.from_dict(data_styled)
+        assert cm_styled.caption_style == "box"
+
+        d = cm_styled.to_dict()
+        assert d["caption_style"] == "box"
+        cm_roundtrip = ClipMetadata.from_dict(d)
+        assert cm_roundtrip.caption_style == "box"
+
 
 # ===========================================================================
 # Test: Transcript chunking — 12-minute windows with 1-minute overlap
@@ -287,9 +326,11 @@ class TestGetCandidateChunks:
         all_chunks = scorer._chunk_transcript(long_transcript)
         assert len(candidates) < len(all_chunks)
 
-        # Every candidate chunk must have at least one signal
+        # Every candidate chunk must have at least one signal or be in the stream finale window
+        stream_duration = long_transcript.segments[-1].end if long_transcript.segments else 0.0
+        finale_start = stream_duration - 1200.0
         for chunk, loud, chat in candidates:
-            assert loud or chat, f"Chunk [{chunk.start}, {chunk.end}] has no signals"
+            assert loud or chat or chunk.end >= finale_start, f"Chunk [{chunk.start}, {chunk.end}] has no signals"
 
     def test_all_chunks_returned_when_signals_disabled(
         self, config: Config, long_transcript: TranscriptionResult,
@@ -2204,3 +2245,113 @@ class TestBatchD:
             cls.return_value.generate.return_value = GenerateResponse(response="junk")
             scorer = OllamaScorer(config)
             assert len(scorer.generate_countdown_lines(hs, "Tim", "GTA 6")) == 3
+
+
+class TestScorerOverhaul:
+    """Tests for boundary snapping, chat latency compensation, and finale scouting."""
+
+    def test_snap_speech_bounds_with_punctuation_and_gaps(self) -> None:
+        words = [
+            WordTimestamp("Hey", 10.0, 10.5, 0.99),
+            WordTimestamp("guys.", 10.6, 11.0, 0.99),
+            WordTimestamp("Now", 12.0, 12.5, 0.99),  # 1.0s gap from 11.0 to 12.0
+            WordTimestamp("look", 12.6, 13.0, 0.99),
+            WordTimestamp("at", 13.1, 13.5, 0.99),
+            WordTimestamp("this", 13.6, 14.0, 0.99),
+            WordTimestamp("incredible", 14.1, 15.0, 0.99),
+            WordTimestamp("car!", 15.1, 15.8, 0.99),
+            WordTimestamp("We", 16.0, 16.5, 0.99),
+        ]
+        # Start at 12.3: should snap start backward to 11.1 (after "guys.") or 12.05 (gap)
+        snapped_s, snapped_e = Scorer.snap_to_speech_bounds(
+            start=12.3, end=15.5, words=words, min_dur=15.0, max_dur=35.0
+        )
+        assert snapped_s <= 12.3
+        assert snapped_e >= 15.8 + 1.2
+        assert snapped_e - snapped_s >= 15.0
+
+    def test_chat_latency_compensation(self, config: Config) -> None:
+        """Chat spike lagging by ~20s matches the earlier chunk where the event occurred."""
+        # Chunk 0 [0, 720], Chunk 1 [660, 1380] (with step)
+        seg0 = TranscriptSegment(text="Intro", start=0.0, end=10.0)
+        seg1 = TranscriptSegment(text="Event happens here", start=700.0, end=710.0)
+        seg2 = TranscriptSegment(text="Aftermath", start=730.0, end=750.0)
+        transcript = TranscriptionResult(segments=[seg0, seg1, seg2], full_text="test", language="en")
+
+        # Chat spike at 730-745s (lagging behind event at 700s)
+        # Without compensation, 730s is > 720s so it does not overlap chunk 0 [0, 720]
+        # With compensation (-18s), it shifts to [712, 727] which overlaps chunk 0 [0, 720]
+        chat_spikes = [
+            TimeRange(start=730.0, end=745.0, score=9.0, signal_type=SignalType.CHAT_VELOCITY)
+        ]
+        scorer = _StubScorer(config)
+        # Latency compensation shifts chat spike back to [712, 727], overlapping chunk 0 [0, 720]
+        # With finale_window_minutes=0 to isolate latency comp:
+        scorer.config._data.setdefault("refinement", {})["finale_window_minutes"] = 0
+        scorer.config._data["refinement"]["chat_latency_compensation"] = 18.0
+        candidates = scorer.get_candidate_chunks(
+            transcript, [], chat_spikes, chunk_minutes=12, only_with_signals=True
+        )
+        # Chunk 0 [0, 720] should be included because compensated chat [712, 727] overlaps it
+        starts = [c[0].start for c in candidates]
+        assert 0.0 in starts
+
+    def test_finale_scouting_always_includes_last_20_minutes(self, config: Config) -> None:
+        """Quiet ending chunks in the last 20 minutes must never be filtered out."""
+        # 3600-second (1 hour) stream
+        seg = TranscriptSegment(text="End credits", start=3400.0, end=3500.0)
+        transcript = TranscriptionResult(segments=[seg], full_text="credits", language="en")
+
+        scorer = _StubScorer(config)
+        # With NO signals at all, the finale chunk (which ends at 3500+ >= 2400) must still be kept
+        candidates = scorer.get_candidate_chunks(
+            transcript, [], [], chunk_minutes=12, only_with_signals=True
+        )
+        assert len(candidates) >= 1
+        assert any(c[0].end >= 3600 - 1200 for c in candidates)
+
+    def test_finale_scouting_applies_to_sub_50_min_streams(self, config: Config) -> None:
+        """Finale scouting applies when stream is >= 2.5x the configured finale window."""
+        # 2100s stream (35 minutes) with finale_window_minutes=10 (600s, 2.5x = 1500s <= 2100s).
+        seg = TranscriptSegment(text="Final boss beaten", start=1900.0, end=2000.0)
+        transcript = TranscriptionResult(segments=[seg], full_text="final boss", language="en")
+
+        scorer = _StubScorer(config)
+        scorer.config._data.setdefault("refinement", {})["finale_window_minutes"] = 10.0
+        candidates = scorer.get_candidate_chunks(
+            transcript, [], [], chunk_minutes=12, only_with_signals=True
+        )
+        assert len(candidates) >= 1
+        assert any(c[0].end >= 2100 - 600 for c in candidates)
+
+    def test_refinement_disabled_bypasses_finale_and_latency(self, config: Config) -> None:
+        """When refinement.enabled is false, finale chunks without signals are filtered out."""
+        seg = TranscriptSegment(text="End credits", start=3400.0, end=3500.0)
+        transcript = TranscriptionResult(segments=[seg], full_text="credits", language="en")
+
+        scorer = _StubScorer(config)
+        scorer.config._data.setdefault("refinement", {})["enabled"] = False
+        candidates = scorer.get_candidate_chunks(
+            transcript, [], [], chunk_minutes=12, only_with_signals=True
+        )
+        assert len(candidates) == 0
+
+    def test_snap_speech_bounds_unpunctuated_pauses_and_mid_word(self) -> None:
+        """Speech boundary snapping catches natural pauses without punctuation and avoids splitting words."""
+        words = [
+            WordTimestamp("we", 20.0, 20.4, 0.99),
+            WordTimestamp("did", 20.5, 20.8, 0.99),
+            WordTimestamp("it", 20.9, 21.2, 0.99),
+            # 3.8s pause between 21.2 and 25.0
+            WordTimestamp("next", 25.0, 25.5, 0.99),
+            WordTimestamp("mission", 25.6, 26.0, 0.99),
+        ]
+        # Start at 20.2 (mid-word "we") and end at 21.0 (mid-word "it")
+        snapped_s, snapped_e = Scorer.snap_to_speech_bounds(
+            start=20.2, end=21.0, words=words, min_dur=15.0, max_dur=35.0
+        )
+        # Should snap start before "we" (avoiding cutting "we" in half)
+        assert snapped_s <= 20.0
+        # Should snap end after "it" + post_buffer (avoiding cutting "it" in half and capturing the pause)
+        assert snapped_e >= 21.2 + 1.2
+

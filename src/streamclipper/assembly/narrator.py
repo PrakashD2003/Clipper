@@ -44,7 +44,7 @@ class TransformativeNarrator:
         self.voice: str = str(
             config.get("transformation.tts_voice", "am_puck") or "am_puck"
         )
-        self.tts_speed: float = float(config.get("transformation.tts_speed", 1.1) or 1.1)
+        self.tts_speed: float = float(config.get("transformation.tts_speed", 1.0) or 1.0)
         chain = config.get(
             "transformation.tts_engines", ["chatterbox", "kokoro", "edge-tts"]
         )
@@ -60,8 +60,8 @@ class TransformativeNarrator:
         )
         self.edge_tts_rate: str = str(config.get("transformation.edge_tts_rate", "+10%") or "")
         self.target_lufs: float = float(config.get("transformation.target_lufs", -14) or -14)
-        raw_gain = config.get("transformation.narration_gain_db", 3)
-        self.narration_gain_db: float = float(3 if raw_gain is None else raw_gain)
+        raw_gain = config.get("transformation.narration_gain_db", 0.0)
+        self.narration_gain_db: float = float(0.0 if raw_gain is None else raw_gain)
         raw_xf = config.get("transformation.crossfade_seconds", 0.25)
         self.crossfade_seconds: float = float(0.25 if raw_xf is None else raw_xf)
         self.callout_enabled: bool = bool(config.get("transformation.callout_enabled", True))
@@ -72,9 +72,14 @@ class TransformativeNarrator:
         self.elevenlabs_voice_id: str = str(
             config.get("transformation.elevenlabs_voice_id", "") or ""
         )
-        raw_vs = config.get("transformation.elevenlabs_voice_settings", {}) or {}
+        raw_vs = config.get(
+            "transformation.elevenlabs_voice_settings",
+            {"stability": 0.40, "similarity_boost": 0.85},
+        )
         self.elevenlabs_voice_settings: dict[str, Any] = (
-            dict(raw_vs) if isinstance(raw_vs, dict) else {}
+            dict(raw_vs)
+            if isinstance(raw_vs, dict) and raw_vs
+            else {"stability": 0.40, "similarity_boost": 0.85}
         )
         self.elevenlabs_output_format: str = str(
             config.get("transformation.elevenlabs_output_format", "mp3_44100_128") or ""
@@ -148,12 +153,17 @@ class TransformativeNarrator:
         if lang == "hinglish":
             return self._hinglish_chain()
         chain = self._english_engine_chain()
-        if (
-            (self.engine or "auto").lower().strip() == "auto"
-            and "elevenlabs" not in chain
-            and self._elevenlabs_available("english")
-        ):
-            chain.insert(0, "elevenlabs")
+        legacy = (self.engine or "auto").lower().strip()
+        if legacy in ("auto", "elevenlabs"):
+            if self._elevenlabs_available("english"):
+                if "elevenlabs" in chain:
+                    chain.remove("elevenlabs")
+                chain.insert(0, "elevenlabs")
+            elif "elevenlabs" in chain and legacy == "auto":
+                chain.remove("elevenlabs")
+            for fallback in ("kokoro", "edge-tts"):
+                if fallback not in chain:
+                    chain.append(fallback)
         return chain
 
     def _english_engine_chain(self) -> list[str]:
@@ -227,6 +237,8 @@ class TransformativeNarrator:
                     return res
                 if name == "kokoro":
                     logger.warning("Kokoro produced no audio (espeak-ng missing?); falling back to edge-tts")
+                elif name == "elevenlabs":
+                    logger.warning("ElevenLabs produced no audio; falling back to next engine in chain")
                 else:
                     logger.info("TTS engine %s produced no audio; trying next", name)
         logger.debug("No TTS engine succeeded")
@@ -246,6 +258,9 @@ class TransformativeNarrator:
         if head.endswith((".", "!", "?")):
             cut = len(head) - 1
         truncated = head[: cut + 1] if cut > 0 else head
+        truncated = truncated.strip().rstrip(",;:-— ")
+        if truncated and not truncated.endswith((".", "!", "?")):
+            truncated += "."
         logger.info(
             "Narration estimated at %.1fs exceeds %.1fs budget; truncated %d -> %d words",
             len(words) / WORDS_PER_SECOND,
@@ -253,7 +268,9 @@ class TransformativeNarrator:
             len(words),
             len(truncated.split()),
         )
-        return truncated.strip()
+        return truncated
+
+    _truncate_to_budget = _fit_text_to_budget
 
     def _synthesize_kokoro(self, text: str, output_wav: Path) -> Path | None:
         """Synthesize locally with Kokoro-82M if installed and espeak-ng is available."""
@@ -301,6 +318,7 @@ class TransformativeNarrator:
         text: str,
         output_wav: Path,
         max_seconds: float | None = None,
+        language: str | None = None,
     ) -> Path | None:
         """Resolve narration track with priority: custom mic file > synthesized TTS."""
         if custom_path is not None:
@@ -308,7 +326,10 @@ class TransformativeNarrator:
             if p.is_file() and p.stat().st_size > 0:
                 return p
         if text and text.strip():
-            return self.synthesize_speech(text, output_wav, max_seconds=max_seconds)
+            kwargs: dict[str, Any] = {"max_seconds": max_seconds}
+            if language is not None:
+                kwargs["language"] = language
+            return self.synthesize_speech(text, output_wav, **kwargs)
         return None
 
     def prepare_narration_tracks(
@@ -319,6 +340,7 @@ class TransformativeNarrator:
         voice_outro_path: Path | None = None,
         temp_dir: Path | None = None,
         clip_duration: float | None = None,
+        language: str | None = None,
     ) -> tuple[Path | None, Path | None]:
         """Prepare intro and outro narration WAV paths respecting custom mic priority."""
         if not self.enabled or str(self.mode or "").strip().lower() == "raw":
@@ -334,12 +356,14 @@ class TransformativeNarrator:
                 narration_intro,
                 temp / "narrator_intro.wav",
                 max_seconds=budget,
+                language=language,
             )
             outro_wav = self.resolve_narration_track(
                 voice_outro_path,
                 narration_outro,
                 temp / "narrator_outro.wav",
                 max_seconds=budget,
+                language=language,
             )
         finally:
             self.release()
@@ -350,6 +374,7 @@ class TransformativeNarrator:
         breakdown_commentary: str = "",
         voice_breakdown_path: Path | None = None,
         temp_dir: Path | None = None,
+        language: str | None = None,
     ) -> Path | None:
         """Resolve breakdown commentary track with priority: custom mic file > synthesized TTS."""
         if not self.enabled or str(self.mode or "").strip().lower() == "raw":
@@ -360,6 +385,7 @@ class TransformativeNarrator:
             voice_breakdown_path,
             breakdown_commentary,
             temp / "narrator_breakdown.wav",
+            language=language,
         )
 
     def get_effective_narration_durations(
@@ -464,7 +490,11 @@ class TransformativeNarrator:
             f"clip(min((t-({a - r:.2f}))/{r:.2f},({b + r:.2f}-t)/{r:.2f}),0,1)"
             for a, b in windows
         ]
-        level = terms[0] if len(terms) == 1 else "max(" + ",".join(terms) + ")"
+        if not terms:
+            return "1.0"
+        level = terms[0]
+        for t in terms[1:]:
+            level = f"max({level},{t})"
         return f"1-{depth:.2f}*{level}"
 
     def _build_ducking_filtergraph(
@@ -490,8 +520,8 @@ class TransformativeNarrator:
         - Narrator WAVs are normalized to 48 kHz stereo before ``amix`` (stereo ``adelay``).
         - Short clips: intro+outro are clamped to 75% of the clip and ``atrim``-ed.
         - ``finalize=True`` (used by the real mix): smooth ``crossfade_seconds`` duck ramps,
-          per-track loudnorm + ``narration_gain_db``, and a final ``loudnorm`` to
-          ``target_lufs``. ``finalize=False`` keeps the plain step-ducked graph.
+          clean studio-bypass voice tracks directly into amix, and a final broadcast
+          ``loudnorm`` to ``target_lufs``. ``finalize=False`` keeps the plain step-ducked graph.
         """
         has_intro = intro_dur is not None and float(intro_dur) > 0.01
         has_outro = outro_dur is not None and float(outro_dur) > 0.01
@@ -521,7 +551,11 @@ class TransformativeNarrator:
 
         def _trim(eff: float, orig: float) -> str:
             if eff < orig - 1e-6:
-                return f",atrim=0:{max(0.01, eff):.2f},asetpts=PTS-STARTPTS"
+                st = max(0.0, eff - 0.15)
+                return (
+                    f",atrim=0:{max(0.01, eff):.2f},asetpts=PTS-STARTPTS"
+                    f",afade=t=out:st={st:.2f}:d=0.15"
+                )
             return ""
 
         if has_breakdown:
@@ -604,12 +638,9 @@ class TransformativeNarrator:
             else silent_base
         )
 
+        # Clean studio bypass: ElevenLabs audio is already mastered at ~-14.9 LUFS.
+        # Do not apply dynamic loudnorm or volume boost to individual voice tracks.
         narr_tail = ""
-        if finalize:
-            narr_tail = (
-                f",loudnorm=I=-16:TP=-1.5:LRA=11,{norm},"
-                f"volume={self.narration_gain_db:.1f}dB"
-            )
         parts: list[str] = []
         for idx, (trim, delay_ms, _w) in enumerate(tracks, start=1):
             delay = f",adelay={delay_ms}|{delay_ms}" if delay_ms is not None else ""
@@ -817,7 +848,7 @@ class TransformativeNarrator:
             return self._bypass_copy(input_video, output_video)
 
     def prepare_callout_track(
-        self, callout: str, temp_dir: Path | None = None
+        self, callout: str, temp_dir: Path | None = None, language: str | None = None
     ) -> Path | None:
         """Synthesize the short build-up callout (``transformation.callout_enabled``)."""
         if (
@@ -830,8 +861,11 @@ class TransformativeNarrator:
             return None
         temp = Path(temp_dir) if temp_dir is not None else Path(tempfile.gettempdir())
         temp.mkdir(parents=True, exist_ok=True)
+        kwargs: dict[str, Any] = {"max_seconds": 3.0}
+        if language is not None:
+            kwargs["language"] = language
         try:
-            return self.synthesize_speech(callout, temp / "narrator_callout.wav", max_seconds=3.0)
+            return self.synthesize_speech(callout, temp / "narrator_callout.wav", **kwargs)
         finally:
             self.release()
 

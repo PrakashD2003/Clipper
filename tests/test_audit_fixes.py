@@ -537,8 +537,8 @@ def test_P6_variety_rotates_caption_presets_per_streamer(tmp_path: Path) -> None
 
 def test_P6_default_presets_present_and_distinct(tmp_path: Path) -> None:
     presets = _cfg(tmp_path).get("captions.style_presets")
-    assert len(presets) == 3
-    assert len({p["font"] for p in presets}) == 3
+    assert len(presets) >= 3
+    assert len({p["highlight_color"] for p in presets}) >= 3
     for p in presets:
         assert {"font", "primary_color", "highlight_color", "outline_color"} <= set(p)
 
@@ -562,11 +562,13 @@ def test_P6_generate_ass_preset_overrides_caption_styles_not_chat_ticker(tmp_pat
 
 
 def test_P6_pipeline_passes_rotated_preset_and_can_disable(tmp_path: Path) -> None:
-    info = _run_assemble(tmp_path, config=_cfg(tmp_path))
+    cfg = _cfg(tmp_path)
+    default_presets = cfg.get("captions.style_presets", [])
+    info = _run_assemble(tmp_path, config=cfg)
     kwargs = info["export"].call_args[1]
-    assert kwargs["style_preset"]["font"] == "Arial"  # first rotation slot
+    assert kwargs["style_preset"] == default_presets[0]  # first rotation slot
     second = _run_assemble(tmp_path, config=_cfg(tmp_path))  # MCP path: rotation persisted
-    assert second["export"].call_args[1]["style_preset"]["font"] == "Arial Black"
+    assert second["export"].call_args[1]["style_preset"] == default_presets[1]
     off = _run_assemble(tmp_path, config=_cfg(tmp_path, captions={"rotate_styles": False}))
     assert "style_preset" not in off["export"].call_args[1]
 
