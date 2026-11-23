@@ -1,350 +1,377 @@
+<div align="center">
+
 # StreamClipper
 
-**Free, open-source, game-agnostic AI stream clipping pipeline** with dual **CLI (`click` + `rich`)** and **MCP (`MCPServer` via MCP SDK v2)** execution modes — engineered to turn long-form livestreams and VODs into engaging, YouTube Partner Program (**YPP**) transformative 9:16 vertical Shorts.
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-3776AB.svg?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](pyproject.toml)
+[![MCP SDK v2](https://img.shields.io/badge/MCP-v2.0-8A2BE2.svg?style=flat-square)](https://github.com/modelcontextprotocol)
+[![FFmpeg](https://img.shields.io/badge/FFmpeg-libass%20%7C%20NVENC-007808.svg?style=flat-square&logo=ffmpeg&logoColor=white)](https://ffmpeg.org/)
+[![WhisperX](https://img.shields.io/badge/ASR-WhisperX-blueviolet.svg?style=flat-square)](https://github.com/m-bain/whisperX)
+[![Platform](https://img.shields.io/badge/OS-Windows%20%7C%20Linux-blue.svg?style=flat-square)](https://github.com)
 
-StreamClipper uses an **audio-first ingestion strategy** (downloading lightweight 16 kHz mono WAV audio first and only fetching ±3 s padded 1080p video slices for selected highlights), **tri-modal highlight detection** (audio loudness + live chat velocity + LLM semantic scoring), **5-tier dynamic hardware auto-configuration** (from GTX 1660 SUPER to RTX 4050 to high-VRAM CUDA GPUs and CPU-only machines), and a **YPP Transformative Narrative & Story Engine** that adds adaptive commentary, conditional multi-beat pacing, punch-in spike zoom, Hormozi captions, and live chat burst tickers.
+**Autonomous AI Livestream Clipping & YPP Transformative Video Pipeline**  
+*Turn multi-hour livestreams and VODs into monetizable, commentary-rich YouTube Shorts and long-form topic deep dives.*
+
+</div>
 
 ---
 
-## Architecture Overview
+## Overview
+
+StreamClipper is a free, open-source, game-agnostic AI video clipping pipeline with dual execution interfaces: a high-performance **CLI (`click` + `rich`)** and a **Model Context Protocol (`MCPServer` via MCP SDK v2)** stdio server for host AI clients like Claude Desktop and Antigravity.
+
+Unedited stream rips frequently get flagged and rejected under the [YouTube Channel Monetization Policies](https://support.google.com/youtube/answer/1311392?hl=en) for **Reused Content**. StreamClipper solves this by turning raw stream slices into genuinely transformative, value-added video content:
+
+- **Audio-First Ingestion**: Downloads lightweight 16 kHz mono WAV audio first (~460 MB for a 4-hour VOD) and only fetches targeted &plusmn;3s padded 1080p video cuts for selected highlights via `yt-dlp download_ranges`.
+- **Tri-Modal Signal Fusion**: Fuses streamed audio RMS loudness spikes (`25%`), YouTube live chat velocity bursts (`25%`), and semantic LLM scores (`50%`), with dynamic weight renormalization and quiet-gem score floors.
+- **5-Tier Dynamic Hardware Auto-Configuration**: Profiles your GPU VRAM, CUDA Compute Capability, and NVENC availability at startup to configure transcription model sizes, batch sizes, compute precisions, and local LLM tags without manual editing.
+- **YPP Transformative Narrative & Story Engine**: Synthesizes tone-matched commentary intros/outros (`funny`, `fail`, `hype`, `clutch`, `graphics_detail`, `chat_chaos`, `lore_secret`, `analysis`), applies dynamic 18% audio ducking (`volume=...:eval=frame`), stitches multi-beat story structures, and burns Hormozi active-word captions alongside real viewer chat tickers.
+- **Topic Video Deep Dives**: Clusters multiple streams and trailers into one 8–10 minute chaptered 16:9 documentary and three targeted 9:16 vertical Shorts with shared assets and zero footage repetition.
+
+---
+
+## System Architecture
 
 ```mermaid
 flowchart TB
-    Input["YouTube Stream / VOD URL<br/>(CLI or Auto-Discovery)"] --> Audio["1. Audio-First Ingestion<br/>yt-dlp 16kHz Mono WAV + .live_chat.json"]
-    Audio --> Transcribe["2. Hardware-Aware Transcription<br/>WhisperX / faster-whisper (Word Timestamps + 2-Stage VRAM Cleanup)"]
-    Audio --> Signals["3. Signal Analysis<br/>Streamed RMS Loudness Spikes + Live Chat Velocity Spikes"]
-
-    Transcribe --> Fusion["4. Tri-Modal Signal Fusion & Highlight Scoring<br/>(Dynamic Weight Renormalization + Quiet-Gem Floor)"]
-    Signals --> Fusion
-
-    subgraph Scoring ["Dual LLM Scoring Modes"]
-        Ollama["Standalone CLI Mode<br/>Local Ollama (qwen3:8b / qwen3:4b)"]
-        MCP["MCP Server Mode (MCP SDK v2)<br/>Claude Desktop / Antigravity via streamclipper-mcp<br/>(Signal-Filtered Chunks: 60-80% Token Savings)"]
+    subgraph Ingestion ["1. Audio-First Ingestion"]
+        URL["YouTube Livestream / VOD URL"] --> YTDL["yt-dlp Ingestion"]
+        YTDL --> WAV["16 kHz Mono WAV (~460 MB / 4h)"]
+        YTDL --> Chat["Live Chat Replay (.live_chat.json)"]
     end
 
-    Scoring --> Fusion
-    Fusion --> SegDL["5. Targeted 1080p Video Slice Download<br/>yt-dlp download_ranges (±3s padded single cut or multi-beat sub_clips)"]
-
-    subgraph Assembly ["6. YPP Transformative Video Assembly (9:16 Vertical)"]
-        Facecam["Facecam Auto-Detection<br/>(OpenCV Corner Quadrants)"]
-        Compose["MoviePy v2 Composer<br/>Split-Screen + Conditional Story Beats + 1.20x Spike Zoom"]
-        Hooks["Pillow RGBA Overlays<br/>Hook Title + Adaptive Context Badge"]
-        Narrator["TransformativeNarrator<br/>Kokoro / Edge-TTS / ElevenLabs / Custom WAV + :eval=frame 18% Audio Ducking"]
-        ASS["FFmpeg libass Burn-In<br/>Hormozi Active-Word Captions + Live Chat Ticker<br/>(h264_nvenc with libx264 Auto-Fallback)"]
-        Facecam --> Compose --> Hooks --> Narrator --> ASS
+    subgraph SignalAnalysis ["2. Hardware-Aware Signal Analysis"]
+        WAV --> Whisper["WhisperX / faster-whisper<br/>(Word Timestamps + 2-Stage VRAM Cleanup)"]
+        WAV --> Loudness["Streamed RMS Loudness Analyzer<br/>(Constant-Memory librosa.stream)"]
+        Chat --> Velocity["Chat Velocity Analyzer<br/>(Viewer Burst & Message Spikes)"]
     end
 
-    SegDL --> Assembly
-    Assembly --> Output["7. FileOrganizer Output<br/>{game}/{streamer}/{date}/clip_XX.mp4 + .json + _transcript.txt"]
+    subgraph ScoringEngine ["3. Tri-Modal Fusion & Dual Scoring"]
+        Whisper --> Chunks["Transcript Chunks"]
+        Loudness --> Fusion["Signal Fusion & Highlight Scoring<br/>(Loudness 25% + Chat 25% + LLM 50%)"]
+        Velocity --> Fusion
+        Chunks --> Fusion
+
+        Fusion -.-> Ollama["Standalone CLI Mode<br/>Local Ollama (qwen3:8b / qwen3:4b)"]
+        Fusion -.-> MCPServer["MCP Server Mode (MCP SDK v2)<br/>Claude Desktop / Antigravity Host LLM"]
+    end
+
+    subgraph VideoAssembly ["4. YPP Transformative Assembly (9:16 Vertical)"]
+        Fusion --> RangeDL["Targeted 1080p Video Slice Download<br/>(yt-dlp download_ranges &plusmn;3s padded)"]
+        RangeDL --> Facecam["Facecam Auto-Detection<br/>(OpenCV Corner Quadrants)"]
+        Facecam --> Compose["MoviePy v2 Dynamic Layout<br/>(Split-Screen + 1.20x Climax Zoom)"]
+        Compose --> Narrator["Transformative Commentary<br/>(Kokoro / Edge-TTS / ElevenLabs / Custom Mic)"]
+        Narrator --> Ducking[":eval=frame Dynamic Audio Ducking<br/>(18% Commentary &rarr; 100% Climax)"]
+        Ducking --> ASS["FFmpeg libass Hardware Burn-In<br/>(Hormozi Captions + Chat Ticker)"]
+    end
+
+    subgraph Distribution ["5. Organized Output"]
+        ASS --> Outputs["Final 9:16 Short (.mp4)<br/>+ Companion Metadata (.json)<br/>+ Highlight Transcript (.txt)"]
+    end
 ```
+
+---
+
+## Dual Execution Modes
+
+StreamClipper is engineered to work either as an autonomous local CLI tool or as an interactive tool suite inside your AI development assistant.
+
+```mermaid
+flowchart LR
+    subgraph StandaloneCLI ["Standalone CLI Pipeline"]
+        CLI["streamclipper CLI<br/>(click + rich)"] --> Orch["Local Pipeline Orchestrator"]
+        Orch --> LocalOllama["Local Ollama Daemon<br/>(qwen3:8b / qwen3:4b)"]
+        Orch --> LocalRend["FFmpeg / MoviePy Video Assembly"]
+    end
+
+    subgraph MCPServerMode ["MCP Server Architecture (MCP SDK v2)"]
+        Client["Host AI Client<br/>(Claude Desktop / Antigravity)"] <-->|"stdio JSON-RPC"| MCPEntry["streamclipper-mcp"]
+        MCPEntry --> ToolRegistry["Exposed Tool Suite<br/>(11 Core Tools + Topic Tools)"]
+        ToolRegistry --> StepCache["Resumable StepCache (.cache/)"]
+        ToolRegistry --> HeadlessRender["Offline Highlight Rendering"]
+        Client -.->|"Performs Highlight Scoring<br/>& Scriptwriting Directly"| ToolRegistry
+    end
+```
+
+### Standalone CLI Mode
+In CLI mode, StreamClipper runs end-to-end autonomously from your terminal. Highlight scoring and narrative scriptwriting run against a local Ollama instance (`qwen3:8b` or `qwen3:4b` auto-selected by your hardware profile).
+
+### MCP Server Mode (`streamclipper-mcp`)
+In MCP mode, your host AI assistant (Claude Desktop, Antigravity) connects to `streamclipper-mcp` over stdio. StreamClipper provides specialized tools (`download_stream_audio`, `transcribe_audio`, `analyze_signals`, `get_transcript_chunks`, `submit_highlights`, `render_clip`). Your host LLM inspects signal-filtered transcript chunks (saving 60–80% context tokens) and directly authors commentary scripts before triggering zero-Ollama rendering.
 
 ---
 
 ## Key Features
 
-### Audio-First & Resumable Pipeline
-- **Audio-First Ingestion**: Extracts 16 kHz mono PCM WAV audio (~460 MB for a 4-hour VOD) via `yt-dlp` before downloading a single frame of video, then fetches only ±3 s padded 1080p video cuts (`download_ranges`) for the highlights you actually keep.
-- **Constant-Memory Signal Analysis**: Streams audio via `soundfile.info()` + `librosa.stream(..., fill_value=0.0)` so multi-hour VODs never exhaust RAM, while native `yt-dlp` live chat replay extraction (`.live_chat.json`) detects viewer velocity bursts and captures real viewer messages.
-- **Tri-Modal Signal Fusion with Dynamic Renormalization**: Combines audio loudness spikes (`25%`), live chat velocity spikes (`25%`), and LLM semantic scoring (`50%`). If a VOD lacks live chat replay or loudness spikes, weights automatically renormalize across available modalities — and top-tier quiet moments (`llm_score >= 8.5`) receive a `0.85 × score` floor so witty or visually detailed clips without yelling still pass.
-- **Step Caching & Automatic `FAILED` Recovery**: Every pipeline stage (`PENDING` → `DOWNLOADING` → `TRANSCRIBING` → `ANALYZING` → `SCORING` → `ASSEMBLING` → `COMPLETE`) is cached to `.cache/`. Interrupted or failed runs automatically recover to the last completed artifact stage (or pass `--force` to restart from scratch).
+### Audio-First Ingestion & Constant-Memory Processing
+- **Minimal Bandwidth Usage**: Downloads 16 kHz mono WAV audio first (~460 MB for a 4-hour VOD) using `yt-dlp`. Video data is only retrieved for final highlights via `download_ranges` with &plusmn;3s padding.
+- **Streaming Audio Loudness**: Audio is analyzed block-by-block using `soundfile.info()` and `librosa.stream(..., fill_value=0.0)`. Multi-hour recordings process with flat memory consumption.
+- **Native Live Chat Extraction**: Extracts `.live_chat.json` directly from YouTube, skips pre-stream negative offsets, identifies viewer message velocity spikes, and captures sample viewer chat reactions.
+- **Tri-Modal Dynamic Renormalization**: Audio loudness spikes (`25%`), live chat velocity bursts (`25%`), and semantic LLM scores (`50%`) are fused. If chat replay is missing, weights dynamically renormalize, and quiet high-scoring gems (`score >= 8.5`) receive an automatic `0.85 × score` floor.
+- **Resilient Step Caching**: Every stage (`PENDING` &rarr; `DOWNLOADING` &rarr; `TRANSCRIBING` &rarr; `ANALYZING` &rarr; `SCORING` &rarr; `ASSEMBLING` &rarr; `COMPLETE`) persists to `.cache/`. Interrupted pipelines or `FAILED` states automatically roll back to the last valid step without re-downloading audio or re-transcribing.
 
-### YPP Transformative Narrative & Story Engine
-Designed around the [YouTube Channel Monetization Policies](https://support.google.com/youtube/answer/1311392?hl=en) and Reused Content guidelines, StreamClipper supports **four explicit transformation modes**:
+### Dynamic Hardware Auto-Configuration
+StreamClipper detects system hardware via PyTorch CUDA introspection, Compute Capability checks, and FFmpeg codec probing. Six configuration keys (`transcription.device`, `transcription.model_size`, `transcription.compute_type`, `transcription.batch_size`, `llm.model`, `video.codec`) default to `"auto"` and resolve into optimal profiles:
 
-| Mode | Behavior |
-| :--- | :--- |
-| **`auto`** *(default)* | Resolves per highlight to **`story`** when validated multi-beat `sub_clips` exist, or **`narrative`** for clean single-cut moments. |
-| **`narrative`** | Single continuous cut with full YPP commentary intro/outro, adaptive context badge, spike punch-in zoom, Hormozi captions, and live chat ticker (never jump-cuts `sub_clips`). |
-| **`story`** | Multi-beat jump-cut stitching (*Setup → Escalation → Payoff*, 2–3 beats removing ≥5 s of dead air) when validated `sub_clips` exist (falling back cleanly to a single cut), plus full YPP commentary and overlays. |
-| **`raw`** | Uncut single clip with captions only (skips narrative LLM commentary, voiceover, context badge, punch-in zoom, multi-beat cuts, and live chat ticker; `hook_title` still honors `hook_title.enabled`). |
-
-- **Adaptive `moment_type` Commentary**: Classifies every highlight into `funny`, `fail`, `graphics_detail`, `hype`, `clutch`, `chat_chaos`, `lore_secret`, or `analysis` so the generated `narration_intro`, `narration_outro`, and `context_badge` match the clip's natural vibe instead of forcing dry analysis onto comedic or hype moments.
-- **Conditional Multi-Beat Jump-Cut Story Mode (`sub_clips`)**: Automatically remaps word-level timestamps, live chat bursts, and spike zoom offsets onto the stitched beat timeline via `remap_timeline_for_beats()`.
-- **Spike-Synced Punch-In Zoom**: Applies a smooth `1.20x` center punch-in zoom around `peak_time` (`3.5 s` default) to emphasize the climax.
-- **Hormozi ASS Captions & Live Chat Burst Ticker**: Burns active-word highlighted captions (`hormozi`, `single_word`, or `sentence`) and real `.live_chat.json` viewer bursts via FFmpeg's `libass` filter using Windows-safe `cwd` invocation and single-pass hardware encoding (`h264_nvenc` with automatic `libx264` fallback).
-- **Pluggable Voiceover & Dynamic `:eval=frame` Audio Ducking**: Supports free local **Kokoro-82M**, free **Edge-TTS**, optional **ElevenLabs API / personal voice clone**, or custom human microphone WAVs (`--voice-intro` / `--voice-outro`). Stream audio dynamically ducks to `18%` during intro/outro narration (`volume=...:eval=frame`) and returns to `100%` during the highlight climax.
-- **Auto Facecam Detection & 9:16 Composition**: Detects corner facecams with OpenCV and builds aspect-preserving vertical split-screen compositions (`1080×1920`) with a Pillow RGBA hook title and adaptive context badge.
-
----
-
-## System Requirements
-
-| Requirement | Recommended | Minimum / Notes |
-| :--- | :--- | :--- |
-| **Python** | **Python 3.12** (dedicated `.venv`) | Python `>= 3.10`. On Windows, Python 3.12 is strongly recommended so prebuilt CUDA wheels for `torch`, `ctranslate2`, `faster-whisper`, and `whisperx` install cleanly. |
-| **FFmpeg & FFprobe** | FFmpeg with **`libass`** + **`h264_nvenc`** | Required on `PATH`. Windows: `winget install Gyan.FFmpeg`. Linux (Debian/Ubuntu): `sudo apt install ffmpeg`. |
-| **GPU** | NVIDIA CUDA GPU with **6 GB+ VRAM** (e.g., GTX 1660 SUPER, RTX 4050, RTX 3060/4070+) | Optional — CPU-only mode (`cpu_only`) is automatically selected if no CUDA GPU is present. |
-| **LLM Backend** | **Ollama** (`qwen3:8b` or `qwen3:4b`) **or** an **MCP Host Client** (Claude Desktop / Antigravity) | Standalone CLI uses local Ollama; MCP mode delegates scoring directly to your host AI client. |
-| **OS** | Windows 10/11 or Linux (Ubuntu 22.04+ / Debian) | Tested end-to-end on Windows (PowerShell + `.venv`) and POSIX/Linux paths. |
-
----
-
-## Dynamic Hardware Auto-Configuration
-
-StreamClipper runs cleanly across heterogeneous machines without manual config edits. Six keys in `config.default.yaml` (`transcription.device`, `transcription.model_size`, `transcription.compute_type`, `transcription.batch_size`, `llm.model`, `video.codec`) default to `"auto"` and are dynamically resolved at startup via `detect_hardware_profile()` using `torch.cuda.get_device_properties(0).total_memory`, CUDA Compute Capability, and FFmpeg `h264_nvenc` detection:
-
-| Hardware Tier (`HardwareProfile.tier`) | Detection Rule | `device` | `model_size` | `compute_type` | `batch_size` | `llm.model` | `video.codec` |
+| Hardware Tier | Detection Criteria | Device | Whisper Size | Precision | Batch Size | Local LLM | Video Codec |
 | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **`cuda_high_vram`** | CUDA `>= 10.0 GB` VRAM | `cuda` | `large-v2` | `float16` | `16` | `qwen3:8b` | `h264_nvenc` *(else `libx264`)* |
-| **`cuda_mid_tensor`** *(e.g. RTX 4050 6 GB)* | CUDA `5.5–9.9 GB` + (`major >= 8` or `"RTX"` in GPU name) | `cuda` | `large-v2` | `int8_float16` | `8` | `qwen3:8b` | `h264_nvenc` *(else `libx264`)* |
-| **`cuda_mid_no_tensor`** *(e.g. GTX 1660 SUPER 6 GB)* | CUDA `5.5–9.9 GB` + (`major < 8` and no `"RTX"`) | `cuda` | `medium` | `int8` | `4` | `qwen3:4b` | `h264_nvenc` *(else `libx264`)* |
-| **`cpu_fallback`** | CUDA detected, `< 5.5 GB` VRAM | `cpu` | `base` | `int8` | `4` | `qwen3:4b` | `libx264` |
+| **`cuda_high_vram`** | CUDA VRAM &ge; 10.0 GB | `cuda` | `large-v2` | `float16` | `16` | `qwen3:8b` | `h264_nvenc` *(else `libx264`)* |
+| **`cuda_mid_tensor`** *(RTX 4050 6GB)* | 5.5–9.9 GB VRAM + (CC &ge; 8.0 or RTX) | `cuda` | `large-v2` | `int8_float16` | `8` | `qwen3:8b` | `h264_nvenc` *(else `libx264`)* |
+| **`cuda_mid_no_tensor`** *(GTX 1660S 6GB)* | 5.5–9.9 GB VRAM + (CC < 8.0, no RTX) | `cuda` | `medium` | `int8` | `4` | `qwen3:4b` | `h264_nvenc` *(else `libx264`)* |
+| **`cpu_fallback`** | CUDA detected but < 5.5 GB VRAM | `cpu` | `base` | `int8` | `4` | `qwen3:4b` | `libx264` |
 | **`cpu_only`** | No CUDA GPU available | `cpu` | `base` | `int8` | `4` | `qwen3:4b` | `libx264` |
 
-### Overriding Auto-Detected Settings
-Copy `config.default.yaml` to `config.yaml` and replace any `"auto"` value with an explicit override. StreamClipper preserves all user overrides and shows provenance (`auto` vs `user override`) when you run `streamclipper setup`:
+> [!NOTE]
+> All auto-detected values can be overridden individually in `config.yaml`. Run `streamclipper setup` to inspect your active tier and verify override provenance.
 
-```yaml
-# Example config.yaml overriding only model_size and video codec
-transcription:
-  model_size: "small"      # user override (other keys remain "auto")
+### YPP Transformative Narrative & Story Engine
+StreamClipper supports four explicit transformation modes:
 
-video:
-  codec: "libx264"         # force software H.264 instead of h264_nvenc
-```
+| Mode | Narrative Commentary | Context Badge | Punch-in Zoom | Chat Ticker | Multi-Beat Jump Cuts | Intended Content |
+| :---: | :---: | :---: | :---: | :---: | :---: | :--- |
+| **`auto`** *(default)* | Yes | Yes | Yes | Yes | Auto (if &ge;5s dead air) | Standard streams & highlights |
+| **`narrative`** | Yes | Yes | Yes | Yes | No (single continuous cut) | High-stakes continuous moments |
+| **`story`** | Yes | Yes | Yes | Yes | Yes (stitches 2–3 beats) | Multi-stage encounters / setups |
+| **`raw`** | No | No | No | No | No (uncut slice + captions) | Purist clips & fast archival |
 
-> **CPU Safety Guard:** If `transcription.device` resolves (or is set) to `"cpu"`, StreamClipper automatically coerces `float16` / `int8_float16` to `int8` so `faster-whisper` / WhisperX will not crash on CPU.
+- **Adaptive Commentary Classification**: Analyzes each highlight's context into `funny`, `fail`, `graphics_detail`, `hype`, `clutch`, `chat_chaos`, `lore_secret`, or `analysis`, adapting script tone to match the moment naturally.
+- **Conditional Multi-Beat Story Mode**: Detects long pauses (&ge;5s dead air) and stitches 2–3 beats (*Setup &rarr; Escalation &rarr; Payoff*), automatically remapping word-level subtitle timings, chat bursts, and zoom offsets to the unified timeline.
+- **Locked Split-Line Punch-In Zoom**: In facecam layouts (35% top facecam / 65% bottom gameplay), the 1.20x climax zoom applies strictly to the gameplay layer around `peak_time`, leaving the split line locked at `y = 672` without cropping the facecam.
+- **FFmpeg `libass` Subtitle Burn-In**: Burns active-word highlighted captions (`hormozi`, `single_word`, or `sentence`) alongside live chat reaction bursts. Subtitles are rendered via an isolated Windows-safe working-directory call to prevent path escaping bugs.
+- **Single Lossy Video Re-Encode Architecture**: Intermediate compositing writes ultrafast high-bitrate temp video. Commentary audio mixing copies video streams (`-c:v copy`), performing only one lossy video compression pass during final caption burn-in.
 
 ---
 
-## Installation & Quick Start
+## Audio Ducking & Visual Polish Timeline
 
-### 1. Install Prerequisites (FFmpeg)
+```mermaid
+flowchart LR
+    subgraph IntroPhase ["0.0s &ndash; Intro Window"]
+        I1["Narration Intro Voiceover"]
+        I2["Stream Audio Ducked to 18%"]
+        I3["Hormozi Narration Card & Badge"]
+    end
 
-**Windows (PowerShell):**
+    subgraph ClimaxPhase ["Climax Window (Peak Moment)"]
+        C1["Original Streamer Audio at 100%"]
+        C2["1.20x Locked Split Spike Zoom"]
+        C3["Live Chat Burst Ticker Overlay"]
+        C4["Active-Word Gameplay Captions"]
+    end
+
+    subgraph OutroPhase ["Outro Window &ndash; End"]
+        O1["Narration Outro Voiceover"]
+        O2["Stream Audio Ducked to 18%"]
+        O3["Hormozi Narration Card & CTA"]
+    end
+
+    IntroPhase --> ClimaxPhase --> OutroPhase
+```
+
+During narration windows, StreamClipper applies time-varying volume ducking down to `18%` (`volume=...:eval=frame`). As soon as the commentary finishes, original stream volume returns to `100%` so punchlines, clutch reactions, and gameplay audio hit at full dynamic impact.
+
+### Voiceover Synthesis Options
+StreamClipper supports four voiceover strategies configured via `transformation.tts_engine`:
+1. **Local Kokoro-82M** (`kokoro`): 100% offline, free neural TTS with natural intonation (default voice: `af_heart`).
+2. **Microsoft Edge-TTS** (`edge-tts`): Free, high-quality cloud TTS requiring no API keys (default voice: `en-US-GuyNeural`).
+3. **ElevenLabs API** (`elevenlabs`): Studio-grade voices or personal voice clones via `ELEVENLABS_API_KEY` and `transformation.elevenlabs_voice_id`.
+4. **Human Microphone Override**: Pass pre-recorded audio files (`--voice-intro ./intro.wav --voice-outro ./outro.wav`) to use your own voice with automatic ducking and normalization.
+
+> [!TIP]
+> Setting `transformation.tts_engine: "auto"` uses local Kokoro-82M when available and falls back cleanly to Edge-TTS if local speech libraries are absent.
+
+---
+
+## Topic Video Production Pipeline
+
+In addition to vertical Shorts, StreamClipper includes an end-to-end long-form topic video generator. It ingests multiple livestreams, gameplay clips, and official trailers into a searchable library, discovers common topics, and constructs structured multi-stream deep dives.
+
+```mermaid
+flowchart TD
+    Sources["Multi-Stream Library<br/>(Streamer VODs + Official Trailers)"] --> Ingest["Library Ingestion & Frame Indexing<br/>(streamclipper library add)"]
+    Ingest --> Cluster["Topic Discovery & Story Clustering<br/>(streamclipper topics suggest)"]
+    Cluster --> Plan["Narrative Scripting & Blueprint<br/>(Explainer / Mystery / Countdown)"]
+    Plan --> Gate{"Creator Review & Approval Gate<br/>(streamclipper topics approve)"}
+    
+    Gate -->|Approved| RenderLong["16:9 Long-Form Video (8&ndash;10 min)<br/>&bull; Ducked Ken-Burns B-roll<br/>&bull; Automatic YouTube Chapters<br/>&bull; Auto 1280x720 Thumbnail"]
+    Gate -->|Approved| RenderShorts["Three 9:16 Vertical Shorts<br/>&bull; 1x Teaser (links to long video)<br/>&bull; 2x Standalone Beat Spotlights<br/>&bull; Zero repeated footage"]
+```
+
+Each approved topic plan produces:
+- **1 Long 16:9 Video** (8–10 minutes) with auto-spaced YouTube chapters, Ken-Burns ducked B-roll, on-screen streamer credits, an auto-generated 1280×720 thumbnail, and upload-ready metadata.
+- **1 Teaser Short (`short_teaser.mp4`)**: Hooks viewers with the core mystery or premise and points directly to the long-form video via YouTube Studio's "Related Video" feature.
+- **2 Standalone Shorts (`short_a.mp4`, `short_b.mp4`)**: Distinct, punchy highlight shorts built from separate story beats with zero footage overlap.
+
+---
+
+## Prerequisites & Installation
+
+### System Requirements
+- **Python**: `>= 3.10` (Python 3.12 strongly recommended for prebuilt CUDA wheels on Windows).
+- **FFmpeg**: FFmpeg build with **`libass`** and **`h264_nvenc`** on system `PATH`.
+- **GPU**: NVIDIA GPU with 6 GB+ VRAM recommended (CPU-only execution fully supported).
+- **LLM Backend**: Local [Ollama](https://ollama.com/) (for standalone CLI) or an MCP host client (Claude Desktop / Antigravity).
+
+### Windows Installation (PowerShell)
+
 ```powershell
+# 1. Install FFmpeg with libass support via WinGet
 winget install Gyan.FFmpeg
-# Restart your terminal, then verify FFmpeg + libass:
+
+# Restart PowerShell and verify FFmpeg and the libass filter:
 ffmpeg -version
 ffmpeg -hide_banner -filters | Select-String " ass "
-```
 
-**Linux (Ubuntu / Debian):**
-```bash
-sudo apt update && sudo apt install -y ffmpeg libsndfile1 libgl1 libglib2.0-0 python3 python3-venv
-ffmpeg -version
-ffmpeg -hide_banner -filters | grep " ass "
-```
-
-### 2. Clone & Set Up Python Virtual Environment
-
-**Windows (PowerShell — Python 3.12 `.venv`):**
-```powershell
+# 2. Clone repository & create Python 3.12 virtual environment
 git clone https://github.com/PrakashD2003/Clipper.git
 cd Clipper
 
 py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 
-# Optional (NVIDIA GPU): install CUDA-enabled PyTorch before StreamClipper
+# 3. Optional: Install CUDA PyTorch wheels (for NVIDIA GPUs)
 pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124
 
-# Install StreamClipper (core + MCP server + free TTS engines)
+# 4. Install StreamClipper with MCP and TTS extras
 pip install -e ".[mcp,tts]"
 
-# Optional: install WhisperX for word-level wav2vec2 alignment
+# Optional: Install WhisperX for wav2vec2 word-level alignment
 pip install -e ".[whisperx]"
 ```
 
-**Linux (bash):**
+### Linux Installation (Ubuntu / Debian)
+
 ```bash
+# 1. Install system prerequisites and FFmpeg
+sudo apt update && sudo apt install -y ffmpeg libsndfile1 libgl1 libglib2.0-0 python3 python3-venv
+
+# Verify FFmpeg and libass:
+ffmpeg -version
+ffmpeg -hide_banner -filters | grep " ass "
+
+# 2. Clone repository & create virtual environment
 git clone https://github.com/PrakashD2003/Clipper.git
 cd Clipper
 
 python3 -m venv .venv
 source .venv/bin/activate
 
-# Optional (NVIDIA GPU): install CUDA-enabled PyTorch before StreamClipper
+# 3. Optional: Install CUDA PyTorch wheels
 pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124
 
-# Install StreamClipper (core + MCP server + free TTS engines)
+# 4. Install StreamClipper
 pip install -e ".[mcp,tts]"
-
-# Optional: install WhisperX for word-level wav2vec2 alignment
 pip install -e ".[whisperx]"
 ```
 
-> **Available Optional Extras (`pyproject.toml`):**
-> - `pip install -e .` — Core CLI pipeline (`yt-dlp`, `faster-whisper`, `librosa`, `soundfile`, `opencv-python`, `moviepy>=2.0.0`, `ollama`, `click`, `rich`)
-> - `pip install -e ".[tts]"` — Both free TTS engines (`kokoro` + `edge-tts`); or install individually via `.[kokoro]` / `.[edge-tts]`
-> - `pip install -e ".[mcp]"` — MCP SDK v2 (`mcp>=2.0.0`) for `streamclipper-mcp`
-> - `pip install -e ".[whisperx]"` — WhisperX with wav2vec2 word-level alignment
-> - `pip install -e ".[dev]"` — Test suite (`pytest`, `pytest-asyncio`)
+### Available Package Extras
 
-### 3. Verify Environment & Hardware Profile
+| Package Extra | Command | Included Components |
+| :--- | :--- | :--- |
+| **Core** | `pip install -e .` | `yt-dlp`, `faster-whisper`, `librosa`, `soundfile`, `opencv-python`, `moviepy>=2.0.0`, `ollama`, `click`, `rich` |
+| **`[mcp]`** | `pip install -e ".[mcp]"` | MCP SDK v2 (`mcp>=2.0.0`) for `streamclipper-mcp` |
+| **`[tts]`** | `pip install -e ".[tts]"` | Free voiceover engines (`kokoro>=0.9.0` and `edge-tts>=6.1.0`) |
+| **`[whisperx]`**| `pip install -e ".[whisperx]"` | `whisperx` with wav2vec2 forced phoneme alignment |
+| **`[dev]`** | `pip install -e ".[dev]"` | Test suite dependencies (`pytest`, `pytest-asyncio`) |
+
+### Hardware Verification
+
+Verify your toolchain and inspect the resolved hardware tier:
 
 ```bash
 streamclipper setup
 ```
 
-`streamclipper setup` checks every dependency (`yt-dlp`, `FFmpeg`, `WhisperX`, `SoundFile`, `OpenCV`, `MoviePy v2`, `Ollama SDK`, `MCP SDK v2 (MCPServer)`), probes your CUDA GPU VRAM & Compute Capability, and prints the resolved `HardwareProfile` table.
+`streamclipper setup` verifies `yt-dlp`, `FFmpeg`, `WhisperX`, `SoundFile`, `OpenCV`, `MoviePy`, `Ollama SDK`, and `MCP SDK v2`, probes your GPU VRAM and Compute Capability, and outputs your active configuration tier.
 
-### 4. Clip Your First Stream
+---
+
+## CLI Command Reference
+
+### Clip a Single Stream (`streamclipper clip`)
 
 ```bash
-# Default YPP auto mode (multi-beat story when sub_clips exist, else narrative)
+# Auto mode (resolves to story if multi-beat sub_clips exist, else narrative)
 streamclipper clip "https://www.youtube.com/watch?v=VIDEO_ID" --game "GTA 6" --mode auto
 
-# Single-cut narrative mode (full commentary + overlays, never jump-cuts)
+# Narrative mode (single continuous cut with full YPP commentary and overlays)
 streamclipper clip "https://www.youtube.com/watch?v=VIDEO_ID" --mode narrative
 
-# Multi-beat story mode (stitches Setup -> Escalation -> Payoff beats + commentary)
+# Multi-beat story mode (Setup -> Escalation -> Payoff cuts + commentary)
 streamclipper clip "https://www.youtube.com/watch?v=VIDEO_ID" --mode story
 
-# Raw mode (uncut clip + captions, skipping YPP voiceover, badge, zoom, and chat ticker)
+# Raw mode (uncut clip + captions only, skipping voiceover and commentary)
 streamclipper clip "https://www.youtube.com/watch?v=VIDEO_ID" --mode raw
 
-# Supply your own recorded human voiceover WAVs for intro and/or outro
+# Supply custom recorded human voiceover for intro/outro
 streamclipper clip "https://www.youtube.com/watch?v=VIDEO_ID" --mode story --voice-intro ./my_intro.wav --voice-outro ./my_outro.wav
 
-# Ignore cached pipeline stages and re-run from scratch
-streamclipper clip "https://www.youtube.com/watch?v=VIDEO_ID" --mode auto --force
+# Force re-execution (bypasses .cache/ and re-runs all stages)
+streamclipper clip "https://www.youtube.com/watch?v=VIDEO_ID" --force
+```
 
-# Auto-discover top recent streams for any game and batch-clip in parallel (non-interactive)
-streamclipper auto --game "GTA 6" --max-streams 5 --max-clips 3 --mode auto
+### Auto-Discovery & Batch Clipping (`streamclipper auto`)
 
-# Inspect cached / in-progress pipelines
+Searches YouTube for top streams of a specified game, ranks them by popularity, and batch-processes highlights in parallel:
+
+```bash
+streamclipper auto --game "GTA 6" --max-streams 3 --max-clips 2 --mode auto
+```
+
+### Pipeline Diagnostics & Cache Status (`streamclipper status`)
+
+Lists all cached pipelines in `.cache/`, their active status (`DOWNLOADING`, `TRANSCRIBING`, `ANALYZING`, `SCORING`, `ASSEMBLING`, `COMPLETE`), and detected highlight counts:
+
+```bash
 streamclipper status
 ```
 
-#### CLI Options Summary
-- **Global flags** (`streamclipper [OPTIONS] COMMAND`):
-  - `-c, --config FILE`: Path to a custom `config.yaml`
-  - `-v, --verbose`: Enable `DEBUG` logging
-  - `--version`: Print version and exit
-- **`streamclipper clip URL`**: `-n/--max-clips`, `-g/--game`, `-s/--streamer`, `--interactive/--no-interactive`, `--mode [auto|narrative|story|raw]`, `--voice-intro FILE`, `--voice-outro FILE`, `--force`
-- **`streamclipper auto`**: `-g/--game`, `-n/--max-streams`, `--max-clips`, `--mode [auto|narrative|story|raw]`, `--voice-intro FILE`, `--voice-outro FILE`, `--force`
-- **`streamclipper setup`**: Dependency checks + `HardwareProfile` resolution report
-- **`streamclipper status`**: Table of cached/in-progress pipelines in `.cache/`
+### Topic Video Production (`library` & `topics`)
 
-#### Generated Output Layout
+```bash
+# Ingest sources into game library
+streamclipper library add "https://youtube.com/watch?v=..." --channel "StreamerA" --game "GTA 6"
+
+# Suggest topics based on ingested transcripts and frame sheets
+streamclipper topics suggest "GTA 6"
+
+# Draft a structured script and beat outline
+streamclipper topics plan "GTA 6" "hidden-military-base"
+
+# Review plan details and approve for render
+streamclipper topics show PLAN_ID
+streamclipper topics approve PLAN_ID
+
+# Render long-form 16:9 documentary and vertical Shorts
+streamclipper topics render PLAN_ID
+streamclipper topics shorts PLAN_ID
+```
+
+### Output Layout
+
 ```text
 output/
 └── GTA 6/
     └── StreamerName/
-        └── 2026-11-18/
-            ├── clip_01.mp4              # 1080x1920 9:16 H.264/AAC vertical Short
-            ├── clip_01.json             # Hook title, description, hashtags, moment_type, narration & mode
-            └── clip_01_transcript.txt   # Clean highlight transcript
+        └── 2026-11-23/
+            ├── clip_01.mp4              # 1080x1920 9:16 vertical Short
+            ├── clip_01.json             # Companion metadata (titles, tags, script, mode)
+            └── clip_01_transcript.txt   # Timestamped transcript of the highlight
 ```
 
 ---
 
-## Voiceover & YPP Narration Setup
+## MCP Server Integration Guide
 
-`TransformativeNarrator` (`src/streamclipper/assembly/narrator.py`) overlays intro/outro commentary while dynamically ducking stream audio to `18%` (`volume=...:eval=frame`), leaving original stream audio at `100%` during the highlight's climax.
+StreamClipper exposes its full pipeline as an MCP server (`streamclipper-mcp`), allowing host AI clients to orchestrate downloads, transcriptions, scoring, and rendering.
 
-### Option 1: Free Default (`auto`: Kokoro-82M → Edge-TTS)
-Install the optional TTS extras:
-```bash
-pip install -e ".[tts]"
-```
-With `transformation.tts_engine: "auto"` (the default):
-1. **Primary — Local Kokoro-82M (100% offline & free)**: Uses `transformation.tts_voice` (default: `"af_heart"`).
-2. **Fallback — Microsoft Edge-TTS (free, no API key)**: Automatically used if Kokoro is unavailable, using `transformation.edge_tts_voice` (default: `"en-US-GuyNeural"`).
+### Claude Desktop Configuration
 
-You can also lock a specific free engine in `config.yaml`:
-```yaml
-transformation:
-  tts_engine: "kokoro"            # or "edge-tts"
-  tts_voice: "af_heart"           # Kokoro voice ID
-  edge_tts_voice: "en-US-GuyNeural"
-```
+Add StreamClipper to your configuration file:
+- **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
+- **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Linux**: `~/.config/Claude/claude_desktop_config.json`
 
-### Option 2: Optional ElevenLabs API / Personal Voice Clone
-To narrate clips in a studio voice or your own **ElevenLabs personal voice clone**:
-
-1. Export your API key in the environment:
-   **Windows (PowerShell):**
-   ```powershell
-   $env:ELEVENLABS_API_KEY = "sk_your_elevenlabs_api_key"
-   ```
-   **Linux / macOS (bash):**
-   ```bash
-   export ELEVENLABS_API_KEY="sk_your_elevenlabs_api_key"
-   ```
-2. Configure `config.yaml`:
-   ```yaml
-   transformation:
-     tts_engine: "elevenlabs"
-     elevenlabs_voice_id: "YOUR_CLONED_VOICE_ID"
-     elevenlabs_model_id: "eleven_multilingual_v2"
-   ```
-If `ELEVENLABS_API_KEY` or `elevenlabs_voice_id` is unset (or an API error occurs), StreamClipper gracefully falls back to the free `auto` chain (`kokoro` → `edge-tts`) so renders never fail.
-
-### Option 3: Custom Human Microphone WAVs (Highest YPP Authenticity)
-Record your own short intro/outro WAV (or `.m4a`/`.mp3`/`.aac`, probed via `ffprobe` fallback) and pass it directly on the CLI (or via MCP `render_clip`):
-```bash
-streamclipper clip "https://www.youtube.com/watch?v=VIDEO_ID" --mode narrative --voice-intro ./recordings/intro.wav --voice-outro ./recordings/outro.wav
-```
-Custom audio paths bypass TTS synthesis for that slot, normalize automatically to `48000 Hz` stereo, work even on silent video clips (via a synthesized `anullsrc` base track), and apply the exact same `18%` dynamic stream ducking.
-
-To keep visual overlays (hook title, context badge, spike zoom, live chat ticker) without any voiceover audio, set `transformation.tts_engine: "none"`.
-
----
-
-## Standalone Mode with Ollama
-
-When running StreamClipper from the CLI without an MCP host, highlight scoring and YPP commentary generation run locally through [Ollama](https://ollama.com/).
-
-### 1. Install & Start Ollama
-- **Windows**: Download and install from [ollama.com/download](https://ollama.com/download) (or `winget install Ollama.Ollama`). Ollama runs automatically in the system tray at `http://localhost:11434`.
-- **Linux**:
-  ```bash
-  curl -fsSL https://ollama.com/install.sh | sh
-  ollama serve
-  ```
-
-### 2. Pull the Model for Your Hardware Tier
-Pull the model matching the `llm.model` shown by `streamclipper setup`:
-
-```bash
-# For cuda_high_vram (10 GB+ VRAM) and cuda_mid_tensor (e.g. RTX 4050 6 GB):
-ollama pull qwen3:8b
-
-# For cuda_mid_no_tensor (e.g. GTX 1660 SUPER 6 GB), cpu_fallback, or cpu_only:
-ollama pull qwen3:4b
-```
-
-Verify Ollama is reachable:
-```bash
-ollama list
-```
-To use a different local model or remote Ollama server, override `llm.model` and `llm.base_url` in `config.yaml`.
-
----
-
-## MCP Server Setup (Claude Desktop & Antigravity)
-
-StreamClipper exposes its entire pipeline over stdio using **MCP SDK v2 (`MCPServer` from `mcp>=2.0.0`)** via the `streamclipper-mcp` entry point. In MCP mode, **your host AI client (Claude Desktop, Antigravity, etc.) acts as the highlight scorer and YPP scriptwriter** — no local Ollama installation required.
-
-### 1. Install the MCP Extra
-```bash
-pip install -e ".[mcp]"
-```
-
-### 2. Configure Claude Desktop or Antigravity
-
-Add StreamClipper to your MCP client configuration file:
-- **Claude Desktop (Windows)**: `%APPDATA%\Claude\claude_desktop_config.json`
-- **Claude Desktop (macOS)**: `~/Library/Application Support/Claude/claude_desktop_config.json`
-- **Claude Desktop (Linux)**: `~/.config/Claude/claude_desktop_config.json`
-- **Antigravity**: Workspace / user `mcp_config.json`
-
-**Standard (`streamclipper-mcp` on `PATH`):**
-```json
-{
-  "mcpServers": {
-    "streamclipper": {
-      "command": "streamclipper-mcp",
-      "args": [],
-      "env": {}
-    }
-  }
-}
-```
-
-**Windows `.venv` Explicit Path (recommended if `.venv\Scripts` is not on global `PATH` — adjust the path to your local clone):**
 ```json
 {
   "mcpServers": {
@@ -356,282 +383,182 @@ Add StreamClipper to your MCP client configuration file:
   }
 }
 ```
-> *Optional:* If you want ElevenLabs voiceovers in MCP mode without setting a system-wide environment variable, add `"ELEVENLABS_API_KEY": "sk_your_key"` inside `"env"`. Leave `"env": {}` to inherit your existing shell/system environment variables untouched.
 
-### 3. Exposed MCP Tools (`streamclipper-mcp`)
+### Antigravity Configuration
 
-| Tool Name | Purpose |
-| :--- | :--- |
-| `discover_streams` | Find top recent YouTube streams/VODs for a given game (`game`, `max_results`). |
-| `download_stream_audio` | Download 16 kHz mono WAV audio and initialize `StepCache` state. |
-| `transcribe_audio` | Run hardware-aware WhisperX transcription (resolves `StepCache` by `url` or `audio_path`). |
-| `analyze_signals` | Run streamed loudness + `yt-dlp` live chat velocity analysis and persist spikes to cache (resolves `StepCache` by `url` or `audio_path`). |
-| `get_transcript_chunks` | Return timestamped transcript chunks paired with overlapping spikes (resolves `StepCache` by `url` or `audio_path`; `only_with_signals=True` by default, cutting context tokens by 60–80%). |
-| `submit_highlights` | Submit host-LLM highlight selections including `moment_type`, `narration_intro`, `narration_outro`, `context_badge`, and `sub_clips`, fusing signals and persisting to `StepCache`. |
-| `render_clip` | Render a single highlight into a final 9:16 Short offline without requiring Ollama (`mode`: `auto` \| `narrative` \| `story` \| `raw`, `sub_clips_json`, and optional `voice_intro_path` / `voice_outro_path`). |
-| `render_all_selected` | Batch-render all submitted highlights stored in `StepCache` for a stream (zero-Ollama offline metadata path). |
-| `get_pipeline_status` | Inspect status and progress of all cached pipelines. |
-| `generate_post_metadata` | Generate structured post captions and normalized hashtags offline (`use_ollama=False` by default; set `use_ollama=True` to invoke local Ollama). |
-| `cleanup_temp` | Remove temporary audio/video files bounded within `general.temp_dir` for a specific `url` (or for all `COMPLETE` pipelines when `url` is omitted). |
+Add to your workspace or user `mcp_config.json`:
 
----
-
-## Topic Videos (16:9 Long-Form & 9:16 Shorts)
-
-StreamClipper includes a complete **Topic Video Pipeline** that clusters many streams and official gameplay trailers of the same game into original, narrator-led deep dives and vertical Shorts. One approved script produces:
-
-- **1 Long 16:9 Video** (8–10 minutes) with auto-spaced YouTube chapters, Ken-Burns ducked B-roll, on-screen credit pills, auto-generated 1280×720 thumbnail, and ready-to-paste `long_post.txt`.
-- **3 Vertical 9:16 Shorts** (35–60 seconds) with persistent hook title, on-screen channel credits, ducked commentary, and Hormozi captions:
-  - **1 Teaser Short (`short_teaser.mp4`)**: Hooks viewers and points directly to the long video via YouTube Studio's "Related Video" feature.
-  - **2 Standalone Shorts (`short_a.mp4`, `short_b.mp4`)**: Independent spotlight videos built around distinct strong beats, with zero footage repetition between them.
-
-### Quick Workflow
-```bash
-# 1. Ingest sources (streamer VODs + official footage)
-streamclipper library add "https://youtube.com/watch?v=..." --channel "StreamerName" --game "GTA 6"
-
-# 2. Discover candidate topics
-streamclipper topics suggest "GTA 6"
-
-# 3. Plan outline and script (rotates numbered explainer, countdown ranking, or mystery story shape)
-streamclipper topics plan "GTA 6" "hidden-casino-secrets"
-
-# 4. Mandatory review & approval gate
-streamclipper topics show PLAN_ID
-streamclipper topics approve PLAN_ID
-
-# 5. Render 16:9 long video and 9:16 Shorts
-streamclipper topics render PLAN_ID
-streamclipper topics shorts PLAN_ID
+```json
+{
+  "mcpServers": {
+    "streamclipper": {
+      "command": "streamclipper-mcp",
+      "args": []
+    }
+  }
+}
 ```
 
-For full details on the MCP tools, Ollama CLI workflows, upload checklists, and YouTube Partner Program fair-use policies, see the comprehensive [Topic Videos Guide](docs/topic-videos-guide.md).
+> [!TIP]
+> If using ElevenLabs voice generation in MCP mode without setting a global environment variable, add `"ELEVENLABS_API_KEY": "sk_your_key"` to the `"env"` object in your MCP configuration.
+
+### Exposed MCP Tools
+
+| Tool Name | Scope | Purpose |
+| :--- | :---: | :--- |
+| `discover_streams` | Discovery | Searches YouTube for top recent livestreams or VODs by game keyword. |
+| `download_stream_audio` | Ingestion | Downloads 16 kHz mono WAV audio and initializes resumable `StepCache` state. |
+| `transcribe_audio` | Analysis | Executes hardware-aware transcription with WhisperX word alignment. |
+| `analyze_signals` | Analysis | Computes streamed RMS loudness spikes and native live chat velocity spikes. |
+| `get_transcript_chunks` | Scoring | Returns transcript chunks paired with signals (`only_with_signals=True` cuts tokens by 60–80%). |
+| `submit_highlights` | Scoring | Submits host-LLM highlight picks with `moment_type`, `narration_intro`, and `narration_outro`. |
+| `render_clip` | Assembly | Renders an individual highlight into a 9:16 Short (supports `auto`, `narrative`, `story`, `raw`). |
+| `render_all_selected` | Assembly | Batch renders all highlights submitted to `StepCache` without requiring local Ollama. |
+| `get_pipeline_status` | Management | Inspects active pipeline states, progress flags, and cached highlight counts. |
+| `generate_post_metadata`| Distribution| Formats YouTube titles, description copy, and normalized hashtags offline. |
+| `cleanup_temp` | Maintenance | Clears intermediate video and audio chunks for a URL from `general.temp_dir`. |
+| `library_add_source` | Topics | Ingests a video source into the multi-stream game library. |
+| `list_library` / `search_library` | Topics | Queries indexed library footage and transcripts. |
+| `suggest_topics` / `start_topic_plan` | Topics | Discovers narrative topics and drafts chaptered production outlines. |
+| `approve_topic_plan` | Topics | Approves a topic plan for rendering through the quality gate. |
+| `render_topic_video` / `render_topic_shorts` | Topics | Assembles the final 16:9 long documentary and three vertical Shorts. |
+
+For a step-by-step interactive workflow walkthrough, see the [MCP Workflow Guide](docs/streamclipper-mcp-workflow-guide.md) and [Topic Videos Guide](docs/topic-videos-guide.md).
 
 ---
 
 ## Configuration Reference (`config.yaml`)
 
-StreamClipper loads `config.default.yaml` first and deep-merges your optional `config.yaml` (or `-c /path/to/config.yaml`) on top. You only need to specify keys you want to customize.
+StreamClipper reads `config.default.yaml` and applies your local `config.yaml` overrides on top. Only keys you wish to customize need to be defined.
 
-### `general`
-| Key | Default | Description |
-| :--- | :--- | :--- |
-| `general.output_dir` | `"./output"` | Root directory for rendered clips, metadata JSON, and transcripts. |
-| `general.temp_dir` | `"./temp"` | Working directory for downloaded audio/segments and intermediate renders. |
-| `general.cache_dir` | `"./.cache"` | Directory for resumable `StepCache` pipeline JSON states. |
-| `general.max_concurrent_streams` | `2` | Maximum concurrent streams processed by `streamclipper auto` (GPU work stays lock-serialized). |
-| `general.log_level` | `"INFO"` | Logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`); overridden to `DEBUG` by `-v/--verbose`. |
+### General Settings (`general`)
 
-### `discovery`
-| Key | Default | Description |
-| :--- | :--- | :--- |
-| `discovery.platform` | `"youtube"` | Streaming platform (`youtube`). |
-| `discovery.default_game` | `"GTA 6"` | Default game used when `--game` is omitted. |
-| `discovery.game_keywords` | `["GTA 6", "Grand Theft Auto 6", "GTA VI"]` | YouTube search query variants used when discovering streams for `discovery.default_game`. |
-| `discovery.min_viewers` | `1000` | Minimum view/viewer threshold for discovered VODs. |
-| `discovery.max_streams` | `10` | Maximum number of streams returned by discovery. |
-| `discovery.min_duration_hours` | `1` | Minimum VOD length in hours (filters out short uploads). |
+| Parameter | Default | Description |
+| :--- | :---: | :--- |
+| `output_dir` | `"./output"` | Destination directory for final videos and companion metadata files. |
+| `temp_dir` | `"./temp"` | Temporary scratch directory for downloads and intermediate renders. |
+| `cache_dir` | `"./.cache"` | Directory storing resumable `StepCache` pipeline state JSON files. |
+| `max_concurrent_streams` | `2` | Maximum concurrent streams processed during auto-discovery runs. |
+| `log_level` | `"INFO"` | Logging verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`). |
 
-### `transcription`
-| Key | Default | Description |
-| :--- | :--- | :--- |
-| `transcription.engine` | `"whisperx"` | ASR engine: `whisperx` (word-level wav2vec2 alignment) or `faster-whisper`. |
-| `transcription.model_size` | `"auto"` | `auto` \| `tiny` \| `base` \| `small` \| `medium` \| `large-v2`. |
-| `transcription.device` | `"auto"` | `auto` \| `cuda` \| `cpu`. |
-| `transcription.compute_type` | `"auto"` | `auto` \| `float16` \| `int8_float16` \| `int8`. |
-| `transcription.language` | `"en"` | ISO language code (e.g., `"en"`) or `"auto"` for automatic language detection. |
-| `transcription.batch_size` | `"auto"` | `auto` \| positive integer (e.g., `4`, `8`, `16`). |
+### Transcription Settings (`transcription`)
 
-### `analysis`
-| Key | Default | Description |
-| :--- | :--- | :--- |
-| `analysis.chunk_minutes` | `12` | Duration (minutes) of each transcript chunk sent to scoring. |
-| `analysis.min_clip_seconds` | `30` | Minimum allowed clip duration in seconds. |
-| `analysis.max_clip_seconds` | `90` | Maximum allowed clip duration in seconds. |
-| `analysis.max_clips_per_stream` | `5` | Maximum number of top highlights selected per stream. |
-| `analysis.min_highlight_score` | `7.0` | Minimum fused score (0–10) required for a highlight to pass. |
-| `analysis.weights.loudness` | `0.25` | Weight of audio RMS loudness spikes (all 3 weights must sum to `1.0`). |
-| `analysis.weights.chat_velocity` | `0.25` | Weight of live chat velocity spikes. |
-| `analysis.weights.llm_score` | `0.50` | Weight of LLM semantic highlight score. |
-| `analysis.loudness.threshold_std` | `2.5` | Standard deviations above mean RMS to trigger a loudness spike. |
-| `analysis.loudness.window_seconds` | `2` | RMS frame window size in seconds. |
-| `analysis.loudness.merge_gap_seconds` | `5` | Merge adjacent loudness spikes closer than N seconds (preserving peak timestamp). |
-| `analysis.chat.window_seconds` | `10` | Time bin size (seconds) for live chat velocity calculation. |
-| `analysis.chat.prominence_factor` | `3.0` | Standard deviations above baseline message rate for a chat spike. |
-| `analysis.chat.min_messages` | `50` | Minimum total chat messages required before enabling chat velocity analysis. |
+| Parameter | Default | Description |
+| :--- | :---: | :--- |
+| `engine` | `"whisperx"` | ASR transcription engine: `whisperx` (wav2vec2 alignment) or `faster-whisper`. |
+| `model_size` | `"auto"` | Model size (`auto`, `tiny`, `base`, `small`, `medium`, `large-v2`). |
+| `device` | `"auto"` | Execution target (`auto`, `cuda`, `cpu`). |
+| `compute_type` | `"auto"` | Precision (`auto`, `float16`, `int8_float16`, `int8`). Auto-coerced to `int8` on CPU. |
+| `batch_size` | `"auto"` | Inference batch size (`auto`, `4`, `8`, `16`). |
+| `language` | `"en"` | Language code (`en` or `auto` for multi-language detection). |
 
-### `llm`
-| Key | Default | Description |
-| :--- | :--- | :--- |
-| `llm.provider` | `"ollama"` | Standalone CLI LLM backend (`ollama`). |
-| `llm.model` | `"auto"` | `auto` (`qwen3:8b` / `qwen3:4b` per `HardwareProfile`) or any Ollama model tag. |
-| `llm.base_url` | `"http://localhost:11434"` | Ollama HTTP API endpoint. |
-| `llm.temperature` | `0.3` | Sampling temperature for structured highlight JSON scoring. |
-| `llm.timeout_seconds` | `120` | Per-chunk request timeout in seconds. |
+### Signal Analysis & Highlight Scoring (`analysis`)
 
-### `video`
-| Key | Default | Description |
-| :--- | :--- | :--- |
-| `video.format` | `"mp4"` | Output container format. |
-| `video.resolution` | `[1080, 1920]` | Output `[width, height]` in pixels (9:16 vertical Shorts). |
-| `video.fps` | `30` | Output frame rate. |
-| `video.codec` | `"auto"` | `auto` (`h264_nvenc` if CUDA+NVENC else `libx264`) \| `h264_nvenc` \| `libx264`. |
-| `video.audio_codec` | `"aac"` | Output audio codec. |
-| `video.crf` | `23` | Quality target (`-crf` for `libx264`, `-cq` for `h264_nvenc`; lower = higher quality, 18–28). |
+| Parameter | Default | Description |
+| :--- | :---: | :--- |
+| `chunk_minutes` | `12` | Duration in minutes of transcript chunks evaluated during scoring. |
+| `min_clip_seconds` | `30` | Minimum allowed duration for an extracted highlight clip. |
+| `max_clip_seconds` | `90` | Maximum allowed duration for an extracted highlight clip. |
+| `max_clips_per_stream` | `5` | Maximum number of top highlights retained per stream. |
+| `min_highlight_score` | `7.0` | Minimum fused score (0–10 scale) required for a highlight to pass. |
+| `weights.loudness` | `0.25` | Relative weight of audio RMS loudness spikes (weights sum to 1.0). |
+| `weights.chat_velocity` | `0.25` | Relative weight of YouTube live chat message velocity bursts. |
+| `weights.llm_score` | `0.50` | Relative weight of LLM semantic highlight scoring. |
+| `loudness.threshold_std`| `2.5` | Number of standard deviations above mean RMS to trigger a loudness spike. |
+| `chat.prominence_factor`| `3.0` | Number of standard deviations above baseline rate to trigger a chat burst. |
 
-### `captions`
-| Key | Default | Description |
-| :--- | :--- | :--- |
-| `captions.style` | `"hormozi"` | Caption style: `hormozi` (grouped active-word highlight), `single_word`, or `sentence`. |
-| `captions.words_per_group` | `4` | Words shown simultaneously in `hormozi` style. |
-| `captions.font` | `"Arial"` | ASS font family name. |
-| `captions.font_size` | `72` | ASS font size. |
-| `captions.color` | `"white"` | Base caption text color (`white`, `black`, `yellow`, `gold`, `red`, `cyan`, or `#RRGGBB` hex). |
-| `captions.highlight_color` | `"#FFD700"` | Active-word highlight color (`#RRGGBB` hex or supported named color, converted dynamically to ASS BGR). |
-| `captions.stroke_color` | `"black"` | Text outline/stroke color (`white`, `black`, `yellow`, `gold`, `red`, `cyan`, or `#RRGGBB` hex). |
-| `captions.stroke_width` | `4` | Outline thickness in pixels. |
-| `captions.position_y_ratio` | `0.75` | Vertical placement ratio (`0.75` = 75% down from top). |
+### Video Composition & Encoding (`video`)
 
-### `hook_title`
-| Key | Default | Description |
-| :--- | :--- | :--- |
-| `hook_title.enabled` | `true` | Enable/disable the opening hook title overlay. |
-| `hook_title.duration_seconds` | `4` | Duration the hook title remains visible at the start of the clip. |
-| `hook_title.font` | `"Arial-Bold"` | Pillow TrueType font name or path. |
-| `hook_title.font_size` | `50` | Hook title font size. |
-| `hook_title.color` | `"white"` | Hook title text color. |
-| `hook_title.stroke_color` | `"black"` | Hook title outline color. |
-| `hook_title.stroke_width` | `3` | Hook title outline thickness. |
-| `hook_title.position` | `"top"` | Placement: `top` or `center`. |
-| `hook_title.fade_in` | `true` | Apply `CrossFadeIn` transition (up to `0.5 s`) on the hook title banner and adaptive context badge. |
+| Parameter | Default | Description |
+| :--- | :---: | :--- |
+| `resolution` | `[1080, 1920]` | Output resolution in pixels (9:16 vertical aspect ratio). |
+| `fps` | `30` | Output frame rate. |
+| `codec` | `"auto"` | Video codec (`auto` selects `h264_nvenc` with fallback to `libx264`). |
+| `audio_codec` | `"aac"` | Output audio encoding format. |
+| `crf` | `23` | Quality target (`-crf` for `libx264`, `-cq` for `h264_nvenc`; lower = higher quality). |
 
-### `metadata`
-| Key | Default | Description |
-| :--- | :--- | :--- |
-| `metadata.hashtag_count` | `15` | Target number of normalized hashtags saved in companion metadata JSON. |
-| `metadata.include_streamer_tag` | `true` | Include normalized `#StreamerName` tag. |
-| `metadata.include_game_tag` | `true` | Include normalized `#GameName` tag. |
+### Captions & Visual Polish (`captions` & `transformation`)
 
-### `output`
-| Key | Default | Description |
-| :--- | :--- | :--- |
-| `output.structure` | `"{game}/{streamer}/{date}"` | Output folder template (sanitized for Windows/POSIX path safety). |
-| `output.filename_template` | `"clip_{index:02d}"` | Filename stem template (`{index}`, `{game}`, `{streamer}`, `{date}`). |
-| `output.save_metadata_json` | `true` | Write companion `.json` metadata beside each rendered clip. |
-| `output.save_transcript_txt` | `true` | Write companion `_transcript.txt` beside each rendered clip. |
-
-### `transformation` (YPP Anti-Reused-Content Engine)
-| Key | Default | Description |
-| :--- | :--- | :--- |
-| `transformation.enabled` | `true` | Master toggle for YPP transformative commentary, badge, zoom, and chat ticker. |
-| `transformation.mode` | `"auto"` | `auto` \| `narrative` \| `story` \| `raw` (overridable per run via `--mode`). |
-| `transformation.tts_engine` | `"auto"` | `auto` (`kokoro` → `edge-tts`) \| `kokoro` \| `edge-tts` \| `elevenlabs` \| `none`. |
-| `transformation.tts_voice` | `"af_heart"` | Kokoro-82M voice ID (e.g., `af_heart`, `am_michael`, `bf_emma`). |
-| `transformation.edge_tts_voice` | `"en-US-GuyNeural"` | Edge-TTS voice ID used for `edge-tts` or `auto` fallback. |
-| `transformation.elevenlabs_voice_id` | `""` | Optional ElevenLabs voice or personal voice clone ID (requires `ELEVENLABS_API_KEY`). |
-| `transformation.elevenlabs_model_id` | `"eleven_multilingual_v2"` | ElevenLabs TTS model ID. |
-| `transformation.duck_stream_volume` | `0.18` | Stream audio volume ratio during narrator voiceover (`0.18` = 18%). |
-| `transformation.punch_in_zoom` | `1.20` | Center punch-in zoom multiplier at `peak_time` (`1.0` = disabled). |
-| `transformation.zoom_duration_seconds` | `3.5` | Duration of the punch-in zoom window in seconds. |
-| `transformation.show_chat_ticker` | `true` | Burn real `.live_chat.json` viewer bursts during highlight spikes. |
+| Parameter | Default | Description |
+| :--- | :---: | :--- |
+| `captions.style` | `"hormozi"` | Subtitle format: `hormozi` (active word highlight), `single_word`, or `sentence`. |
+| `captions.words_per_group` | `4` | Number of words displayed simultaneously in `hormozi` mode. |
+| `captions.color` | `"white"` | Primary subtitle text color. |
+| `captions.highlight_color` | `"#FFD700"` | Active-word highlight color. |
+| `transformation.mode` | `"auto"` | Default transformation mode (`auto`, `narrative`, `story`, `raw`). |
+| `transformation.tts_engine` | `"auto"` | Commentary voiceover engine (`auto`, `kokoro`, `edge-tts`, `elevenlabs`, `none`). |
+| `transformation.tts_voice` | `"af_heart"` | Voice identifier for local Kokoro-82M synthesis. |
+| `transformation.edge_tts_voice` | `"en-US-GuyNeural"` | Voice identifier for Microsoft Edge-TTS synthesis. |
+| `transformation.duck_stream_volume` | `0.18` | Stream volume ratio during active narration (18%). |
+| `transformation.punch_in_zoom` | `1.20` | Punch-in zoom multiplier applied to gameplay at `peak_time`. |
+| `transformation.zoom_duration_seconds`| `3.5` | Total duration of the punch-in zoom window. |
+| `transformation.show_chat_ticker` | `true` | Burn real live chat reaction messages during highlight spikes. |
 
 ---
 
-## Troubleshooting (Windows & Linux)
+## Troubleshooting & Diagnostics
 
-### Windows: `ffmpeg`, `git`, or `.venv` Activation Blocked
-- Install FFmpeg via `winget install Gyan.FFmpeg` and restart PowerShell.
-- If PowerShell blocks `.\.venv\Scripts\Activate.ps1`, either allow local scripts once (`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`) or invoke `.venv` executables directly (`.\.venv\Scripts\streamclipper.exe setup`).
-- If `git` or `ffmpeg` is installed but missing from your session `PATH`, add them temporarily or via *System Properties → Environment Variables*:
+### Windows: Script Execution or FFmpeg Filter Errors
+- **Execution Policy Error**: If PowerShell blocks activating your virtual environment (`Activate.ps1`), allow local scripts for your user:
   ```powershell
-  $env:PATH += ";C:\Program Files\Git\cmd"
-  where.exe ffmpeg
-  where.exe ffprobe
+  Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
   ```
-- Verify your FFmpeg build includes `libass`:
+- **Missing `ass` Filter**: Verify that your FFmpeg binary includes `libass`:
   ```powershell
   ffmpeg -hide_banner -filters | Select-String " ass "
   ```
-  *(StreamClipper invokes FFmpeg with `cwd` set to the `.ass` parent directory and a relative `-vf ass=filename.ass` argument, completely avoiding Windows drive-letter colon-escaping bugs.)*
+  If missing, install the Gyan full build via `winget install Gyan.FFmpeg`.
 
-### PyTorch Installed CPU-Only Instead of CUDA
-If `streamclipper setup` prints `No CUDA GPU detected` on a machine with an NVIDIA GPU, `pip` likely installed the CPU-only PyTorch wheel from PyPI. Reinstall the CUDA wheel inside your `.venv`:
-```bash
+### CUDA PyTorch Detected as CPU
+If `streamclipper setup` reports that no CUDA GPU was detected despite having an NVIDIA card, PyPI may have installed the CPU-only PyTorch wheel. Reinstall CUDA PyTorch inside your `.venv`:
+```powershell
 pip uninstall -y torch torchaudio
 pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124
 streamclipper setup
 ```
 
-### `h264_nvenc` Encoding Error or Outdated GPU Driver
-- StreamClipper automatically falls back from `h264_nvenc` to `libx264` if NVENC fails at encode time.
-- To force software encoding permanently (e.g., older NVIDIA drivers or headless Linux servers), set:
-  ```yaml
-  video:
-    codec: "libx264"
-  ```
-
 ### Out-of-Memory (OOM) on 6 GB VRAM GPUs
-- StreamClipper performs **two-stage GPU VRAM cleanup** (explicitly freeing the WhisperX ASR model and calling `torch.cuda.empty_cache()` before loading the wav2vec2 alignment model) and auto-tunes 6 GB cards (`int8` / `medium` / `batch_size: 4` on GTX 1660 SUPER; `int8_float16` / `large-v2` / `batch_size: 8` on RTX 4050).
-- If another GPU app (game, OBS, browser hardware acceleration) is consuming VRAM, lower `transcription.batch_size: 2` or `transcription.model_size: "small"` in `config.yaml`, or temporarily switch `transcription.device: "cpu"`.
-
-### Ollama Connection Refused (`http://localhost:11434`)
-- Confirm the Ollama daemon is running (`ollama list`). On Linux, start it with `ollama serve`.
-- Confirm the active `llm.model` shown by `streamclipper setup` has been pulled (`ollama pull qwen3:8b` or `ollama pull qwen3:4b`).
-
-### Missing Live Chat Replay on Older / Non-Stream YouTube Videos
-- Regular uploads and some VODs do not include YouTube live chat replay (`.live_chat.json`). StreamClipper logs this cleanly and **dynamically renormalizes signal fusion weights** across loudness + LLM score without failing.
-
-### Linux: Missing `libGL.so.1` or `libsndfile.so.1`
-If OpenCV or SoundFile fails to import on a minimal Linux distro / Docker container:
-```bash
-sudo apt install -y libgl1 libglib2.0-0 libsndfile1
+StreamClipper implements automatic **two-stage VRAM cleanup** (deleting the WhisperX ASR model and clearing GPU cache before loading the wav2vec2 alignment model). If background applications consume VRAM, you can lower resource usage in `config.yaml`:
+```yaml
+transcription:
+  model_size: "small"
+  batch_size: 4
 ```
 
-### Stale Cache or Re-Running With New Mode/Settings
-- StreamClipper caches completed stages in `.cache/` so re-runs are fast.
-- To discard cached pipeline state and re-run from scratch (for example after switching `--mode` or `config.yaml`), pass `--force`:
-  ```bash
-  streamclipper clip "https://www.youtube.com/watch?v=VIDEO_ID" --mode story --force
-  ```
+### Hardware Video Encoder (`h264_nvenc`) Fallback
+StreamClipper automatically catches NVENC initialization failures and falls back to software `libx264`. To permanently enforce CPU video encoding (e.g., on headless servers or older drivers):
+```yaml
+video:
+  codec: "libx264"
+```
+
+### Missing Live Chat Replay
+Standard YouTube uploads and select past VODs do not provide `.live_chat.json` replay tracks. StreamClipper logs this gracefully and **automatically renormalizes signal weights** across audio loudness and semantic LLM scores without failing the pipeline.
 
 ---
 
-## Project Structure & Development
+## Project Structure
 
 ```text
 streamclipper/
-├── config.default.yaml             # Default configuration ("auto" hardware keys + YPP defaults)
-├── pyproject.toml                  # PEP 517 packaging, extras (mcp, tts, whisperx, dev), entry points
-├── docs/                           # Implementation blueprint & agent runbooks
-├── reports/                        # Phase & package verification audit reports
+├── config.default.yaml             # Complete default configuration & hardware presets
+├── pyproject.toml                  # Packaging specifications, dependencies & entry points
+├── docs/                           # Architecture guides, MCP runbooks & topic video guides
+│   ├── streamclipper-implementation-guide-v2.md
+│   ├── streamclipper-mcp-workflow-guide.md
+│   └── topic-videos-guide.md
 ├── src/streamclipper/
-│   ├── cli.py                      # Click + Rich CLI (clip, auto, setup, status)
-│   ├── config.py                   # Hierarchical YAML config & 5-tier HardwareProfile auto-tuning
-│   ├── models.py                   # IntEnum PipelineStatus & recursive JSON dataclasses
-│   ├── cache.py                    # StepCache resumable stage persistence
-│   ├── pipeline.py                 # Async end-to-end orchestrator + FAILED recovery + GPU lock
-│   ├── discovery/                  # YouTube stream discovery
-│   ├── download/                   # 16kHz audio, ±3s video slices, native yt-dlp live chat
-│   ├── analysis/                   # WhisperX transcription, streamed RMS loudness, chat velocity
-│   ├── prompts/                    # Adaptive YPP highlight scoring & metadata prompt templates
-│   ├── scoring/                    # Tri-modal fusion, OllamaScorer, YPP adaptive prompts, metadata
-│   ├── assembly/                   # Facecam detector, 9:16 composer, hooks, ASS captions, narrator
-│   ├── output/                     # Exporter (ultrafast CRF18 -> duck -> ASS) & FileOrganizer
-│   └── mcp_server/                 # MCP SDK v2 (MCPServer) stdio server (streamclipper-mcp)
-└── tests/                          # Comprehensive pytest unit & real FFmpeg integration suite
+│   ├── cli.py                      # Click + Rich command-line interface
+│   ├── config.py                   # YAML configuration parser & 5-tier hardware auto-profiler
+│   ├── models.py                   # IntEnum PipelineStatus & dataclass serialization schemas
+│   ├── cache.py                    # StepCache resumable pipeline state manager
+│   ├── pipeline.py                 # Async orchestrator with FAILED rollback & GPU concurrency locks
+│   ├── discovery/                  # YouTube stream discovery & keyword search
+│   ├── download/                   # Audio ingestion, targeted range downloader, chat scraper
+│   ├── analysis/                   # WhisperX transcriber, streamed RMS loudness, chat velocity
+│   ├── scoring/                    # Tri-modal signal fusion, OllamaScorer, narrative prompts
+│   ├── assembly/                   # Facecam quadrant detector, 9:16 layout composer, narrator, ASS burner
+│   ├── output/                     # Exporter (lossless temp -> ducked audio -> ASS burn) & FileOrganizer
+│   └── mcp_server/                 # MCP SDK v2 stdio server implementation
+└── tests/                          # Pytest suite with unit, mock & integration tests
 ```
-
-### Running the Test Suite
-```powershell
-# Windows (.venv)
-.\.venv\Scripts\pytest.exe -v
-
-# Linux (.venv)
-.venv/bin/pytest -v
-```
-
----
-
-## License
-
-MIT License. See [`pyproject.toml`](pyproject.toml) for package metadata.
