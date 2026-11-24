@@ -1193,3 +1193,164 @@ def test_T4_mix_narration_with_ducking_bgm(base_config: Config, tmp_path: Path) 
     assert "-stream_loop" not in ff_cmd_no
 
 
+# ---------------------------------------------------------------------------
+# Hinglish TTS Pronunciation Normalization & Post Writer Title Polish Tests
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_tts_text_hinglish_gaming_terms() -> None:
+    """Verify common gaming alphanumeric terms are normalized for Hinglish TTS."""
+    from streamclipper.assembly.narrator import _normalize_tts_text
+
+    # Replacements check
+    assert _normalize_tts_text("GTA 6 leak confirmed", "hinglish") == "GTA Six leak confirmed"
+    assert _normalize_tts_text("GTA VI graphics look insane", "hinglish") == "GTA Six graphics look insane"
+    assert _normalize_tts_text("GTA6 early build", "hinglish") == "GTA Six early build"
+    assert _normalize_tts_text("GTA-6 trailer analysis", "hinglish") == "GTA Six trailer analysis"
+    assert _normalize_tts_text("gta 6 map leak", "hinglish") == "GTA Six map leak"
+    assert _normalize_tts_text("gta vi mission", "hinglish") == "GTA Six mission"
+    assert _normalize_tts_text("GTA 5 physics were wild", "hinglish") == "GTA Five physics were wild"
+    assert _normalize_tts_text("GTA V mod menu", "hinglish") == "GTA Five mod menu"
+    assert _normalize_tts_text("GTA5 online heist", "hinglish") == "GTA Five online heist"
+    assert _normalize_tts_text("GTA-5 secret location", "hinglish") == "GTA Five secret location"
+    assert _normalize_tts_text("gta 5 replay", "hinglish") == "GTA Five replay"
+    assert _normalize_tts_text("gta v speedrun", "hinglish") == "GTA Five speedrun"
+    assert _normalize_tts_text("PS5 pe smooth chalega", "hinglish") == "PS Five pe smooth chalega"
+    assert _normalize_tts_text("ps5 pro version", "hinglish") == "PS Five pro version"
+    assert _normalize_tts_text("PS-5 gameplay", "hinglish") == "PS Five gameplay"
+    assert _normalize_tts_text("PS4 graphics comparison", "hinglish") == "PS Four graphics comparison"
+    assert _normalize_tts_text("ps4 console", "hinglish") == "PS Four console"
+    assert _normalize_tts_text("PS-4 settings", "hinglish") == "PS Four settings"
+    assert _normalize_tts_text("NPC ka reaction dekho", "hinglish") == "N P C ka reaction dekho"
+    assert _normalize_tts_text("koi npc glitch nahi", "hinglish") == "koi N P C glitch nahi"
+    assert _normalize_tts_text("saare NPCs pagal ho gaye", "hinglish") == "saare N P Cs pagal ho gaye"
+    assert _normalize_tts_text("60 FPS lock hai", "hinglish") == "60 F P S lock hai"
+    assert _normalize_tts_text("60FPS gameplay", "hinglish") == "60 F P S gameplay"
+    assert _normalize_tts_text("30fps drops", "hinglish") == "30 F P S drops"
+    assert _normalize_tts_text("solid fps performance", "hinglish") == "solid F P S performance"
+
+
+def test_normalize_tts_text_english_untouched() -> None:
+    """Verify English text remains untouched so captions and English TTS stay natural."""
+    from streamclipper.assembly.narrator import _normalize_tts_text
+
+    eng_text = "GTA 6 on PS5 runs at 60 FPS without any NPC glitch. GTA V was on PS4."
+    assert _normalize_tts_text(eng_text, "english") == eng_text
+    assert _normalize_tts_text(eng_text, "en") == eng_text
+    assert _normalize_tts_text("", "hinglish") == ""
+    assert _normalize_tts_text(eng_text, "") == eng_text
+
+
+def test_synthesize_speech_normalizes_hinglish_tts_text(base_config: Config, tmp_path: Path) -> None:
+    """Verify synthesize_speech passes normalized text to engine for Hinglish but not for English."""
+    n = TransformativeNarrator(base_config)
+    out_wav = tmp_path / "norm_test.wav"
+
+    recorded_texts: list[str] = []
+
+    def mock_run_engine(name: str, text: str, wav: Path, language: str | None = None) -> Path:
+        recorded_texts.append(text)
+        return create_synthetic_wav(wav, duration_sec=0.5)
+
+    with patch.object(n, "_run_engine", side_effect=mock_run_engine):
+        # Hinglish speech synthesis
+        n.synthesize_speech("GTA 6 on PS5 at 60 FPS with NPC", out_wav, language="hinglish")
+        assert len(recorded_texts) == 1
+        assert recorded_texts[0] == "GTA Six on PS Five at 60 F P S with N P C"
+
+        # English speech synthesis (unchanged)
+        recorded_texts.clear()
+        n.synthesize_speech("GTA 6 on PS5 at 60 FPS with NPC", out_wav, language="english")
+        assert len(recorded_texts) == 1
+        assert recorded_texts[0] == "GTA 6 on PS5 at 60 FPS with NPC"
+
+
+def test_generate_clip_title_variants_prevents_duplicate_dekho() -> None:
+    """Verify Hinglish A/B titles do not append 'Dekho!' when callout already contains 'dekho'."""
+    from streamclipper.models import ClipMetadata, Platform, StreamInfo
+    from streamclipper.output.post_writer import generate_clip_title_variants
+
+    stream = StreamInfo(
+        url="https://youtube.com/watch?v=xyz",
+        title="Hindi Stream",
+        platform=Platform.YOUTUBE,
+        streamer="TechnoGamerz",
+        game="GTA 6",
+        duration_seconds=120.0,
+    )
+
+    # Case 1: Callout starts with 'Dekho'
+    meta_with_dekho = ClipMetadata(
+        hook_title="Crazy Secret",
+        caption="Caption",
+        hashtags=["GTA6"],
+        streamer="TechnoGamerz",
+        game="GTA 6",
+        source_url="https://youtube.com/watch?v=xyz",
+        clip_start=10.0,
+        clip_end=35.0,
+        highlight_score=9.0,
+        callout="Dekho screen pe kya aya",
+        narration_language="hinglish",
+    )
+    variants = generate_clip_title_variants(meta_with_dekho, stream)
+    # Must never produce duplicate 'Dekho screen pe kya aya Dekho!'
+    assert not any("dekho screen pe kya aya dekho!" in v.lower() for v in variants)
+    assert any("dekho screen pe kya aya — end tak dekho!" in v.lower() or "dekho screen pe kya aya 🔥" in v for v in variants)
+
+    # Case 2: Callout already contains 'end tak dekho'
+    meta_end_tak = ClipMetadata(
+        hook_title="Crazy Secret",
+        caption="Caption",
+        hashtags=["GTA6"],
+        streamer="TechnoGamerz",
+        game="GTA 6",
+        source_url="https://youtube.com/watch?v=xyz",
+        clip_start=10.0,
+        clip_end=35.0,
+        highlight_score=9.0,
+        callout="End tak dekho bhai",
+        narration_language="hinglish",
+    )
+    variants_end_tak = generate_clip_title_variants(meta_end_tak, stream)
+    assert not any("end tak dekho bhai dekho!" in v.lower() for v in variants_end_tak)
+    assert any("end tak dekho bhai 🔥" in v.lower() for v in variants_end_tak)
+
+    # Case 3: Callout ends with 'dekho' (should use 🔥 instead of repeating 'dekho')
+    meta_ends_with_dekho = ClipMetadata(
+        hook_title="Crazy Secret",
+        caption="Caption",
+        hashtags=["GTA6"],
+        streamer="TechnoGamerz",
+        game="GTA 6",
+        source_url="https://youtube.com/watch?v=xyz",
+        clip_start=10.0,
+        clip_end=35.0,
+        highlight_score=9.0,
+        callout="Bhai ye reaction dekho",
+        narration_language="hinglish",
+    )
+    variants_ends_with_dekho = generate_clip_title_variants(meta_ends_with_dekho, stream)
+    assert not any("bhai ye reaction dekho dekho!" in v.lower() for v in variants_ends_with_dekho)
+    assert not any("bhai ye reaction dekho — end tak dekho!" in v.lower() for v in variants_ends_with_dekho)
+    assert any("bhai ye reaction dekho 🔥" in v.lower() for v in variants_ends_with_dekho)
+
+    # Case 4: Callout without 'dekho' still appends 'Dekho!'
+    meta_no_dekho = ClipMetadata(
+        hook_title="Crazy Secret",
+        caption="Caption",
+        hashtags=["GTA6"],
+        streamer="TechnoGamerz",
+        game="GTA 6",
+        source_url="https://youtube.com/watch?v=xyz",
+        clip_start=10.0,
+        clip_end=35.0,
+        highlight_score=9.0,
+        callout="Door open ho gaya",
+        narration_language="hinglish",
+    )
+    variants_no_dekho = generate_clip_title_variants(meta_no_dekho, stream)
+    assert any("door open ho gaya dekho!" in v.lower() for v in variants_no_dekho)
+
+
+

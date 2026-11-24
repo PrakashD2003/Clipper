@@ -6,6 +6,7 @@ import gc
 import logging
 import time
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -28,9 +29,32 @@ logger = logging.getLogger(__name__)
 WORDS_PER_SECOND = 2.7
 TTS_RETRY_SLEEP_SECONDS = 0.5  # pause before retrying a fully failed engine chain (patchable in tests)
 
+_HINGLISH_TTS_REPLACEMENTS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\bGTA[\s-]*(?:6|VI)\b", re.IGNORECASE), "GTA Six"),
+    (re.compile(r"\bGTA[\s-]*(?:5|V)\b", re.IGNORECASE), "GTA Five"),
+    (re.compile(r"\bPS[\s-]*5\b", re.IGNORECASE), "PS Five"),
+    (re.compile(r"\bPS[\s-]*4\b", re.IGNORECASE), "PS Four"),
+    (re.compile(r"\bNPCs\b", re.IGNORECASE), "N P Cs"),
+    (re.compile(r"\bNPC\b", re.IGNORECASE), "N P C"),
+    (re.compile(r"(\d+)\s*FPS\b", re.IGNORECASE), r"\1 F P S"),
+    (re.compile(r"\bFPS\b", re.IGNORECASE), "F P S"),
+]
+
+
+def _normalize_tts_text(text: str, language: str) -> str:
+    """Normalize common gaming alphanumeric terms for TTS engines (e.g. Hinglish TTS)."""
+    if not text or str(language or "").strip().lower() not in ("hinglish", "hi", "hindi"):
+        return text
+    normalized = text
+    for pattern, replacement in _HINGLISH_TTS_REPLACEMENTS:
+        normalized = pattern.sub(replacement, normalized)
+    return normalized
+
 
 class TransformativeNarrator:
     """Synthesizes adaptive intro/outro voiceovers and dynamically ducks stream audio via FFmpeg."""
+
+    _normalize_tts_text = staticmethod(_normalize_tts_text)
 
     def __init__(self, config: Config) -> None:
         self.config = config
@@ -253,6 +277,7 @@ class TransformativeNarrator:
         output_wav.parent.mkdir(parents=True, exist_ok=True)
 
         lang = str(language or self.language or "english").strip().lower()
+        spoken_text = _normalize_tts_text(clean_text, lang)
         try:
             retries = max(0, int(self.config.get("transformation.tts_retries", 1) or 0))
         except (TypeError, ValueError):
@@ -264,7 +289,7 @@ class TransformativeNarrator:
                 )
                 time.sleep(TTS_RETRY_SLEEP_SECONDS)
             for name in self._engine_chain(lang):
-                res = self._run_engine(name, clean_text, output_wav, language=lang)
+                res = self._run_engine(name, spoken_text, output_wav, language=lang)
                 if res is not None and res.is_file() and res.stat().st_size > 0:
                     return res
                 if name == "kokoro":

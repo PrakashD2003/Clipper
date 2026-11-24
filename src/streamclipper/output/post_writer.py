@@ -47,7 +47,14 @@ def generate_clip_title_variants(metadata: ClipMetadata, stream_info: StreamInfo
 
         if callout:
             callout_clean = callout.rstrip(".!?- ")
-            candidates.append(f"{callout_clean} Dekho!")
+            callout_lower = callout_clean.lower()
+            if "dekho" in callout_lower:
+                if "end tak" in callout_lower or callout_lower.endswith("dekho"):
+                    candidates.append(f"{callout_clean} 🔥")
+                else:
+                    candidates.append(f"{callout_clean} — end tak dekho!")
+            else:
+                candidates.append(f"{callout_clean} Dekho!")
         elif moment_type:
             candidates.append(f"{game} ka sabse unexpected play!")
 
