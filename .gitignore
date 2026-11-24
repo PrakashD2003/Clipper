@@ -12,6 +12,7 @@ venv/
 /output/
 temp/
 *.wav
+!assets/sfx/whoosh.wav
 *.mp3
 *.mp4
 *.ass
