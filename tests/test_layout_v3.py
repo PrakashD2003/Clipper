@@ -35,16 +35,25 @@ def _boxes(g):
 def test_A1_compute_layout_table():
     assert _boxes(compute_layout("stacked", "full")) == ((0, 180), (180, 660), (660, 1268), (1268, 1920))
     assert _boxes(compute_layout("stacked", "balanced")) == ((0, 180), (180, 680), (680, 1490), (1490, 1920))
+    assert _boxes(compute_layout("stacked", "full_bleed")) == ((220, 460), (0, 640), (640, 1920), (1120, 1460))
+    # Default without explicit game_fit is full_bleed
+    assert _boxes(compute_layout("stacked")) == ((220, 460), (0, 640), (640, 1920), (1120, 1460))
     assert _boxes(compute_layout("reaction", "balanced")) == ((0, 180), (0, 960), (960, 1568), (1568, 1920))
+    assert _boxes(compute_layout("reaction", "full_bleed")) == ((0, 180), (0, 960), (960, 1568), (1568, 1920))
     assert _boxes(compute_layout("blur_fill", "full")) == ((180, 520), None, (560, 1259), (1275, 1800))
+    assert _boxes(compute_layout("blur_fill", "full_bleed")) == ((180, 520), None, (560, 1259), (1275, 1800))
     assert _boxes(compute_layout("blur_fill", "balanced")) == ((300, 540), None, (555, 1365), (1365, 1920))
     g = compute_layout("stacked", "balanced")
     assert (g.game_box.w, g.game_box.h) == (1080, 810)
+    g_fb = compute_layout("stacked", "full_bleed")
+    assert (g_fb.game_box.w, g_fb.game_box.h) == (1080, 1280)
+    assert (g_fb.facecam_box.w, g_fb.facecam_box.h) == (1080, 640)
     with pytest.raises(ValueError):
         compute_layout("nope")
 
 
 def test_A2_stacked_layout_bands(tmp_path: Path):
+    # Default is full_bleed: zero black void, full canvas covered
     composer = VideoComposer(_make_config(tmp_path))
     clip = _make_dummy_clip(duration=2.0, size=(1920, 1080), color=(200, 40, 40))
     comp = composer.compose(clip, FACECAM)
@@ -53,7 +62,22 @@ def test_A2_stacked_layout_bands(tmp_path: Path):
     frame = comp.get_frame(0.5)
     assert frame[1000, 540].tolist() == [200, 40, 40]  # game area
     assert frame[500, 540].tolist() == [200, 40, 40]  # facecam area
-    assert frame[1700, 540].tolist() == [0, 0, 0]  # caption band stays black
+    assert frame[1700, 540].tolist() == [200, 40, 40]  # game fills bottom 66.7% (zero black void)
+
+    # For stacked/full: blur background rendered behind canvas, eliminating black voids
+    comp_full = VideoComposer(_make_config(tmp_path, overrides={"video": {"game_fit": "full"}}))
+    res_full = comp_full.compose(clip, FACECAM)
+    frame_full = res_full.get_frame(0.5)
+    assert frame_full[1000, 540].tolist() == [200, 40, 40]  # game area
+    assert frame_full[500, 540].tolist() == [200, 40, 40]  # facecam area
+    assert frame_full[1700, 540].tolist() == [100, 20, 20]  # blurred/darkened ~0.5 background under caption band (no black void)
+
+    # For stacked/balanced: blur background also rendered behind canvas
+    comp_bal = VideoComposer(_make_config(tmp_path, overrides={"video": {"game_fit": "balanced"}}))
+    res_bal = comp_bal.compose(clip, FACECAM)
+    frame_bal = res_bal.get_frame(0.5)
+    assert frame_bal[100, 540].tolist() == [100, 20, 20]  # blurred/darkened top hook band (no black void)
+    assert frame_bal[1700, 540].tolist() == [100, 20, 20]  # blurred/darkened bottom caption band (no black void)
 
 
 def test_A2_balanced_game_fit_crops_4x3(tmp_path: Path):

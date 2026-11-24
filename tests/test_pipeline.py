@@ -8,6 +8,7 @@ from pathlib import Path
 import sys
 import types
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pandas as pd
 import pytest
@@ -2018,3 +2019,493 @@ class TestReviewFixes:
         fh = await asyncio.wait_for(asyncio.to_thread(pipeline._acquire_file_lock), 5)
         pipeline._release_file_lock(fh)
         assert fh.closed
+
+
+class TestPipelineRefinementWiring:
+    @pytest.mark.asyncio
+    async def test_step_score_calls_context_refiner_and_updates_bounds(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """When refinement.enabled=True, refiner updates bounds and peak_time on confidence >= 0.5."""
+        from streamclipper.scoring.refiner import RefinedMoment, ContextRefiner
+        from streamclipper.analysis.context_window import ContextWindow, TimelineSegment
+
+        config = _make_config(tmp_path, {"refinement": {"enabled": True}})
+        pipeline = Pipeline(config)
+        state = PipelineState(
+            stream_info=_sample_stream_info(),
+            status=PipelineStatus.SCORING,
+            transcript=_sample_transcript(),
+        )
+
+        initial_hl = Highlight(
+            start=100.0,
+            end=140.0,
+            score=8.5,
+            title="Initial Title",
+            reason="Initial Reason",
+            peak_time=115.0,
+        )
+
+        class MockScorer:
+            def __init__(self, cfg):
+                self.max_clips = 5
+
+            def check_connection(self):
+                return True
+
+            def score_and_select(self, *args, **kwargs):
+                return [initial_hl]
+
+        monkeypatch.setattr("streamclipper.pipeline.OllamaScorer", MockScorer)
+
+        dummy_ctx = ContextWindow(
+            center_time=120.0,
+            window_start=60.0,
+            window_end=180.0,
+            segments=[TimelineSegment(start=100.0, end=140.0, streamer_speech="test speech")],
+        )
+        monkeypatch.setattr(
+            "streamclipper.pipeline.extract_context_window",
+            lambda *args, **kwargs: dummy_ctx,
+        )
+
+        refined_moment = RefinedMoment(
+            exact_start=95.0,
+            exact_end=135.0,
+            peak_time=110.0,
+            moment_type="clutch",
+            title="Refined Clutch",
+            description="Escaping cops",
+            sub_clips=[{"start": 95.0, "end": 115.0, "label": "Setup"}],
+            confidence=0.9,
+        )
+        refine_mock = AsyncMock(return_value=refined_moment)
+        monkeypatch.setattr(ContextRefiner, "refine", refine_mock)
+
+        res_state = await pipeline._step_score(state)
+        assert len(res_state.highlights) == 1
+        hl = res_state.highlights[0]
+        assert hl.start == 95.0
+        assert hl.end == 135.0
+        assert hl.peak_time == 110.0
+        assert hl.sub_clips == [{"start": 95.0, "end": 115.0, "label": "Setup"}]
+        assert res_state.status == PipelineStatus.ASSEMBLING
+        refine_mock.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_step_score_skips_refinement_when_disabled(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """When refinement.enabled=False, ContextRefiner is not run and bounds stay untouched."""
+        from streamclipper.scoring.refiner import ContextRefiner
+
+        config = _make_config(tmp_path, {"refinement": {"enabled": False}})
+        pipeline = Pipeline(config)
+        state = PipelineState(
+            stream_info=_sample_stream_info(),
+            status=PipelineStatus.SCORING,
+            transcript=_sample_transcript(),
+        )
+
+        initial_hl = Highlight(
+            start=100.0,
+            end=140.0,
+            score=8.5,
+            title="Initial Title",
+            reason="Initial Reason",
+            peak_time=115.0,
+        )
+
+        class MockScorer:
+            def __init__(self, cfg):
+                self.max_clips = 5
+
+            def check_connection(self):
+                return True
+
+            def score_and_select(self, *args, **kwargs):
+                return [initial_hl]
+
+        monkeypatch.setattr("streamclipper.pipeline.OllamaScorer", MockScorer)
+        refine_mock = AsyncMock()
+        monkeypatch.setattr(ContextRefiner, "refine", refine_mock)
+
+        res_state = await pipeline._step_score(state)
+        assert len(res_state.highlights) == 1
+        hl = res_state.highlights[0]
+        assert hl.start == 100.0
+        assert hl.end == 140.0
+        assert hl.peak_time == 115.0
+        refine_mock.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_step_score_refinement_error_fallback(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """When refiner raises an exception, bounds are preserved and pipeline does not crash."""
+        from streamclipper.scoring.refiner import ContextRefiner
+        from streamclipper.analysis.context_window import ContextWindow
+
+        config = _make_config(tmp_path, {"refinement": {"enabled": True}})
+        pipeline = Pipeline(config)
+        state = PipelineState(
+            stream_info=_sample_stream_info(),
+            status=PipelineStatus.SCORING,
+            transcript=_sample_transcript(),
+        )
+
+        initial_hl = Highlight(
+            start=100.0,
+            end=140.0,
+            score=8.5,
+            title="Initial Title",
+            reason="Initial Reason",
+            peak_time=115.0,
+            sub_clips=[{"start": 100.0, "end": 120.0}],
+        )
+
+        class MockScorer:
+            def __init__(self, cfg):
+                self.max_clips = 5
+
+            def check_connection(self):
+                return True
+
+            def score_and_select(self, *args, **kwargs):
+                return [initial_hl]
+
+        monkeypatch.setattr("streamclipper.pipeline.OllamaScorer", MockScorer)
+        monkeypatch.setattr(
+            "streamclipper.pipeline.extract_context_window",
+            lambda *args, **kwargs: ContextWindow(center_time=120.0, window_start=60.0, window_end=180.0),
+        )
+        refine_mock = AsyncMock(side_effect=RuntimeError("Ollama service unavailable"))
+        monkeypatch.setattr(ContextRefiner, "refine", refine_mock)
+
+        res_state = await pipeline._step_score(state)
+        assert len(res_state.highlights) == 1
+        hl = res_state.highlights[0]
+        # Cleanly kept original bounds
+        assert hl.start == 100.0
+        assert hl.end == 140.0
+        assert hl.peak_time == 115.0
+        assert hl.sub_clips == [{"start": 100.0, "end": 120.0}]
+        assert res_state.status == PipelineStatus.ASSEMBLING
+
+    @pytest.mark.asyncio
+    async def test_step_score_refinement_low_confidence_keeps_bounds(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """When refiner confidence is < 0.5, original bounds are retained."""
+        from streamclipper.scoring.refiner import RefinedMoment, ContextRefiner
+        from streamclipper.analysis.context_window import ContextWindow
+
+        config = _make_config(tmp_path, {"refinement": {"enabled": True}})
+        pipeline = Pipeline(config)
+        state = PipelineState(
+            stream_info=_sample_stream_info(),
+            status=PipelineStatus.SCORING,
+            transcript=_sample_transcript(),
+        )
+
+        initial_hl = Highlight(
+            start=100.0,
+            end=140.0,
+            score=8.5,
+            title="Initial Title",
+            reason="Initial Reason",
+            peak_time=115.0,
+        )
+
+        class MockScorer:
+            def __init__(self, cfg):
+                self.max_clips = 5
+
+            def check_connection(self):
+                return True
+
+            def score_and_select(self, *args, **kwargs):
+                return [initial_hl]
+
+        monkeypatch.setattr("streamclipper.pipeline.OllamaScorer", MockScorer)
+        monkeypatch.setattr(
+            "streamclipper.pipeline.extract_context_window",
+            lambda *args, **kwargs: ContextWindow(center_time=120.0, window_start=60.0, window_end=180.0),
+        )
+        low_conf_moment = RefinedMoment(
+            exact_start=80.0,
+            exact_end=150.0,
+            peak_time=110.0,
+            moment_type="hype",
+            title="Uncertain Cut",
+            description="",
+            confidence=0.35,  # Below 0.5 threshold
+        )
+        monkeypatch.setattr(ContextRefiner, "refine", AsyncMock(return_value=low_conf_moment))
+
+        res_state = await pipeline._step_score(state)
+        hl = res_state.highlights[0]
+        assert hl.start == 100.0
+        assert hl.end == 140.0
+        assert hl.peak_time == 115.0
+
+    @pytest.mark.asyncio
+    async def test_step_score_refinement_fit_clip_range_clamping(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Refined bounds exceeding max_clip_seconds are fitted to [min_clip_seconds, max_clip_seconds]."""
+        from streamclipper.scoring.refiner import RefinedMoment, ContextRefiner
+        from streamclipper.analysis.context_window import ContextWindow
+
+        # max_clip_seconds=60, min_clip_seconds=30
+        config = _make_config(
+            tmp_path,
+            {
+                "refinement": {"enabled": True},
+                "analysis": {"min_clip_seconds": 30, "max_clip_seconds": 60, "hard_max_clip_seconds": 180},
+            },
+        )
+        pipeline = Pipeline(config)
+        state = PipelineState(
+            stream_info=_sample_stream_info(),
+            status=PipelineStatus.SCORING,
+            transcript=_sample_transcript(),
+        )
+
+        initial_hl = Highlight(
+            start=100.0,
+            end=140.0,
+            score=8.5,
+            title="Initial Title",
+            reason="Initial Reason",
+            peak_time=115.0,
+        )
+
+        class MockScorer:
+            def __init__(self, cfg):
+                self.max_clips = 5
+
+            def check_connection(self):
+                return True
+
+            def score_and_select(self, *args, **kwargs):
+                return [initial_hl]
+
+        monkeypatch.setattr("streamclipper.pipeline.OllamaScorer", MockScorer)
+        monkeypatch.setattr(
+            "streamclipper.pipeline.extract_context_window",
+            lambda *args, **kwargs: ContextWindow(center_time=120.0, window_start=60.0, window_end=180.0),
+        )
+        # Refiner returns 100s long clip (90.0 to 190.0) with peak at 140.0
+        too_long_moment = RefinedMoment(
+            exact_start=90.0,
+            exact_end=190.0,
+            peak_time=140.0,
+            moment_type="hype",
+            title="Long Clip",
+            description="",
+            confidence=0.9,
+        )
+        monkeypatch.setattr(ContextRefiner, "refine", AsyncMock(return_value=too_long_moment))
+
+        res_state = await pipeline._step_score(state)
+        hl = res_state.highlights[0]
+        dur = hl.end - hl.start
+        # Must be trimmed down to max_clip_seconds (60s)
+        assert dur == 60.0
+        assert hl.start <= 140.0 <= hl.end
+
+    @pytest.mark.asyncio
+    async def test_step_score_refinement_respects_stream_duration(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """When fit_clip_range widens a short clip, stream_duration limits the end time."""
+        from streamclipper.scoring.refiner import RefinedMoment, ContextRefiner
+        from streamclipper.analysis.context_window import ContextWindow
+
+        # min_clip_seconds=30, stream total duration=50s
+        config = _make_config(
+            tmp_path,
+            {
+                "refinement": {"enabled": True},
+                "analysis": {"min_clip_seconds": 30, "max_clip_seconds": 60, "hard_max_clip_seconds": 180},
+            },
+        )
+        pipeline = Pipeline(config)
+        info = _sample_stream_info()
+        info.duration_seconds = 50  # 50s stream
+        state = PipelineState(
+            stream_info=info,
+            status=PipelineStatus.SCORING,
+            transcript=_sample_transcript(),
+        )
+
+        initial_hl = Highlight(
+            start=40.0,
+            end=45.0,
+            score=8.5,
+            title="Short HL",
+            reason="Near end",
+            peak_time=42.0,
+        )
+
+        class MockScorer:
+            def __init__(self, cfg):
+                self.max_clips = 5
+            def check_connection(self):
+                return True
+            def score_and_select(self, *args, **kwargs):
+                return [initial_hl]
+
+        monkeypatch.setattr("streamclipper.pipeline.OllamaScorer", MockScorer)
+        monkeypatch.setattr(
+            "streamclipper.pipeline.extract_context_window",
+            lambda *args, **kwargs: ContextWindow(center_time=42.0, window_start=0.0, window_end=50.0),
+        )
+        # Refined moment is 5s long at [42.0, 47.0]
+        short_moment = RefinedMoment(
+            exact_start=42.0,
+            exact_end=47.0,
+            peak_time=44.0,
+            moment_type="hype",
+            title="Short Near End",
+            description="",
+            confidence=0.9,
+        )
+        monkeypatch.setattr(ContextRefiner, "refine", AsyncMock(return_value=short_moment))
+
+        res_state = await pipeline._step_score(state)
+        hl = res_state.highlights[0]
+        # Must not exceed stream_duration (50.0)
+        assert hl.end <= 50.0
+        assert hl.start >= 0.0
+
+    @pytest.mark.asyncio
+    async def test_step_score_refinement_clamps_out_of_bounds_peak_time(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """When tentative peak_time is outside fitted range, peak_time is clamped within [start, end]."""
+        from streamclipper.scoring.refiner import RefinedMoment, ContextRefiner
+        from streamclipper.analysis.context_window import ContextWindow
+
+        config = _make_config(tmp_path, {"refinement": {"enabled": True}})
+        pipeline = Pipeline(config)
+        state = PipelineState(
+            stream_info=_sample_stream_info(),
+            status=PipelineStatus.SCORING,
+            transcript=_sample_transcript(),
+        )
+
+        initial_hl = Highlight(
+            start=100.0,
+            end=140.0,
+            score=8.5,
+            title="Initial Title",
+            reason="Initial Reason",
+            peak_time=115.0,
+        )
+
+        class MockScorer:
+            def __init__(self, cfg):
+                self.max_clips = 5
+            def check_connection(self):
+                return True
+            def score_and_select(self, *args, **kwargs):
+                return [initial_hl]
+
+        monkeypatch.setattr("streamclipper.pipeline.OllamaScorer", MockScorer)
+        monkeypatch.setattr(
+            "streamclipper.pipeline.extract_context_window",
+            lambda *args, **kwargs: ContextWindow(center_time=120.0, window_start=60.0, window_end=180.0),
+        )
+        # Refiner returns valid bounds [100.0, 130.0], but hallucinated peak_time=999.0
+        out_of_bounds_peak = RefinedMoment(
+            exact_start=100.0,
+            exact_end=130.0,
+            peak_time=999.0,
+            moment_type="hype",
+            title="Hallucinated Peak",
+            description="",
+            confidence=0.9,
+        )
+        monkeypatch.setattr(ContextRefiner, "refine", AsyncMock(return_value=out_of_bounds_peak))
+
+        res_state = await pipeline._step_score(state)
+        hl = res_state.highlights[0]
+        assert hl.start <= hl.peak_time <= hl.end
+        assert hl.peak_time == 130.0
+
+    @pytest.mark.asyncio
+    async def test_step_score_refinement_skipped_when_transcript_none(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """When state.transcript is None, _step_score raises RuntimeError before reaching refinement."""
+        from streamclipper.scoring.refiner import ContextRefiner
+
+        config = _make_config(tmp_path, {"refinement": {"enabled": True}})
+        pipeline = Pipeline(config)
+        state = PipelineState(
+            stream_info=_sample_stream_info(),
+            status=PipelineStatus.SCORING,
+            transcript=None,
+        )
+
+        with pytest.raises(RuntimeError, match="Cannot score: transcript is missing"):
+            await pipeline._step_score(state)
+
+    @pytest.mark.asyncio
+    async def test_step_score_refinement_handles_none_url(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """When state.stream_info.url is None, cache key and refinement proceed without error."""
+        from streamclipper.scoring.refiner import RefinedMoment, ContextRefiner
+        from streamclipper.analysis.context_window import ContextWindow
+
+        config = _make_config(tmp_path, {"refinement": {"enabled": True}})
+        pipeline = Pipeline(config)
+        info = _sample_stream_info()
+        info.url = None
+        state = PipelineState(
+            stream_info=info,
+            status=PipelineStatus.SCORING,
+            transcript=_sample_transcript(),
+        )
+
+        initial_hl = Highlight(
+            start=100.0,
+            end=140.0,
+            score=8.5,
+            title="Initial Title",
+            reason="Initial Reason",
+            peak_time=115.0,
+        )
+
+        class MockScorer:
+            def __init__(self, cfg):
+                self.max_clips = 5
+            def check_connection(self):
+                return True
+            def score_and_select(self, *args, **kwargs):
+                return [initial_hl]
+
+        monkeypatch.setattr("streamclipper.pipeline.OllamaScorer", MockScorer)
+        monkeypatch.setattr(
+            "streamclipper.pipeline.extract_context_window",
+            lambda *args, **kwargs: ContextWindow(center_time=120.0, window_start=60.0, window_end=180.0),
+        )
+        refined_moment = RefinedMoment(
+            exact_start=105.0,
+            exact_end=135.0,
+            peak_time=120.0,
+            moment_type="hype",
+            title="Refined Title",
+            description="",
+            confidence=0.9,
+        )
+        monkeypatch.setattr(ContextRefiner, "refine", AsyncMock(return_value=refined_moment))
+
+        res_state = await pipeline._step_score(state)
+        assert res_state.highlights[0].start == 105.0
+
+

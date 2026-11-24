@@ -46,6 +46,11 @@ def _create_synthetic_mp4(path: Path, duration: float = 3.0, width: int = 640, h
     return path
 
 
+def _mock_synthesize(text: str, out_path: Path, **kwargs: Any) -> Path:
+    """Mock TTS synthesizer that creates a valid synthetic wav file for unit tests."""
+    return _ensure_synthetic_wav(Path(out_path), duration_seconds=max(1.0, len(text.split()) / 2.7))
+
+
 def _set_cfg(cfg: Config, dotted_key: str, val: Any) -> None:
     """Helper to set nested keys on Config for testing."""
     keys = dotted_key.split(".")
@@ -176,7 +181,7 @@ def test_T5_caps_enforced(test_config: Config, synthetic_plan: TopicPlan, tmp_pa
 
     with patch("streamclipper.assembly.longform.download_segment", side_effect=mock_download), \
          patch("streamclipper.assembly.longform.CopyrightRiskDetector.detect", return_value=("CLEAN", 0.99)), \
-         patch("streamclipper.assembly.longform.TransformativeNarrator.synthesize_speech", return_value=None):
+         patch("streamclipper.assembly.longform.TransformativeNarrator.synthesize_speech", side_effect=_mock_synthesize):
         render_long_video(test_config, synthetic_plan)
 
     assert pt1_clip.end - pt1_clip.start <= 20.0
@@ -230,7 +235,7 @@ def test_T5_copyright_swap_to_alternate_or_drop(test_config: Config, synthetic_p
     with patch("streamclipper.assembly.longform.StepCache.load_state", return_value=mock_state), \
          patch("streamclipper.assembly.longform.CopyrightRiskDetector.detect", side_effect=mock_detect), \
          patch("streamclipper.assembly.longform.download_segment", side_effect=mock_download), \
-         patch("streamclipper.assembly.longform.TransformativeNarrator.synthesize_speech", return_value=None):
+         patch("streamclipper.assembly.longform.TransformativeNarrator.synthesize_speech", side_effect=_mock_synthesize):
         render_long_video(test_config, synthetic_plan)
 
     # Point 1 should now have the alternate clip
@@ -273,7 +278,7 @@ def test_T5_copyright_alternate_deduplication(test_config: Config, synthetic_pla
     with patch("streamclipper.assembly.longform.StepCache.load_state", return_value=mock_state), \
          patch("streamclipper.assembly.longform.CopyrightRiskDetector.detect", side_effect=mock_detect), \
          patch("streamclipper.assembly.longform.download_segment", side_effect=mock_download), \
-         patch("streamclipper.assembly.longform.TransformativeNarrator.synthesize_speech", return_value=None):
+         patch("streamclipper.assembly.longform.TransformativeNarrator.synthesize_speech", side_effect=_mock_synthesize):
         render_long_video(test_config, synthetic_plan)
 
     ev_urls = [c.url for c in synthetic_plan.points[0].evidence]
@@ -345,7 +350,7 @@ def test_T5_chapters_file_rules(test_config: Config, synthetic_plan: TopicPlan, 
 
     with patch("streamclipper.assembly.longform.download_segment", side_effect=mock_download), \
          patch("streamclipper.assembly.longform.CopyrightRiskDetector.detect", return_value=("CLEAN", 0.99)), \
-         patch("streamclipper.assembly.longform.TransformativeNarrator.synthesize_speech", return_value=None):
+         patch("streamclipper.assembly.longform.TransformativeNarrator.synthesize_speech", side_effect=_mock_synthesize):
         res = render_long_video(test_config, synthetic_plan)
 
     chapters_path = Path(res["chapters_path"])
@@ -409,8 +414,8 @@ def test_T5_post_file_sources_with_timestamps(test_config: Config, synthetic_pla
     assert "00:00 Intro" in text
     assert "SOURCES" in text
     assert "@ViceGamer: https://youtube.com/watch?v=vault01&t=10s" in text
-    assert "Official footage: Rockstar Games" in text
-    assert "Official footage (Rockstar Games): https://youtube.com/watch?v=official02&t=5s" in text
+    assert "Official footage: RockstarGames" in text
+    assert "Official footage (RockstarGames): https://youtube.com/watch?v=official02&t=5s" in text
     assert "Upload the thumbnail.jpg" in text
     assert "AI voiceover:" in text
 
@@ -431,7 +436,7 @@ def test_T5_full_render_synthetic_video(test_config: Config, synthetic_plan: Top
 
     with patch("streamclipper.assembly.longform.download_segment", side_effect=mock_download), \
          patch("streamclipper.assembly.longform.CopyrightRiskDetector.detect", return_value=("CLEAN", 0.99)), \
-         patch("streamclipper.assembly.longform.TransformativeNarrator.synthesize_speech", return_value=None):
+         patch("streamclipper.assembly.longform.TransformativeNarrator.synthesize_speech", side_effect=_mock_synthesize):
         res = render_long_video(test_config, synthetic_plan, progress=MockProgress())
 
     # Verify result dictionary
@@ -479,7 +484,7 @@ def test_T5_per_block_loudnorm_called(test_config: Config, synthetic_plan: Topic
 
     with patch("streamclipper.assembly.longform.download_segment", side_effect=mock_download), \
          patch("streamclipper.assembly.longform.CopyrightRiskDetector.detect", return_value=("CLEAN", 0.99)), \
-         patch("streamclipper.assembly.longform.TransformativeNarrator.synthesize_speech", return_value=None), \
+         patch("streamclipper.assembly.longform.TransformativeNarrator.synthesize_speech", side_effect=_mock_synthesize), \
          patch("streamclipper.assembly.narrator.TransformativeNarrator.normalize_audio", side_effect=lambda in_v, out_v: _create_synthetic_mp4(out_v, duration=1.0)) as mock_norm:
         render_long_video(test_config, synthetic_plan)
 
@@ -498,7 +503,7 @@ def test_T5_block_order_story_crossfade(test_config: Config, synthetic_plan: Top
 
     with patch("streamclipper.assembly.longform.download_segment", side_effect=mock_download), \
          patch("streamclipper.assembly.longform.CopyrightRiskDetector.detect", return_value=("CLEAN", 0.99)), \
-         patch("streamclipper.assembly.longform.TransformativeNarrator.synthesize_speech", return_value=None):
+         patch("streamclipper.assembly.longform.TransformativeNarrator.synthesize_speech", side_effect=_mock_synthesize):
         res = render_long_video(test_config, synthetic_plan)
 
     video_path = Path(res["video_path"])
@@ -560,3 +565,457 @@ def test_T5_cli_render_command(tmp_path: Path, synthetic_plan: TopicPlan) -> Non
         assert result.exit_code == 0, f"CLI render failed: {result.output}"
         assert "Render completed successfully" in result.output
         mock_render.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Ticket T1 Verification Tests
+# ---------------------------------------------------------------------------
+
+def test_T1_tts_synthesis_failure_raises(test_config: Config, synthetic_plan: TopicPlan, tmp_path: Path) -> None:
+    """When TTS synthesis returns None or produces an empty file, render_long_video raises RuntimeError."""
+    def mock_download(url, start, end, out_dir, **kwargs):
+        seg = out_dir / f"seg_{int(start)}.mp4"
+        return _create_synthetic_mp4(seg, duration=max(1.0, end - start), width=640, height=360)
+
+    save_plan(test_config, synthetic_plan)
+
+    # 1. Cold open TTS failure
+    with patch("streamclipper.assembly.longform.download_segment", side_effect=mock_download), \
+         patch("streamclipper.assembly.longform.CopyrightRiskDetector.detect", return_value=("CLEAN", 0.99)), \
+         patch("streamclipper.assembly.longform.TransformativeNarrator.synthesize_speech", return_value=None):
+        with pytest.raises(RuntimeError, match="TTS synthesis failed for cold_open"):
+            render_long_video(test_config, synthetic_plan)
+
+    # 2. Point 1 TTS failure (cold open succeeds, point 1 returns None)
+    synthetic_plan.status = "approved"
+    def synth_fail_point(text, out_path, **kwargs):
+        if "First we look" in text:
+            return None
+        return _ensure_synthetic_wav(Path(out_path), duration_seconds=1.0)
+
+    with patch("streamclipper.assembly.longform.download_segment", side_effect=mock_download), \
+         patch("streamclipper.assembly.longform.CopyrightRiskDetector.detect", return_value=("CLEAN", 0.99)), \
+         patch("streamclipper.assembly.longform.TransformativeNarrator.synthesize_speech", side_effect=synth_fail_point):
+        with pytest.raises(RuntimeError, match=r"TTS synthesis failed for point 1"):
+            render_long_video(test_config, synthetic_plan)
+
+    # 3. Outro TTS failure (cold open & points succeed, outro returns empty file)
+    synthetic_plan.status = "approved"
+    def synth_empty_outro(text, out_path, **kwargs):
+        out_p = Path(out_path)
+        if "Subscribe for more" in text:
+            out_p.parent.mkdir(parents=True, exist_ok=True)
+            out_p.write_bytes(b"")  # 0 bytes
+            return out_p
+        return _ensure_synthetic_wav(out_p, duration_seconds=1.0)
+
+    with patch("streamclipper.assembly.longform.download_segment", side_effect=mock_download), \
+         patch("streamclipper.assembly.longform.CopyrightRiskDetector.detect", return_value=("CLEAN", 0.99)), \
+         patch("streamclipper.assembly.longform.TransformativeNarrator.synthesize_speech", side_effect=synth_empty_outro):
+        with pytest.raises(RuntimeError, match="TTS synthesis failed for outro"):
+            render_long_video(test_config, synthetic_plan)
+
+
+def test_T1_official_credit_empty_channel_fallback(test_config: Config, tmp_path: Path) -> None:
+    """Official clips fall back to 'Official {plan.game} footage' when channel is empty or None."""
+    plan = TopicPlan(
+        plan_id="plan-t1-cred",
+        topic_id="credit-test",
+        topic_title="Credit Fallback Test",
+        game="GTA 6",
+        shape="numbered",
+        status="approved",
+        cold_open="",
+        outro="",
+        points=[
+            TopicPoint(
+                index=1,
+                heading="Official Clip No Channel",
+                narration="Checking credit text.",
+                evidence=[
+                    EvidenceClip(
+                        source_id="src_off_empty",
+                        url="https://youtube.com/watch?v=empty01",
+                        channel="",  # empty channel
+                        kind="official",
+                        start=0.0,
+                        end=5.0,
+                    )
+                ],
+            ),
+            TopicPoint(
+                index=2,
+                heading="Official Clip With Channel",
+                narration="Checking channel name.",
+                evidence=[
+                    EvidenceClip(
+                        source_id="src_off_ps",
+                        url="https://youtube.com/watch?v=ps02",
+                        channel="PlayStation",
+                        kind="official",
+                        start=10.0,
+                        end=15.0,
+                    )
+                ],
+            ),
+        ],
+    )
+
+    # Test post file generation
+    post_file = write_long_post(test_config, plan, ["00:00 Intro", "00:10 Point 1"])
+    text = post_file.read_text(encoding="utf-8")
+    assert "- Official GTA 6 footage: https://youtube.com/watch?v=empty01&t=0s" in text
+    assert "- Official footage (PlayStation): https://youtube.com/watch?v=ps02&t=10s" in text
+    assert "Official footage: PlayStation" in text
+
+
+def test_T1_hashtag_stopwords_and_capping(test_config: Config) -> None:
+    """Stopwords in English/Hinglish are filtered out and hashtags capped at 4."""
+    _set_cfg(test_config, "metadata.hashtag_count", 4)
+
+    plan = TopicPlan(
+        plan_id="plan-t1-tags",
+        topic_id="tags-test",
+        # Stopwords: 'How', 'The', 'For', 'Every', 'Actually'
+        # Meaningful: 'Casino', 'Vault', 'Secrets'
+        topic_title="How The Casino Vault Actually Secrets For Every",
+        game="GTA 6",
+        shape="numbered",
+        status="approved",
+        cold_open="",
+        outro="",
+        points=[],
+    )
+
+    post_file = write_long_post(test_config, plan, [])
+    text = post_file.read_text(encoding="utf-8")
+    lines = {line.strip() for line in text.splitlines()}
+
+    # Extract HASHTAGS line
+    for line in text.splitlines():
+        if line.startswith("#"):
+            tags = line.split()
+            # Must have game tag
+            assert "#GTA6" in tags
+            # Must NOT have stopwords
+            for stop in ["#How", "#The", "#For", "#Every", "#Actually"]:
+                assert stop not in tags
+            # Must have meaningful tags
+            assert "#Casino" in tags
+            assert "#Vault" in tags
+            assert "#Secrets" in tags
+            # Must be capped at 4 total
+            assert len(tags) == 4
+            break
+
+
+def test_T1_no_duplicate_broll_footage_selection(test_config: Config, tmp_path: Path) -> None:
+    """Verify B-roll selection priority prevents back-to-back duplicate footage."""
+    alt_clip = EvidenceClip(source_id="c_alt", url="https://youtube.com/watch?v=alt", start=1.0, end=4.0)
+    ev1 = EvidenceClip(source_id="c1", url="https://youtube.com/watch?v=ev1", start=10.0, end=14.0)
+    ev2a = EvidenceClip(source_id="c2a", url="https://youtube.com/watch?v=ev2a", start=20.0, end=24.0)
+    ev2b = EvidenceClip(source_id="c2b", url="https://youtube.com/watch?v=ev2b", start=30.0, end=36.0)
+
+    plan = TopicPlan(
+        plan_id="plan-t1-broll",
+        topic_id="broll-test",
+        topic_title="B-roll Selection Test",
+        game="GTA 6",
+        shape="story",  # No chapter cards to keep blocks simple
+        status="approved",
+        cold_open="",
+        outro="",
+        points=[
+            # Point 1 has 1 evidence clip and 1 downloaded alternate
+            TopicPoint(
+                index=1,
+                heading="Point 1",
+                narration="Point 1 Narration",
+                evidence=[ev1],
+                alternates=[alt_clip],
+            ),
+            # Point 2 has 2 evidence clips (no alternates)
+            TopicPoint(
+                index=2,
+                heading="Point 2",
+                narration="Point 2 Narration",
+                evidence=[ev2a, ev2b],
+            ),
+        ],
+    )
+    save_plan(test_config, plan)
+
+    downloaded_files_map: dict[str, Path] = {}
+
+    def mock_download(url, start, end, out_dir, **kwargs):
+        seg = out_dir / f"seg_{int(start)}.mp4"
+        p = _create_synthetic_mp4(seg, duration=max(1.0, end - start), width=640, height=360)
+        downloaded_files_map[url] = p
+        return p
+
+    # Pre-create the alternate clip in temp_dir so it counts as downloaded/available
+    temp_dir = Path(test_config.get("general.temp_dir", "./temp")) / "topics" / plan.plan_id
+    alt_path = temp_dir / "seg_alt_1.mp4"
+    _create_synthetic_mp4(alt_path, duration=3.0, width=640, height=360)
+
+    with patch("streamclipper.assembly.longform.download_segment", side_effect=mock_download), \
+         patch("streamclipper.assembly.longform.CopyrightRiskDetector.detect", return_value=("CLEAN", 0.99)), \
+         patch("streamclipper.assembly.longform.TransformativeNarrator.synthesize_speech", side_effect=_mock_synthesize):
+        res = render_long_video(test_config, plan)
+
+    assert res["status"] == "rendered"
+    assert Path(res["video_path"]).is_file()
+
+
+# ---------------------------------------------------------------------------
+# Ticket T4 Tests: 1.2s Chapter Card, Transition SFX, CrossFade, and BGM Bed
+# ---------------------------------------------------------------------------
+
+
+def test_T4_chapter_card_duration_default_1_2s() -> None:
+    """Verify that default longform.card_seconds is 1.2 in both config and longform defaults."""
+    fresh_cfg = Config()
+    assert fresh_cfg.get("longform.card_seconds") == 1.2
+    assert fresh_cfg.get("longform.transition_sfx_path") == ""
+
+
+def test_T4_chapter_card_with_transition_sfx(test_config: Config, synthetic_plan: TopicPlan, tmp_path: Path) -> None:
+    """When longform.transition_sfx_path points to an audio file, card clip attaches it at -12 dB."""
+    sfx_wav = tmp_path / "whoosh.wav"
+    _ensure_synthetic_wav(sfx_wav, duration_seconds=0.8)
+    _set_cfg(test_config, "longform.transition_sfx_path", str(sfx_wav))
+    _set_cfg(test_config, "longform.card_seconds", 1.2)
+
+    captured_clips: dict[str, Any] = {}
+
+    from moviepy import VideoClip
+    orig_write = VideoClip.write_videofile
+
+    def spy_write(self, filename, *args, **kwargs):
+        name = Path(filename).stem.replace("_raw", "")
+        if "card" in name:
+            captured_clips[name] = {
+                "duration": self.duration,
+                "has_audio": self.audio is not None,
+                "is_composite": hasattr(self, "clips"),
+            }
+        return orig_write(self, filename, *args, **kwargs)
+
+    def mock_download(url, start, end, out_dir, **kwargs):
+        seg = out_dir / f"seg_{int(start)}.mp4"
+        return _create_synthetic_mp4(seg, duration=max(1.0, end - start), width=640, height=360)
+
+    save_plan(test_config, synthetic_plan)
+
+    with patch("streamclipper.assembly.longform.download_segment", side_effect=mock_download), \
+         patch("streamclipper.assembly.longform.CopyrightRiskDetector.detect", return_value=("CLEAN", 0.99)), \
+         patch("streamclipper.assembly.longform.TransformativeNarrator.synthesize_speech", side_effect=_mock_synthesize), \
+         patch.object(VideoClip, "write_videofile", spy_write):
+        res = render_long_video(test_config, synthetic_plan)
+
+    assert res["status"] == "rendered"
+    card_entries = [v for k, v in captured_clips.items() if "card" in k]
+    assert len(card_entries) > 0
+    for card_data in card_entries:
+        assert card_data["duration"] == 1.2
+        assert card_data["has_audio"] is True
+        # SFX path does not wrap in CompositeVideoClip with fade-in/fade-out
+        assert card_data["is_composite"] is False
+
+
+def test_T4_chapter_card_fades_and_bgm_bed_when_sfx_unset(test_config: Config, synthetic_plan: TopicPlan, tmp_path: Path) -> None:
+    """When transition_sfx_path is unset, card clip has visual fade-in/out and mixes BGM bed across card."""
+    bgm_wav = tmp_path / "ambient_bgm.wav"
+    _ensure_synthetic_wav(bgm_wav, duration_seconds=3.0)
+    _set_cfg(test_config, "longform.transition_sfx_path", "")
+    _set_cfg(test_config, "transformation.bgm_path", str(bgm_wav))
+    _set_cfg(test_config, "transformation.bgm_volume_db", -26.0)
+    _set_cfg(test_config, "longform.card_seconds", 1.2)
+
+    captured_clips: dict[str, Any] = {}
+
+    from moviepy import VideoClip
+    orig_write = VideoClip.write_videofile
+
+    def spy_write(self, filename, *args, **kwargs):
+        name = Path(filename).stem.replace("_raw", "")
+        if "card" in name:
+            captured_clips[name] = {
+                "duration": self.duration,
+                "has_audio": self.audio is not None,
+                "is_composite": hasattr(self, "clips"),
+            }
+        return orig_write(self, filename, *args, **kwargs)
+
+    def mock_download(url, start, end, out_dir, **kwargs):
+        seg = out_dir / f"seg_{int(start)}.mp4"
+        return _create_synthetic_mp4(seg, duration=max(1.0, end - start), width=640, height=360)
+
+    save_plan(test_config, synthetic_plan)
+
+    with patch("streamclipper.assembly.longform.download_segment", side_effect=mock_download), \
+         patch("streamclipper.assembly.longform.CopyrightRiskDetector.detect", return_value=("CLEAN", 0.99)), \
+         patch("streamclipper.assembly.longform.TransformativeNarrator.synthesize_speech", side_effect=_mock_synthesize), \
+         patch.object(VideoClip, "write_videofile", spy_write):
+        res = render_long_video(test_config, synthetic_plan)
+
+    assert res["status"] == "rendered"
+    card_entries = [v for k, v in captured_clips.items() if "card" in k]
+    assert len(card_entries) > 0
+    for card_data in card_entries:
+        assert card_data["duration"] == 1.2
+        assert card_data["has_audio"] is True
+        # Unset SFX wraps in CompositeVideoClip with CrossFadeIn/CrossFadeOut
+        assert card_data["is_composite"] is True
+
+
+def test_T4_chapter_card_corrupt_sfx_fallback_and_no_loudnorm_blowout(
+    test_config: Config, synthetic_plan: TopicPlan, tmp_path: Path
+) -> None:
+    """Zero-byte or invalid transition SFX must gracefully fall back to BGM fade without raising,
+
+    and chapter card block must NOT be loudnorm-boosted to -14 LUFS.
+    """
+    zero_sfx = tmp_path / "corrupt_whoosh.wav"
+    zero_sfx.write_bytes(b"")  # Zero-byte invalid file
+    bgm_wav = tmp_path / "bgm_bed.wav"
+    _ensure_synthetic_wav(bgm_wav, duration_seconds=3.0)
+
+    _set_cfg(test_config, "longform.transition_sfx_path", str(zero_sfx))
+    _set_cfg(test_config, "transformation.bgm_path", str(bgm_wav))
+    _set_cfg(test_config, "transformation.bgm_volume_db", -26.0)
+    _set_cfg(test_config, "longform.card_seconds", 1.2)
+
+    normalized_inputs: list[str] = []
+    from streamclipper.assembly.narrator import TransformativeNarrator
+    orig_norm = TransformativeNarrator.normalize_audio
+
+    def spy_norm(self, in_v, out_v):
+        normalized_inputs.append(Path(in_v).name)
+        return orig_norm(self, in_v, out_v)
+
+    def mock_download(url, start, end, out_dir, **kwargs):
+        seg = out_dir / f"seg_{int(start)}.mp4"
+        return _create_synthetic_mp4(seg, duration=max(1.0, end - start), width=640, height=360)
+
+    save_plan(test_config, synthetic_plan)
+
+    with patch("streamclipper.assembly.longform.download_segment", side_effect=mock_download), \
+         patch("streamclipper.assembly.longform.CopyrightRiskDetector.detect", return_value=("CLEAN", 0.99)), \
+         patch("streamclipper.assembly.longform.TransformativeNarrator.synthesize_speech", side_effect=_mock_synthesize), \
+         patch.object(TransformativeNarrator, "normalize_audio", spy_norm):
+        res = render_long_video(test_config, synthetic_plan)
+
+    assert res["status"] == "rendered"
+    assert Path(res["video_path"]).is_file()
+
+    # The chapter card must NOT have been sent to normalize_audio (which would blow up -26dB audio to -14 LUFS)
+    assert not any("card" in name for name in normalized_inputs)
+    # Other blocks (cold open, point narration, evidence, outro) should still be normalized
+    assert len(normalized_inputs) >= 3
+
+
+# ---------------------------------------------------------------------------
+# Ticket T5: Packaging Upgrade (Frame-Scored Thumbnails & Title Variants)
+# ---------------------------------------------------------------------------
+
+def test_T5_thumbnail_frame_scoring_and_3_word_cap(tmp_path: Path) -> None:
+    """Verify generate_topic_thumbnail caps text to 3 words, positions in safe zone, and applies enhancement."""
+    import cv2
+    import numpy as np
+    from streamclipper.assembly.longform import _score_thumbnail_frame
+
+    # Verify frame scoring logic: sharp > blurry > black/washed-out
+    black = np.zeros((720, 1280, 3), dtype=np.uint8)
+    white = np.full((720, 1280, 3), 255, dtype=np.uint8)
+    sharp = np.random.randint(40, 210, (720, 1280, 3), dtype=np.uint8)
+    blurry = cv2.GaussianBlur(sharp, (31, 31), 0)
+
+    score_black = _score_thumbnail_frame(black)
+    score_white = _score_thumbnail_frame(white)
+    score_sharp = _score_thumbnail_frame(sharp)
+    score_blurry = _score_thumbnail_frame(blurry)
+
+    assert score_sharp > score_blurry > score_black
+    assert score_blurry > score_white
+
+    # Test thumbnail generation from synthetic video
+    frame_mp4 = _create_synthetic_mp4(tmp_path / "t5_frame.mp4", duration=3.0)
+    thumb_path = tmp_path / "t5_thumb.jpg"
+
+    out = generate_topic_thumbnail(
+        frame_mp4,
+        "ONE TWO THREE FOUR FIVE SIX",
+        thumb_path,
+        target_w=1280,
+        target_h=720,
+    )
+    assert out.is_file()
+    with Image.open(out) as img:
+        assert img.size == (1280, 720)
+
+
+def test_T5_title_variants_in_long_post(test_config: Config, synthetic_plan: TopicPlan) -> None:
+    """Verify write_long_post outputs 3-5 punchy curiosity-gap title variants under TITLE."""
+    from streamclipper.output.topic_post import generate_long_title_variants
+
+    variants = generate_long_title_variants(synthetic_plan)
+    assert 3 <= len(variants) <= 5
+    for v in variants:
+        assert len(v.strip()) > 0
+        assert v.lower() != (synthetic_plan.video_title or "").lower()
+
+    post_path = write_long_post(test_config, synthetic_plan, ["00:00 Intro", "00:15 The Vault"])
+    text = post_path.read_text(encoding="utf-8")
+
+    assert "TITLE" in text
+    assert "TITLE VARIANTS (A/B TEST)" in text
+    for v in variants:
+        assert f"- {v}" in text
+
+
+def test_T5_title_variants_in_post_writer(tmp_path: Path) -> None:
+    """Verify write_post_file outputs 3-5 punchy curiosity-gap title variants under TITLE."""
+    from streamclipper.models import ClipMetadata, StreamInfo, Platform
+    from streamclipper.output.post_writer import generate_clip_title_variants, write_post_file
+
+    stream = StreamInfo(
+        url="https://youtube.com/watch?v=abc",
+        title="Epic Stream",
+        platform=Platform.YOUTUBE,
+        streamer="SpeedRunner",
+        game="GTA 6",
+        duration_seconds=120.0,
+    )
+    meta = ClipMetadata(
+        hook_title="IMPOSSIBLE VAULT HEIST",
+        caption="Check out this crazy vault heist",
+        hashtags=["GTA6", "Gaming"],
+        streamer="SpeedRunner",
+        game="GTA 6",
+        source_url="https://youtube.com/watch?v=abc",
+        clip_start=10.0,
+        clip_end=25.0,
+        highlight_score=0.92,
+        moment_type="funny",
+        callout="Vault door blown wide open",
+    )
+
+    variants = generate_clip_title_variants(meta, stream)
+    assert 3 <= len(variants) <= 5
+    for v in variants:
+        assert len(v.strip()) > 0
+        assert v.lower() != meta.hook_title.lower()
+
+    video_path = tmp_path / "test_clip.mp4"
+    video_path.write_bytes(b"dummy")
+    post_file = write_post_file(video_path, meta, stream)
+
+    assert post_file.is_file()
+    text = post_file.read_text(encoding="utf-8")
+    assert "TITLE" in text
+    assert meta.hook_title in text
+    assert "TITLE VARIANTS (A/B TEST)" in text
+    for v in variants:
+        assert f"- {v}" in text
+

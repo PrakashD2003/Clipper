@@ -6,6 +6,7 @@ import contextlib
 from datetime import date
 import inspect
 import logging
+import math
 import os
 from pathlib import Path
 import re
@@ -40,7 +41,9 @@ from .models import (
 from .scoring.ollama_scorer import OllamaScorer
 from .output.post_writer import write_post_file
 from .output.variety import VarietyState
-from .scoring.scorer import Scorer
+from .scoring.refiner import ContextRefiner
+from .scoring.scorer import Scorer, fit_clip_range
+from .analysis.context_window import extract_context_window
 
 logger = logging.getLogger(__name__)
 
@@ -787,6 +790,124 @@ class Pipeline:
             audio_path=state.audio_path,
             **({"heatmap_spikes": state.heatmap_spikes} if state.heatmap_spikes else {}),
         )
+
+        refinement_enabled = self.config.get("refinement.enabled", True)
+        if isinstance(refinement_enabled, str):
+            refinement_enabled = refinement_enabled.lower() not in ("false", "0", "no")
+        else:
+            refinement_enabled = bool(refinement_enabled)
+
+        if refinement_enabled and state.highlights and state.transcript is not None:
+            refiner = ContextRefiner(self.config)
+            video_id = state.stream_info.video_id or ""
+            chat_csv = self.temp_dir / f"{video_id}_chat.csv"
+            clean_url = str(state.stream_info.url or "").strip() if state.stream_info else ""
+            if not chat_csv.is_file():
+                cache_key = self.cache.get_cache_key(clean_url)
+                alt_csv = self.temp_dir / f"{cache_key}_chat.csv"
+                if alt_csv.is_file():
+                    chat_csv = alt_csv
+            chat_csv_path = chat_csv if chat_csv.is_file() else None
+
+            wb = float(self.config.get("refinement.window_before", 120.0))
+            wa = float(self.config.get("refinement.window_after", 60.0))
+            min_clip_seconds = float(self.config.get("analysis.min_clip_seconds", 30))
+            max_clip_seconds = float(self.config.get("analysis.max_clip_seconds", 90))
+            hard_max_clip_seconds = float(self.config.get("analysis.hard_max_clip_seconds", 180))
+            adjust_clip_bounds = bool(self.config.get("analysis.adjust_clip_bounds", True))
+            stream_dur: float | None = (
+                float(getattr(state.stream_info, "duration_seconds", 0) or 0)
+                if state.stream_info
+                else None
+            )
+            if stream_dur is not None and stream_dur <= 0:
+                stream_dur = None
+
+            for highlight in state.highlights:
+                orig_start = highlight.start
+                orig_end = highlight.end
+                orig_peak = highlight.peak_time
+                orig_sub_clips = highlight.sub_clips
+                try:
+                    center = (highlight.start + highlight.end) / 2.0
+                    ctx = extract_context_window(
+                        state.transcript,
+                        chat_csv_path,
+                        center,
+                        window_before=wb,
+                        window_after=wa,
+                        url=clean_url,
+                        temp_dir=self.temp_dir,
+                    )
+                    refined = await refiner.refine(
+                        ctx,
+                        highlight.start,
+                        highlight.end,
+                        hint=highlight.reason or highlight.title or "",
+                    )
+                    if (
+                        refined is not None
+                        and refined.confidence >= 0.5
+                        and refined.exact_end > refined.exact_start
+                    ):
+                        tentative_start = refined.exact_start
+                        tentative_end = refined.exact_end
+                        tentative_peak = refined.peak_time
+
+                        fit = fit_clip_range(
+                            tentative_start,
+                            tentative_end,
+                            min_s=min_clip_seconds,
+                            max_s=max_clip_seconds,
+                            hard_max_s=hard_max_clip_seconds,
+                            peak_time=tentative_peak,
+                            stream_duration=stream_dur,
+                            adjust=adjust_clip_bounds,
+                        )
+                        if not fit.rejected:
+                            highlight.start = fit.start
+                            highlight.end = fit.end
+                            if (
+                                tentative_peak is not None
+                                and isinstance(tentative_peak, (int, float))
+                                and not isinstance(tentative_peak, bool)
+                                and math.isfinite(tentative_peak)
+                            ):
+                                highlight.peak_time = min(fit.end, max(fit.start, float(tentative_peak)))
+                            else:
+                                highlight.peak_time = (fit.start + fit.end) / 2.0
+                            if refined.sub_clips:
+                                highlight.sub_clips = refined.sub_clips
+                            if fit.adjustment:
+                                highlight.bounds_adjustment = fit.adjustment
+                            if state.transcript:
+                                highlight.word_timestamps = Scorer._extract_words_for_range(
+                                    state.transcript, highlight.start, highlight.end
+                                )
+                                scoped_text = Scorer._extract_transcript_for_range(
+                                    state.transcript, highlight.start, highlight.end
+                                )
+                                if scoped_text:
+                                    highlight.transcript_chunk = scoped_text
+                        else:
+                            logger.warning(
+                                "Refined bounds [%.1f, %.1f] rejected by fit_clip_range: %s. Keeping original.",
+                                tentative_start,
+                                tentative_end,
+                                fit.adjustment,
+                            )
+                except Exception as exc:
+                    logger.warning(
+                        "Context refinement failed for highlight [%.1f, %.1f]: %s",
+                        orig_start,
+                        orig_end,
+                        exc,
+                    )
+                    highlight.start = orig_start
+                    highlight.end = orig_end
+                    highlight.peak_time = orig_peak
+                    highlight.sub_clips = orig_sub_clips
+
         state.requested_max_clips = (
             int(max_clips)
             if max_clips is not None

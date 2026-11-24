@@ -10,8 +10,9 @@ import subprocess
 from typing import Any
 import wave
 
+import cv2
 import numpy as np
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 
 from streamclipper.analysis.copyright_risk import CopyrightRiskDetector
 from streamclipper.assembly.captions import (
@@ -178,25 +179,37 @@ def _render_chapter_card_image(
     return base_img
 
 
-def _apply_ken_burns_zoom(clip: Any, max_zoom: float = 1.08) -> Any:
-    """Apply smooth center Ken-Burns zoom over clip duration."""
+def _apply_ken_burns_zoom(
+    clip: Any,
+    max_zoom: float = 1.08,
+    blur_radius: int = 0,
+    dim_factor: float = 1.0,
+) -> Any:
+    """Apply smooth center Ken-Burns zoom over clip duration, with optional blur and dimming."""
     dur = float(clip.duration or 1.0)
     w, h = clip.size
-    if max_zoom <= 1.001 or dur <= 0.0:
+    if (max_zoom <= 1.001 and blur_radius <= 0 and dim_factor >= 0.999) or dur <= 0.0:
         return clip
 
     def transform_frame(get_frame: Any, t: float) -> np.ndarray:
         progress = min(1.0, max(0.0, t / dur))
         zoom = 1.0 + (max_zoom - 1.0) * progress
         frame = get_frame(t)
-        if zoom <= 1.001:
-            return frame
-        crop_w = max(1, min(w, int(w / zoom)))
-        crop_h = max(1, min(h, int(h / zoom)))
-        x1 = (w - crop_w) // 2
-        y1 = (h - crop_h) // 2
-        cropped = frame[y1 : y1 + crop_h, x1 : x1 + crop_w]
-        pil_img = Image.fromarray(cropped).resize((w, h), Image.Resampling.BILINEAR)
+        if zoom > 1.001:
+            crop_w = max(1, min(w, int(w / zoom)))
+            crop_h = max(1, min(h, int(h / zoom)))
+            x1 = (w - crop_w) // 2
+            y1 = (h - crop_h) // 2
+            cropped = frame[y1 : y1 + crop_h, x1 : x1 + crop_w]
+            pil_img = Image.fromarray(cropped).resize((w, h), Image.Resampling.BILINEAR)
+        else:
+            pil_img = Image.fromarray(frame)
+
+        if blur_radius > 0:
+            pil_img = pil_img.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+        if dim_factor < 0.999:
+            from PIL import ImageEnhance
+            pil_img = ImageEnhance.Brightness(pil_img).enhance(dim_factor)
         return np.array(pil_img, dtype=np.uint8)
 
     return clip.transform(transform_frame)
@@ -222,6 +235,37 @@ def _fit_to_canvas(clip: Any, target_w: int = 1920, target_h: int = 1080) -> Any
 # Thumbnail Generator (1280x720)
 # ---------------------------------------------------------------------------
 
+def _score_thumbnail_frame(frame: np.ndarray) -> float:
+    """Score a frame by Laplacian sharpness and brightness balance (penalize near-black/washed-out)."""
+    try:
+        if frame.ndim == 3:
+            if frame.shape[2] >= 3:
+                gray = cv2.cvtColor(frame[:, :, :3], cv2.COLOR_RGB2GRAY)
+            else:
+                gray = frame[:, :, 0]
+        elif frame.ndim == 2:
+            gray = frame
+        else:
+            return 0.0
+
+        # Laplacian sharpness variance: cv2.Laplacian(..., cv2.CV_64F).var()
+        lap_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
+        # Brightness balance: penalize near-black (< 35) or washed-out (> 220) frames
+        mean_lum = float(np.mean(gray))
+        dist = abs(mean_lum - 128.0) / 128.0
+        brightness_factor = max(0.01, 1.0 - (dist ** 2))
+        if mean_lum < 35.0:
+            brightness_factor *= max(0.01, mean_lum / 35.0)
+        elif mean_lum > 220.0:
+            brightness_factor *= max(0.01, (255.0 - mean_lum) / 35.0)
+
+        return lap_var * brightness_factor + (brightness_factor * 1e-4)
+    except Exception as exc:
+        logger.debug("Frame scoring failed: %s", exc)
+        return 0.0
+
+
 def generate_topic_thumbnail(
     frame_clip_path: Path,
     thumbnail_text: str,
@@ -229,62 +273,98 @@ def generate_topic_thumbnail(
     target_w: int = 1280,
     target_h: int = 720,
 ) -> Path:
-    """Generate 1280x720 topic video thumbnail with darkened gradient and bold text."""
+    """Generate 1280x720 topic video thumbnail with frame-scored selection, pop enhancements, and safe zone text."""
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    base_img: Image.Image | None = None
+    sample_ratios = [0.20, 0.35, 0.50, 0.65, 0.80]
+    candidate_frames: list[np.ndarray] = []
+
+    # 1. Sample 5 evenly spaced frames (20%, 35%, 50%, 65%, 80%) across the clip
     try:
         from moviepy import VideoFileClip
         with VideoFileClip(str(frame_clip_path)) as vclip:
             dur = float(vclip.duration or 1.0)
-            midpoint = max(0.01, min(dur / 2.0, max(0.01, dur - 0.05)))
-            raw_frame = vclip.get_frame(midpoint)
-            base_img = Image.fromarray(raw_frame)
+            for r in sample_ratios:
+                t = max(0.01, min(dur * r, max(0.01, dur - 0.05)))
+                raw_frame = vclip.get_frame(t)
+                if raw_frame is not None:
+                    candidate_frames.append(raw_frame)
     except Exception as exc:
-        logger.debug("Failed to extract frame for thumbnail via MoviePy: %s; trying FFmpeg", exc)
-        temp_thumb = output_path.with_name(f"{output_path.stem}_raw.jpg")
+        logger.debug("Failed to extract frames for thumbnail via MoviePy: %s; trying cv2/FFmpeg", exc)
+
+    if not candidate_frames:
         try:
-            cmd = [
-                "ffmpeg", "-y",
-                "-ss", "0.5",
-                "-i", str(frame_clip_path.resolve()),
-                "-vframes", "1",
-                "-f", "image2",
-                str(temp_thumb.resolve()),
-            ]
-            subprocess.run(cmd, check=True, capture_output=True)
-            if temp_thumb.is_file():
-                base_img = Image.open(temp_thumb).convert("RGB")
-                temp_thumb.unlink(missing_ok=True)
+            cap = cv2.VideoCapture(str(frame_clip_path.resolve()))
+            if cap.isOpened():
+                total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+                if total_frames > 0:
+                    for r in sample_ratios:
+                        target_f = max(0, min(int(total_frames * r), total_frames - 1))
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, target_f)
+                        ret, bgr = cap.read()
+                        if ret and bgr is not None:
+                            candidate_frames.append(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+                cap.release()
         except Exception:
             pass
 
-    if base_img is None:
-        base_img = Image.new("RGB", (target_w, target_h), (15, 20, 30))
-    else:
-        base_img = base_img.resize((target_w, target_h), Image.Resampling.LANCZOS)
+    if not candidate_frames:
+        temp_thumb = output_path.with_name(f"{output_path.stem}_raw.jpg")
+        try:
+            dur = _probe_duration(frame_clip_path) or 1.0
+            for r in sample_ratios:
+                t_seek = max(0.01, min(dur * r, max(0.01, dur - 0.05)))
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-ss", f"{t_seek:.2f}",
+                    "-i", str(frame_clip_path.resolve()),
+                    "-vframes", "1",
+                    "-f", "image2",
+                    str(temp_thumb.resolve()),
+                ]
+                subprocess.run(cmd, check=True, capture_output=True)
+                if temp_thumb.is_file():
+                    img = Image.open(temp_thumb).convert("RGB")
+                    candidate_frames.append(np.array(img))
+                    temp_thumb.unlink(missing_ok=True)
+        except Exception:
+            pass
 
-    # Darkened gradient: linear top-to-bottom darkening
+    # Score each frame by Laplacian sharpness + brightness balance and pick the best
+    if candidate_frames:
+        best_frame = max(candidate_frames, key=_score_thumbnail_frame)
+        base_img = Image.fromarray(best_frame)
+    else:
+        base_img = Image.new("RGB", (target_w, target_h), (15, 20, 30))
+
+    base_img = base_img.resize((target_w, target_h), Image.Resampling.LANCZOS)
+
+    # 2. Apply subtle Pillow ImageEnhance.Contrast(1.18) and ImageEnhance.Color(1.22) so frame pops at mobile size
+    base_img = ImageEnhance.Contrast(base_img).enhance(1.18)
+    base_img = ImageEnhance.Color(base_img).enhance(1.22)
+
+    # Gradient: subtle darkening across the top safe zone to make text pop
     base_rgba = base_img.convert("RGBA")
     gradient = Image.new("RGBA", (target_w, target_h), (0, 0, 0, 0))
     g_draw = ImageDraw.Draw(gradient)
-    for y in range(target_h):
-        alpha = int(40 + (160 * (y / target_h)))
-        g_draw.line([(0, y), (target_w, y)], fill=(0, 0, 0, alpha))
+    for y_coord in range(target_h):
+        factor = max(0.0, 1.0 - (y_coord / (target_h * 0.55)))
+        alpha = int(30 + 130 * factor)
+        g_draw.line([(0, y_coord), (target_w, y_coord)], fill=(0, 0, 0, alpha))
     base_rgba.alpha_composite(gradient)
     final_img = base_rgba.convert("RGB")
 
-    # Render thumbnail text (<= 5 words, very large bold, yellow/white with black stroke)
+    # 3. Cap thumbnail text to 3 words max, render in bold yellow with thick black stroke + subtle drop shadow
     draw = ImageDraw.Draw(final_img)
     words = thumbnail_text.strip().split()
-    if len(words) > 5:
-        words = words[:5]
+    if len(words) > 3:
+        words = words[:3]
     display_text = " ".join(words).upper()
 
-    # Dynamic font scaling to guarantee text fits within target_w - 120
-    max_text_w = target_w - 120
-    font_size = 86
+    # Dynamic font scaling to guarantee text fits within target_w - 140
+    max_text_w = target_w - 140
+    font_size = 92
     font = None
     while font_size >= 36:
         try:
@@ -310,20 +390,32 @@ def generate_topic_thumbnail(
     tw = bbox[2] - bbox[0]
     th = bbox[3] - bbox[1]
 
-    # Position text in bottom center with padding
-    x = max(20, (target_w - tw) // 2)
-    y = max(20, target_h - th - 80)
-    stroke_w = max(3, font_size // 12)
+    # Upper-center safe zone (never bottom-right where YouTube puts the duration badge)
+    x = max(60, (target_w - tw) // 2)
+    y = 60
+    stroke_w = max(4, font_size // 11)
+    shadow_offset = max(4, font_size // 14)
 
-    # Yellow text with thick black stroke
-    draw.text(
-        (x, y),
-        display_text,
-        font=font,
-        fill=(255, 235, 59),
-        stroke_width=stroke_w,
-        stroke_fill=(0, 0, 0),
-    )
+    if display_text:
+        # Subtle drop shadow
+        draw.text(
+            (x + shadow_offset, y + shadow_offset),
+            display_text,
+            font=font,
+            fill=(0, 0, 0),
+            stroke_width=stroke_w + 1,
+            stroke_fill=(0, 0, 0),
+        )
+
+        # Bold yellow text with thick black stroke
+        draw.text(
+            (x, y),
+            display_text,
+            font=font,
+            fill=(255, 235, 59),
+            stroke_width=stroke_w,
+            stroke_fill=(0, 0, 0),
+        )
 
     final_img.save(str(output_path), "JPEG", quality=92)
     logger.info("Saved topic thumbnail to %s (1280x720)", output_path)
@@ -566,7 +658,9 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None) 
         if plan.cold_open.strip():
             co_wav = temp_dir / "narration_cold_open.wav"
             res_co = narrator.synthesize_speech(plan.cold_open, co_wav, language=plan.language)
-            final_co_wav = _ensure_synthetic_wav(res_co or co_wav, duration_seconds=max(2.0, len(plan.cold_open.split()) / 2.7))
+            final_co_wav = res_co or co_wav
+            if not final_co_wav.is_file() or final_co_wav.stat().st_size == 0:
+                raise RuntimeError("TTS synthesis failed for cold_open")
             co_dur = _probe_duration(final_co_wav) or (len(plan.cold_open.split()) / 2.7)
             voiced_narrations["cold_open"] = (final_co_wav, co_dur)
 
@@ -574,17 +668,22 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None) 
         for pt in plan.points:
             if progress and hasattr(progress, "stage"):
                 progress.stage(f"voicing point {pt.index}/{len(plan.points)}")
-            pt_wav = temp_dir / f"narration_point_{pt.index}.wav"
-            res_pt = narrator.synthesize_speech(pt.narration, pt_wav, language=plan.language)
-            final_pt_wav = _ensure_synthetic_wav(res_pt or pt_wav, duration_seconds=max(2.0, len(pt.narration.split()) / 2.7))
-            pt_dur = _probe_duration(final_pt_wav) or (len(pt.narration.split()) / 2.7)
-            voiced_narrations[f"point_{pt.index}"] = (final_pt_wav, pt_dur)
+            if pt.narration.strip():
+                pt_wav = temp_dir / f"narration_point_{pt.index}.wav"
+                res_pt = narrator.synthesize_speech(pt.narration, pt_wav, language=plan.language)
+                final_pt_wav = res_pt or pt_wav
+                if not final_pt_wav.is_file() or final_pt_wav.stat().st_size == 0:
+                    raise RuntimeError(f"TTS synthesis failed for point {pt.index}")
+                pt_dur = _probe_duration(final_pt_wav) or (len(pt.narration.split()) / 2.7)
+                voiced_narrations[f"point_{pt.index}"] = (final_pt_wav, pt_dur)
 
         # Outro
         if plan.outro.strip():
             out_wav = temp_dir / "narration_outro.wav"
             res_out = narrator.synthesize_speech(plan.outro, out_wav, language=plan.language)
-            final_out_wav = _ensure_synthetic_wav(res_out or out_wav, duration_seconds=max(2.0, len(plan.outro.split()) / 2.7))
+            final_out_wav = res_out or out_wav
+            if not final_out_wav.is_file() or final_out_wav.stat().st_size == 0:
+                raise RuntimeError("TTS synthesis failed for outro")
             out_dur = _probe_duration(final_out_wav) or (len(plan.outro.split()) / 2.7)
             voiced_narrations["outro"] = (final_out_wav, out_dur)
 
@@ -597,20 +696,28 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None) 
             CompositeVideoClip,
             ImageClip,
             VideoFileClip,
+            afx,
             concatenate_videoclips,
         )
+        from moviepy.video.fx import CrossFadeIn, CrossFadeOut
         import moviepy.video.fx as vfx
 
         target_w = int(config.get("longform.width", 1920) or 1920)
         target_h = int(config.get("longform.height", 1080) or 1080)
         fps = int(config.get("longform.fps", 30) or 30)
-        card_seconds = float(config.get("longform.card_seconds", 2.5) or 2.5)
+        card_seconds = float(config.get("longform.card_seconds", 1.2) or 1.2)
+        transition_sfx_path = str(config.get("longform.transition_sfx_path", "") or "")
         broll_volume = float(config.get("longform.broll_volume", 0.12) or 0.12)
         credit_seconds = float(config.get("longform.credit_seconds", 4.0) or 4.0)
         kenburns_max_zoom = float(config.get("longform.kenburns_max_zoom", 1.08) or 1.08)
 
         # Helper to render a block to ultrafast MP4 and apply per-block loudnorm
-        def render_block_mp4(clip: Any, name: str, clips_to_close: list[Any] | None = None) -> Path:
+        def render_block_mp4(
+            clip: Any,
+            name: str,
+            clips_to_close: list[Any] | None = None,
+            normalize: bool = True,
+        ) -> Path:
             raw_out = temp_dir / f"{name}_raw.mp4"
             final_out = temp_dir / f"{name}.mp4"
             try:
@@ -629,14 +736,35 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None) 
                     for c in clips_to_close:
                         _close_clip_handles(c)
 
-            # Per-block loudnorm using narrator helper
-            try:
-                narrator.normalize_audio(raw_out, final_out)
-                raw_out.unlink(missing_ok=True)
-            except Exception as exc:
-                logger.warning("Per-block audio normalization fallback for %s: %s", name, exc)
-                if raw_out.is_file():
-                    shutil.move(str(raw_out), str(final_out))
+            if normalize:
+                # Per-block loudnorm using narrator helper
+                try:
+                    narrator.normalize_audio(raw_out, final_out)
+                    raw_out.unlink(missing_ok=True)
+                except Exception as exc:
+                    logger.warning("Per-block audio normalization fallback for %s: %s", name, exc)
+                    if raw_out.is_file():
+                        shutil.move(str(raw_out), str(final_out))
+            else:
+                # Non-normalized block (e.g. chapter card): ensure 48kHz stereo AAC stream format
+                # without destroying the configured -12dB SFX or -26dB BGM bed level via loudnorm
+                try:
+                    cmd = [
+                        "ffmpeg", "-y", "-i", str(raw_out),
+                        "-map", "0:v", "-map", "0:a:0",
+                        "-af", "aresample=48000,aformat=channel_layouts=stereo",
+                        "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+                        str(final_out),
+                    ]
+                    subprocess.run(
+                        cmd, check=True, capture_output=True, text=True,
+                        encoding="utf-8", errors="replace",
+                    )
+                    raw_out.unlink(missing_ok=True)
+                except Exception as exc:
+                    logger.warning("Audio remux fallback for non-normalized %s: %s", name, exc)
+                    if raw_out.is_file():
+                        shutil.move(str(raw_out), str(final_out))
 
             return final_out
 
@@ -733,10 +861,67 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None) 
                 card_img = _render_chapter_card_image(
                     pt_clip_path, pt.heading, target_w=target_w, target_h=target_h
                 )
-                card_clip = ImageClip(np.array(card_img)).with_duration(card_seconds)
-                card_clip = card_clip.with_audio(AudioClip(lambda t: [0.0, 0.0], duration=card_seconds))
+                card_img_clip = ImageClip(np.array(card_img)).with_duration(card_seconds)
+                clips_to_close: list[Any] = [card_img_clip]
 
-                card_file = render_block_mp4(card_clip, f"block_{block_counter:02d}_pt_{pt.index}_card")
+                sfx_attached = False
+                sfx_file = Path(transition_sfx_path) if transition_sfx_path.strip() else None
+                if sfx_file is not None and sfx_file.is_file() and sfx_file.stat().st_size > 0:
+                    try:
+                        sfx_clip = AudioFileClip(str(sfx_file))
+                        clips_to_close.append(sfx_clip)
+                        sfx_vol = 10.0 ** (-12.0 / 20.0)
+                        sfx_audio = sfx_clip.with_volume_scaled(sfx_vol)
+                        clips_to_close.append(sfx_audio)
+                        if sfx_audio.duration and sfx_audio.duration > card_seconds:
+                            sfx_audio = sfx_audio.subclipped(0, card_seconds)
+                            clips_to_close.append(sfx_audio)
+                        card_clip = card_img_clip.with_audio(sfx_audio)
+                        sfx_attached = True
+                    except Exception as sfx_exc:
+                        logger.warning(
+                            "Failed loading transition SFX '%s': %s; falling back to visual fade and BGM bed",
+                            sfx_file,
+                            sfx_exc,
+                        )
+
+                if not sfx_attached:
+                    card_faded = card_img_clip.with_effects([CrossFadeIn(0.2), CrossFadeOut(0.2)])
+                    card_clip = CompositeVideoClip([card_faded], size=(target_w, target_h)).with_duration(card_seconds)
+                    clips_to_close.extend([card_faded, card_clip])
+
+                    bgm_file = narrator._resolve_bgm_file() if hasattr(narrator, "_resolve_bgm_file") else None
+                    bgm_attached = False
+                    if bgm_file is not None and Path(bgm_file).is_file():
+                        try:
+                            bgm_clip = AudioFileClip(str(bgm_file))
+                            clips_to_close.append(bgm_clip)
+                            raw_bgm_vol = getattr(narrator, "bgm_volume_db", None)
+                            if raw_bgm_vol is None:
+                                raw_bgm_vol = float(config.get("transformation.bgm_volume_db", -26.0) or -26.0)
+                            bgm_vol = 10.0 ** (float(raw_bgm_vol) / 20.0)
+                            bgm_audio = bgm_clip.with_volume_scaled(bgm_vol)
+                            clips_to_close.append(bgm_audio)
+                            if bgm_audio.duration and bgm_audio.duration < card_seconds:
+                                bgm_audio = bgm_audio.with_effects([afx.AudioLoop(duration=card_seconds)])
+                                clips_to_close.append(bgm_audio)
+                            elif bgm_audio.duration and bgm_audio.duration > card_seconds:
+                                bgm_audio = bgm_audio.subclipped(0, card_seconds)
+                                clips_to_close.append(bgm_audio)
+                            card_clip = card_clip.with_audio(bgm_audio)
+                            bgm_attached = True
+                        except Exception as bgm_exc:
+                            logger.warning("Failed loading BGM bed '%s' for chapter card: %s", bgm_file, bgm_exc)
+
+                    if not bgm_attached:
+                        card_clip = card_clip.with_audio(AudioClip(lambda t: [0.0, 0.0], duration=card_seconds))
+
+                card_file = render_block_mp4(
+                    card_clip,
+                    f"block_{block_counter:02d}_pt_{pt.index}_card",
+                    clips_to_close=clips_to_close,
+                    normalize=False,
+                )
                 card_actual_dur = _probe_duration(card_file) or card_seconds
 
                 chap_pt.block_files.append(card_file)
@@ -750,14 +935,81 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None) 
                 pt_wav, pt_dur = voiced_narrations[f"point_{pt.index}"]
 
                 opened_pt: list[Any] = []
-                broll_video = VideoFileClip(str(pt_clip_path)) if pt_clip_path else ColorClip(size=(target_w, target_h), color=(20, 20, 30), duration=pt_dur)
-                opened_pt.append(broll_video)
+                # Stop back-to-back duplicate footage: do not play the exact same pt.evidence[0] segment
+                # that immediately plays next at full volume.
+                # Selection priority:
+                # (a) an unused clip from pt.alternates if downloaded/available
+                # (b) pt.evidence[1] if the point has >= 2 evidence clips (trimmed to the last half)
+                # (c) if only 1 clip exists, play a visibly distinct sub-range or dimmed/blurred Ken-Burns background
+                #     from a different point's clip so the same footage never plays twice in a row.
+                broll_source_path: Path | None = None
+                apply_dim_blur = False
+                is_same_as_first_evidence = False
+
+                # (a) unused clip from pt.alternates if downloaded/available
+                pt_ev_keys = {(ev.url, round(ev.start, 2), round(ev.end, 2)) for ev in pt.evidence}
+                for alt in getattr(pt, "alternates", []) or []:
+                    alt_key = (alt.url, round(alt.start, 2), round(alt.end, 2))
+                    if alt_key not in pt_ev_keys:
+                        cand_path = downloaded_files.get(alt_key)
+                        if cand_path and Path(cand_path).is_file():
+                            broll_source_path = cand_path
+                            break
+
+                # (b) pt.evidence[1] if point has >= 2 evidence clips (trimmed to the last half)
+                is_ev2 = False
+                if broll_source_path is None and len(pt.evidence) >= 2:
+                    ev2 = pt.evidence[1]
+                    ev2_key = (ev2.url, round(ev2.start, 2), round(ev2.end, 2))
+                    cand_path = downloaded_files.get(ev2_key)
+                    if cand_path and Path(cand_path).is_file():
+                        broll_source_path = cand_path
+                        is_ev2 = True
+
+                # (c) from a different point's clip with dimmed/blurred Ken-Burns background
+                if broll_source_path is None:
+                    for other_pt in plan.points:
+                        if other_pt.index != pt.index:
+                            for other_ev in other_pt.evidence:
+                                other_key = (other_ev.url, round(other_ev.start, 2), round(other_ev.end, 2))
+                                cand_path = downloaded_files.get(other_key)
+                                if cand_path and Path(cand_path).is_file():
+                                    broll_source_path = cand_path
+                                    apply_dim_blur = True
+                                    break
+                            if broll_source_path is not None:
+                                break
+
+                # Fallback if only 1 clip exists across the whole plan
+                if broll_source_path is None:
+                    broll_source_path = pt_clip_path
+                    is_same_as_first_evidence = True
+                    apply_dim_blur = True
+
+                if broll_source_path and Path(broll_source_path).is_file():
+                    broll_video = VideoFileClip(str(broll_source_path))
+                    opened_pt.append(broll_video)
+                    raw_dur = float(broll_video.duration or 0.0)
+                    if is_ev2 and raw_dur > 0:
+                        half_start = max(0.0, raw_dur / 2.0)
+                        if half_start < raw_dur:
+                            broll_video = broll_video.subclipped(half_start, raw_dur)
+                    elif is_same_as_first_evidence and raw_dur > pt_dur * 1.5:
+                        sub_start = max(0.0, raw_dur - pt_dur)
+                        broll_video = broll_video.subclipped(sub_start, raw_dur)
+                else:
+                    broll_video = ColorClip(size=(target_w, target_h), color=(20, 20, 30), duration=pt_dur)
+                    opened_pt.append(broll_video)
+
                 broll_fitted = _fit_to_canvas(broll_video, target_w, target_h)
                 if (broll_fitted.duration or 0) < pt_dur:
                     loop_count = math.ceil(pt_dur / max(0.1, broll_fitted.duration or 1.0))
                     broll_fitted = concatenate_videoclips([broll_fitted] * loop_count)
                 broll_trimmed = broll_fitted.subclipped(0.0, pt_dur)
-                zoomed = _apply_ken_burns_zoom(broll_trimmed, kenburns_max_zoom)
+                if apply_dim_blur:
+                    zoomed = _apply_ken_burns_zoom(broll_trimmed, max_zoom=kenburns_max_zoom, blur_radius=6, dim_factor=0.65)
+                else:
+                    zoomed = _apply_ken_burns_zoom(broll_trimmed, max_zoom=kenburns_max_zoom)
 
                 pt_audio = AudioFileClip(str(pt_wav))
                 opened_pt.append(pt_audio)
@@ -802,7 +1054,8 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None) 
 
                 # Lower-third credit
                 if ev_clip.kind == "official":
-                    cred_text = "Official footage: Rockstar Games"
+                    raw_ch = (ev_clip.channel or "").strip().lstrip("@")
+                    cred_text = f"Official footage: {raw_ch}" if raw_ch else f"Official {plan.game} footage"
                 else:
                     ch_clean = (ev_clip.channel or "").strip().lstrip("@")
                     cred_text = f"@{ch_clean}" if ch_clean else "@Unknown"

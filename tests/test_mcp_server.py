@@ -4481,6 +4481,221 @@ async def test_render_clip_breakdown_parameters_support(mcp_env) -> None:
     assert "Invalid breakdown_roi" in err_roi_nonnum
 
 
+def test_mcp_config_for_channel_helper() -> None:
+    """Verify _config_for_channel correctly applies channels, preserves defaults, and validates."""
+    cfg_default = mcp_server._config_for_channel(None)
+    assert cfg_default.get("general.output_dir") == "./output"
+    assert cfg_default.get("transformation.narration_language") == "auto"
+    assert cfg_default.get("topics.ledger_name") == "topics_ledger.json"
+
+    cfg_en = mcp_server._config_for_channel("en")
+    assert cfg_en.get("general.output_dir") == "./output/en"
+    assert cfg_en.get("transformation.narration_language") == "english"
+    assert cfg_en.get("topics.ledger_name") == "topics_ledger_en.json"
+
+    cfg_hi = mcp_server._config_for_channel("hi")
+    assert cfg_hi.get("general.output_dir") == "./output/hi"
+    assert cfg_hi.get("transformation.narration_language") == "hinglish"
+    assert cfg_hi.get("topics.ledger_name") == "topics_ledger_hi.json"
+
+    # Shared cache and library
+    assert (
+        cfg_en.get("general.cache_dir")
+        == cfg_hi.get("general.cache_dir")
+        == cfg_default.get("general.cache_dir")
+    )
+    assert (
+        cfg_en.get("library.db_path")
+        == cfg_hi.get("library.db_path")
+        == cfg_default.get("library.db_path")
+    )
+
+    # Unknown channel raises ValueError
+    with pytest.raises(ValueError, match="Unknown channel profile"):
+        mcp_server._config_for_channel("unknown_channel")
+
+
+@pytest.mark.asyncio
+async def test_mcp_render_tools_channel_profile_routing() -> None:
+    """Verify render_clip and render_all_selected apply channel profiles or reject unknown channels."""
+    url = "https://youtube.com/watch?v=channel_render_test"
+
+    # 1. channel=None preserves default config
+    p_none = await mcp_server._prepare_render_clip(
+        url=url,
+        start=400.0,
+        end=430.0,
+        hook_title="Default Channel",
+        narration_intro="Intro text.",
+        narration_outro="Outro text.",
+        narration_strict=False,
+        channel=None,
+    )
+    assert not isinstance(p_none, str), f"Unexpected error: {p_none}"
+    assert p_none["config"].get("general.output_dir") == "./output"
+    assert p_none["config"].get("transformation.narration_language") == "auto"
+
+    # 2. channel="en" routes to output/en and english narration
+    p_en = await mcp_server._prepare_render_clip(
+        url=url,
+        start=400.0,
+        end=430.0,
+        hook_title="EN Channel",
+        narration_intro="Intro text.",
+        narration_outro="Outro text.",
+        narration_strict=False,
+        channel="en",
+    )
+    assert not isinstance(p_en, str), f"Unexpected error: {p_en}"
+    assert p_en["config"].get("general.output_dir") == "./output/en"
+    assert p_en["config"].get("transformation.narration_language") == "english"
+
+    # 3. channel="hi" routes to output/hi and hinglish narration
+    p_hi = await mcp_server._prepare_render_clip(
+        url=url,
+        start=400.0,
+        end=430.0,
+        hook_title="HI Channel",
+        narration_intro="Intro text.",
+        narration_outro="Outro text.",
+        narration_strict=False,
+        channel="hi",
+    )
+    assert not isinstance(p_hi, str), f"Unexpected error: {p_hi}"
+    assert p_hi["config"].get("general.output_dir") == "./output/hi"
+    assert p_hi["config"].get("transformation.narration_language") == "hinglish"
+
+    # 4. Unknown channel in render_clip returns clean JSON error
+    res_unknown = await mcp_server.render_clip(
+        url=url,
+        start=100.0,
+        end=130.0,
+        hook_title="Bad Channel",
+        channel="nonexistent_channel",
+    )
+    parsed_err = json.loads(res_unknown)
+    assert "error" in parsed_err
+    assert "Unknown channel profile" in parsed_err["error"]
+
+    # 5. Unknown channel in render_all_selected returns clean JSON error
+    res_all_unknown = await mcp_server.render_all_selected(
+        url=url,
+        channel="bad_channel",
+    )
+    parsed_all_err = json.loads(res_all_unknown)
+    assert "error" in parsed_all_err
+    assert "Unknown channel profile" in parsed_all_err["error"]
+
+
+def test_mcp_topic_tools_channel_profile_isolation(tmp_path: Path) -> None:
+    """Verify topic tools isolate ledgers and output dirs for en vs hi while sharing cache."""
+    from unittest.mock import patch
+    from streamclipper.topics.models import TopicPlan
+
+    cache_dir = tmp_path / "shared_cache"
+    cache_dir.mkdir()
+    out_en = tmp_path / "out_en"
+    out_hi = tmp_path / "out_hi"
+
+    # 1. suggest_topics with channel="en" vs "hi"
+    with patch("streamclipper.mcp_server.server._get_config") as mock_get_cfg:
+        def _get_base():
+            c = Config()
+            c._data["general"]["cache_dir"] = str(cache_dir)
+            c._data["channels"]["en"]["output_dir"] = str(out_en)
+            c._data["channels"]["hi"]["output_dir"] = str(out_hi)
+            return c
+
+        mock_get_cfg.side_effect = _get_base
+
+        with patch("streamclipper.topics.discover.suggest_topics_local", return_value=[]) as mock_sug:
+            mcp_server.suggest_topics("GTA 6", limit=5, channel="en")
+            cfg_used = mock_sug.call_args[0][0]
+            assert cfg_used.get("general.output_dir") == str(out_en)
+            assert cfg_used.get("topics.ledger_name") == "topics_ledger_en.json"
+
+            mcp_server.suggest_topics("GTA 6", limit=5, channel="hi")
+            cfg_used_hi = mock_sug.call_args[0][0]
+            assert cfg_used_hi.get("general.output_dir") == str(out_hi)
+            assert cfg_used_hi.get("topics.ledger_name") == "topics_ledger_hi.json"
+
+    # 2. Test ledger isolation between approve_topic_plan("en") vs approve_topic_plan("hi")
+    def _make_dummy_plan(plan_id: str, topic_id: str, lang: str) -> TopicPlan:
+        return TopicPlan(
+            plan_id=plan_id,
+            topic_id=topic_id,
+            topic_title=f"Title {topic_id}",
+            game="GTA 6",
+            language=lang,
+            status="draft",
+        )
+
+    plan_en = _make_dummy_plan("plan_en_1", "en_topic_1", "english")
+    plan_hi = _make_dummy_plan("plan_hi_1", "hi_topic_1", "hinglish")
+
+    with patch("streamclipper.mcp_server.server._get_config") as mock_get_cfg:
+        def _get_configured():
+            c = Config()
+            c._data["general"]["cache_dir"] = str(cache_dir)
+            return c
+
+        mock_get_cfg.side_effect = _get_configured
+
+        with patch("streamclipper.topics.planner.load_plan") as mock_load, patch(
+            "streamclipper.topics.validate.validate_plan", return_value=[]
+        ), patch("streamclipper.topics.planner.save_plan"):
+
+            # Approve EN plan
+            mock_load.return_value = plan_en
+            res_en = json.loads(mcp_server.approve_topic_plan("plan_en_1", channel="en"))
+            assert res_en["status"] == "approved"
+
+            # Approve HI plan
+            mock_load.return_value = plan_hi
+            res_hi = json.loads(mcp_server.approve_topic_plan("plan_hi_1", channel="hi"))
+            assert res_hi["status"] == "approved"
+
+        # Check the separate ledgers in the shared cache_dir
+        en_ledger_file = cache_dir / "topics_ledger_en.json"
+        hi_ledger_file = cache_dir / "topics_ledger_hi.json"
+        assert en_ledger_file.exists(), "EN ledger file should exist"
+        assert hi_ledger_file.exists(), "HI ledger file should exist"
+
+        data_en = json.loads(en_ledger_file.read_text(encoding="utf-8"))
+        data_hi = json.loads(hi_ledger_file.read_text(encoding="utf-8"))
+
+        en_topic_ids = [e["topic_id"] for e in data_en.get("entries", [])]
+        hi_topic_ids = [e["topic_id"] for e in data_hi.get("entries", [])]
+
+        assert "en_topic_1" in en_topic_ids
+        assert "en_topic_1" not in hi_topic_ids
+        assert "hi_topic_1" in hi_topic_ids
+        assert "hi_topic_1" not in en_topic_ids
+
+
+def test_mcp_topic_tools_unknown_channel_error() -> None:
+    """Verify topic tools return a clear JSON error when passed an unknown channel name."""
+    tools_and_calls = [
+        lambda: mcp_server.suggest_topics("GTA 6", channel="bad_channel"),
+        lambda: mcp_server.start_topic_plan("GTA 6", "Topic", channel="bad_channel"),
+        lambda: mcp_server.record_topic_candidates("GTA 6", [], channel="bad_channel"),
+        lambda: mcp_server.submit_topic_plan("{}", channel="bad_channel"),
+        lambda: mcp_server.get_topic_plan("some_id", channel="bad_channel"),
+        lambda: mcp_server.update_topic_plan("some_id", "{}", channel="bad_channel"),
+        lambda: mcp_server.approve_topic_plan("some_id", channel="bad_channel"),
+        lambda: mcp_server.render_topic_video("some_id", channel="bad_channel"),
+        lambda: mcp_server.render_topic_shorts("some_id", channel="bad_channel"),
+        lambda: mcp_server.get_topic_material("GTA 6", channel="bad_channel"),
+    ]
+
+    for call_fn in tools_and_calls:
+        res = call_fn()
+        parsed = json.loads(res)
+        assert "error" in parsed, f"Expected error in {res}"
+        assert "Unknown channel profile" in parsed["error"]
+
+
+
 
 
 

@@ -1,106 +1,51 @@
-# AGENTS.md — StreamClipper AI Agent Instructions
+# AGENTS.md — StreamClipper v4 Agent Instructions
 
-> **Repository:** `D:\GTA6-Clipper` (`streamclipper`)  
-> **Primary Blueprint:** `docs/streamclipper-implementation-guide-v2.md` (v2.2 — Patched + Auto-Hardware + YPP Transformative Engine)  
-> **Prompt Runbook:** `docs/streamclipper-agent-prompts.md`  
-> **Documentation Folder Rule:** Store all project documentation, architecture guides, prompt runbooks, design notes, and reference files inside `docs/`. Keep only tool-required standard files (`AGENTS.md`, `README.md`, `pyproject.toml`, `config.default.yaml`, `.gitignore`) at the repository root.  
-> **Current Repository Milestone:** **All 5 Phases (`phase-1-foundation` through `phase-5-mcp-server`, Packages `1.1–5.2` + Reviews `1.R–5.R`) are ✅ COMPLETE and MERGED into `main` (StreamClipper v2.2 release).**
+> **Repo:** `D:\GTA6-Clipper` (`streamclipper`)
+> **Active Branch:** `v4-quality` (branched from `main`; never commit directly to `main`)
+> **Active Plan:** `docs/v4/v4-implementation-plan.md`
+> **Prompt Runbook:** `docs/v4/v4-antigravity-prompts.md`
 
-This file defines the mandatory workspace conventions, multi-device hardware auto-configuration rules, YouTube Partner Program (YPP) transformative content guardrails, technical requirements, git workflow, and reporting standards for all AI coding agents (**Gemini 3.8 (high)** and **Claude Opus 4.6**) working in this repository.
+This file is the single source of truth for AI coding agents (including **Antigravity / Gemini 3.8 Flash High**) working on StreamClipper v4. Keep edits strictly scoped to the active ticket.
 
-## 1. Project Overview & Architecture
+---
 
-**StreamClipper** is a free, open-source, game-agnostic AI stream clipping pipeline with dual **CLI (`click` + `rich`)** and **MCP (`MCPServer` from MCP SDK v2)** execution modes, engineered to satisfy the [YouTube Channel Monetization Policies](https://support.google.com/youtube/answer/1311392?hl=en) and [YouTube Reused Content FAQ](https://support.google.com/youtube/community-guide/271248162/%F0%9F%94%8E-faq-reused-content-youtube%E2%80%99s-partner-program?hl=en):
+## 1. Environment & Commands (Windows)
 
-- **Audio-First Ingestion**: Downloads 16kHz mono WAV audio first via [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) (~460 MB for a 4-hour VOD) and fetches only ±3s padded 1080p video cuts (`download_ranges`) for selected highlights.
-- **Tri-Modal Signal Fusion (with Dynamic Renormalization)**: Combines streamed audio RMS loudness spikes (25%), YouTube `.live_chat.json` velocity spikes (25%), and LLM semantic scoring (50% via local Ollama or host MCP client). When live chat replay (or loudness spikes) is unavailable for a stream, weights dynamically renormalize across available modalities, and top-tier quiet AI picks (`score >= 8.5`) receive a `0.85 * score` floor so funny/detail moments without loud yelling still pass.
-- **YPP Transformative Narrative & Story Engine (`auto` | `narrative` | `story` | `raw`)**: Turns raw stream slices into engaging, original Shorts with four explicit transformation modes:
-  - **`auto` (default)**: Automatically resolves per highlight to `story` when validated multi-beat `sub_clips` exist, or `narrative` for clean single-cut moments.
-  - **`narrative`**: Single continuous cut + full YPP commentary intro/outro, adaptive context badge, spike zoom, and live chat ticker (never jump-cuts `sub_clips`).
-  - **`story`**: Multi-beat jump-cut stitching when validated `sub_clips` exist (falling back cleanly to single cut) + full YPP commentary and overlays.
-  - **`raw`**: Uncut single clip + captions only (skips narrative LLM calls, voiceover, badge, zoom, and chat ticker).
-  1. **Adaptive Commentary Intro & Outro (`assembly/narrator.py`)**: Classifies each highlight's `moment_type` (`funny`, `fail`, `graphics_detail`, `hype`, `clutch`, `chat_chaos`, `lore_secret`, `analysis`) so commentary tone matches the clip naturally (witty setup for funny/fails, detail spotlight for graphics/physics, stakes-building for clutches — never forcing dry analysis onto fun moments). Supports free local [`Kokoro-82M`](https://github.com/hexgrad/kokoro) (`tts_voice: "af_heart"`) or [`edge-tts`](https://github.com/rany2/edge-tts) (`edge_tts_voice: "en-US-GuyNeural"`), optional **ElevenLabs API / personal voice clone** (`ELEVENLABS_API_KEY` + `voice_id`), and real human mic overrides (`--voice-intro` / `--voice-outro` WAV), mixed over `18%` ducked stream audio (`:eval=frame`) while preserving `100%` original stream audio during the climax.
-  2. **Conditional Multi-Beat Jump-Cut Story Mode (`sub_clips`)**: In `story` or `auto` mode, when a moment contains ≥5s of dead air between setup and payoff, stitches 2–3 validated beats (*Setup → Escalation → Payoff*); otherwise renders a clean single cut.
-  3. **Spike-Synced Punch-In Zoom, Adaptive Context Badge & Live Chat Ticker**: Applies a `1.20x` center punch-in zoom at `peak_time`, renders an adaptive `context_badge` pill, and burns real `.live_chat.json` viewer bursts via the Windows-safe [FFmpeg `ass` filter](https://trac.ffmpeg.org/wiki/HowToBurnSubtitlesIntoVideo).
+Always run Python, pytest, and CLI commands via `.venv`:
 
-## 2. Windows Environment & Toolchain Rules
+| Tool | Command |
+| :--- | :--- |
+| Python | `D:\GTA6-Clipper\.venv\Scripts\python.exe` |
+| Targeted tests | `D:\GTA6-Clipper\.venv\Scripts\pytest.exe tests/test_<module>.py -v` |
+| Full test suite | `D:\GTA6-Clipper\.venv\Scripts\pytest.exe -v` |
+| CLI | `D:\GTA6-Clipper\.venv\Scripts\streamclipper.exe` |
+| FFmpeg | `ffmpeg` (must include `libass` / `ass` filter and optional `h264_nvenc`) |
 
-Always execute Python, `pytest`, `pip`, and CLI entry points using the repository's dedicated **Python 3.12 virtual environment** (`.venv`) so prebuilt Windows CUDA wheels (`torch`, `ctranslate2`, `faster-whisper`, [`whisperx`](https://github.com/m-bain/whisperx)) resolve cleanly:
+---
 
-| Tool | Canonical Executable Path / Command | Notes |
-| :--- | :--- | :--- |
-| **Python (`.venv`)** | `D:\GTA6-Clipper\.venv\Scripts\python.exe` | Preferred Python 3.12 interpreter with CUDA & WhisperX wheels |
-| **Pytest** | `D:\GTA6-Clipper\.venv\Scripts\pytest.exe -v` | Run full test suite before every commit |
-| **CLI Entry Point** | `D:\GTA6-Clipper\.venv\Scripts\streamclipper.exe` | Installed in editable mode (`pip install -e ".[dev,mcp]"`) |
-| **MCP Entry Point** | `D:\GTA6-Clipper\.venv\Scripts\streamclipper-mcp.exe` | Starts the `MCPServer` (`mcp>=2.0.0`) stdio server |
-| **Git** | `git` (fallback: `"C:\Program Files\Git\cmd\git.exe"`) | Add `C:\Program Files\Git\cmd` to session `PATH` if missing |
-| **FFmpeg** | `ffmpeg` (Gyan build via WinGet) | Must include `libass` (`ass` filter) and optional `h264_nvenc` encoder |
+## 2. Hard Rules (Never Violate)
 
-## 3. Multi-Device Hardware Auto-Configuration
+1. **Scope strictly to the current ticket:** Only modify the files explicitly listed in the ticket prompt. Do not refactor unrelated modules, rename public functions, or "clean up" other files.
+2. **Keep both `config.default.yaml` copies identical:** `config.default.yaml` (repo root) and `src/streamclipper/config.default.yaml` MUST remain byte-for-byte identical (`test_G12_default_config_copies_are_identical` enforces this).
+3. **Preserve backward compatibility:** Any new fields in `models.py`, `topics/models.py`, or `config.default.yaml` MUST have sensible defaults and `.get(...)` fallbacks in `from_dict()` so all 710+ existing tests keep passing.
+4. **Never hardcode GPU settings:** Keep `transcription.device`, `model_size`, `compute_type`, `batch_size`, `llm.model`, and `video.codec` set to `"auto"` in `config.default.yaml`. Respect `HardwareProfile` (GTX 1660 SUPER 6 GB / RTX 4050 6 GB / CPU).
+5. **MoviePy v2 API only:** Import directly from `moviepy` and use `.cropped()`, `.resized()`, `.subclipped()`, `.with_position()`, `.with_duration()`, `.with_audio()`. Always close opened clips in `try/finally` before deleting temp files on Windows.
+6. **Windows-safe FFmpeg `ass` burn-in:** Always write/close the `.ass` file first, then run `ffmpeg` with `cwd=str(ass_path.resolve().parent)` and `-vf ass={escaped_ass_name}`. Always fall back from `h264_nvenc` to `libx264` on encoder failure, and log `exc.stderr[-500:]`.
+7. **Single lossy video encode:** Write intermediate video at `preset="ultrafast"`, `-crf 18`, use `-c:v copy` during audio mixing, and do the single final lossy encode during final ASS burn-in.
+8. **Audio ducking:** Always append `:eval=frame` to FFmpeg time-varying `volume` filters and normalize audio streams to `48000 Hz` stereo before `amix`.
+9. **No silent test-tone fallbacks in production:** Never substitute a synthetic sine wave for missing TTS audio in production renders. If required narration fails, raise or quarantine the clip cleanly.
+10. **Channel-language isolation:** Never mix `english` and `hinglish` outputs into the same channel folder or topic ledger. Channel profiles (`en` vs `hi`) keep separate output roots, voices, and topic ledgers while sharing the same ingested source `library.sqlite` and `.cache/`.
 
-This codebase runs across heterogeneous machines — specifically a **Desktop with an NVIDIA GeForce GTX 1660 SUPER (6 GB VRAM, Turing TU116, Compute Capability 7.5, no Tensor Cores)** and a **Laptop with an NVIDIA GeForce RTX 4050 (6 GB VRAM, Ada Lovelace AD107, Compute Capability 8.9, Tensor Cores)**, as well as high-VRAM and CPU-only systems.
+---
 
-- **Never hardcode settings for a single GPU** in `config.default.yaml` or pipeline modules.
-- Keep `transcription.device`, `transcription.model_size`, `transcription.compute_type`, `transcription.batch_size`, `llm.model`, and `video.codec` set to `"auto"` in `config.default.yaml`.
-- Route all `"auto"` resolution through `detect_hardware_profile()` and `resolve_hardware_config()` in `src/streamclipper/config.py` using [`torch.cuda.get_device_properties`](https://docs.pytorch.org/docs/stable/generated/torch.cuda.get_device_properties.html):
+## 3. Per-Ticket Workflow
 
-| Hardware Tier (`HardwareProfile.tier`) | Detection Rule | `device` | `model_size` | `compute_type` | `batch_size` | `llm.model` | `video.codec` |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **`cuda_high_vram`** | CUDA `>= 10.0 GB` VRAM | `cuda` | `large-v2` | `float16` | `16` | `qwen3:8b` | `h264_nvenc` (else `libx264`) |
-| **`cuda_mid_tensor`** (e.g. RTX 4050 6GB) | CUDA `5.5–9.9 GB` + (`major >= 8` or `"RTX"` in name) | `cuda` | `large-v2` | `int8_float16` | `8` | `qwen3:8b` | `h264_nvenc` (else `libx264`) |
-| **`cuda_mid_no_tensor`** (e.g. GTX 1660 SUPER 6GB) | CUDA `5.5–9.9 GB` + (`major < 8` and no `"RTX"`) | `cuda` | `medium` | `int8` | `4` | `qwen3:4b` | `h264_nvenc` (else `libx264`) |
-| **`cpu_fallback`** | CUDA present but `< 5.5 GB` VRAM | `cpu` | `base` | `int8` | `4` | `qwen3:4b` | `libx264` |
-| **`cpu_only`** | No CUDA available | `cpu` | `base` | `int8` | `4` | `qwen3:4b` | `libx264` |
-
-- Always preserve explicit user overrides from `config.yaml` over `"auto"` defaults and track override provenance via `Config.is_auto_resolved(dotted_key)`.
-
-## 4. Mandatory v2.2 Technical & YPP Transformation Guardrails
-
-Every agent writing or reviewing code in this repository must enforce these 12 architectural rules:
-
-1. **Preserve Completed Phase 1 Foundation**: Phase 1 (`1.1–1.3`) is merged on `main` (`36/36` passing). Any new fields added to `models.py` (`moment_type`, `narration_intro`, `narration_outro`, `context_badge`, `peak_time`, `chat_burst`, `sub_clips`, `transformation_mode`) or `config.default.yaml` (`transformation:`) in Phase 3+ MUST have default values and `.get(...)` defaults in `from_dict()` so all 36 Phase 1 tests pass without modification.
-2. **PEP 517 Packaging (`pyproject.toml`)**: Always use `build-backend = "setuptools.build_meta"`. Never use `setuptools.backends._legacy:_Backend` and never add `pytchat`.
-3. **`IntEnum` Pipeline States & `FAILED` Retry Recovery (`models.py`, `pipeline.py`)**: `PipelineStatus` MUST subclass `IntEnum` (`PENDING = 1` through `COMPLETE = 7`, `FAILED = 99`). In `Pipeline.process_stream()`, call `_recover_failed_state(state)` before `<` stage comparisons so a `FAILED (99)` cached state resets to the last completed artifact stage instead of skipping steps.
-4. **Recursive JSON Serialization (`models.py`, `cache.py`)**: All dataclasses inherit from `SerializableModel` with `_serialize_value()` and symmetric `from_dict()` classmethods. Never dump raw `__dict__`.
-5. **PyTorch VRAM Attribute (`config.py`, `cli.py`)**: Always read `torch.cuda.get_device_properties(0).total_memory` — never `.total_mem`.
-6. **16kHz Mono WAV Extraction (`download/audio.py`)**: Always pass `postprocessor_args: {"extractaudio": ["-ar", "16000", "-ac", "1"]}` to `yt_dlp.YoutubeDL` so extracted WAV files are 16kHz mono PCM (~460 MB per 4h stream).
-7. **Two-Stage GPU VRAM Cleanup (`analysis/transcriber.py`)**: Explicitly delete the WhisperX ASR model (`del model; gc.collect(); torch.cuda.empty_cache()`) before loading the wav2vec2 alignment model, and delete `model_a, audio` (`gc.collect(); torch.cuda.empty_cache()`) before returning.
-8. **Constant-Memory Streamed RMS + `peak_time` Metadata (`analysis/loudness.py`)**: Never call `librosa.load()` on full stream WAVs. Use `soundfile.info()` + `librosa.stream(..., fill_value=0.0)` so tail blocks never crash, and record exact peak timestamps in `TimeRange.metadata["peak_time"]` (preserving the loudest peak's `peak_time` when merging).
-9. **Native `yt-dlp` Live Chat Scraper + `sample_messages` Metadata (`download/chat.py`, `analysis/chat_velocity.py`)**: Extract live chat via `yt_dlp` (`skip_download=True`, `writesubtitles=True`, `subtitleslangs=["live_chat"]`), skip pre-stream entries with `offset_ms < 0`, and attach up to 5 representative viewer messages in `TimeRange.metadata["sample_messages"]` for each detected chat spike.
-10. **Non-Blocking Async Pipeline, Two-Pass AI Scoring & Adaptive YPP Prompts (`scoring/`, `pipeline.py`)**: Keep `interactive: bool = False` as default in `Pipeline.process_stream()` and force `interactive=False` in `process_streams_parallel()`. For local models (`qwen3:4b` on GTX 1660 SUPER, `qwen3:8b` on RTX 4050), enforce the **Two-Pass Scoring Architecture**: Pass 1 (`highlight_scorer.txt`) scouts candidate chunks without requiring full voiceover scripts, and Pass 2 (`narrative_writer.txt`) synthesizes `narration_intro`, `narration_outro`, and `context_badge` ONLY on the top 3–5 highlights after signal fusion and deduplication. Adapt voiceover tone naturally to `moment_type` (do not force dry analysis onto funny/graphics/hype clips).
-11. **MoviePy v2 API, Windows-Safe FFmpeg `cwd` ASS Burn-In, Split-Line Locked Zoom, Audio Ducking & Single-Loss Encode (`assembly/`, `output/`)**:
-    - Import directly from `moviepy` (`from moviepy import VideoFileClip, CompositeVideoClip, ImageClip, concatenate_videoclips`) and use `.cropped()`, `.resized()`, `.subclipped()`, `.with_position()`, `.with_duration()`, `.with_audio()`.
-    - Preserve aspect-correct facecam cropping (`_crop_to_aspect`), validate `sub_clips` before multi-beat stitching (falling back to single-cut if invalid), clamp per-beat `.subclipped(t_start, t_end)` bounds to `[0.0, beat_clip.duration]` (MoviePy `2.2.1` raises `ValueError` if `end_time > clip.duration`), remap word timestamps / `chat_burst` / `peak_offset` onto the stitched timeline via `remap_timeline_for_beats()` (and alias helper `remap_timestamps()`), and callers pass `clip_start_offset=0.0` to `AssCaptionBurner.generate_ass()` for multi-beat clips.
-    - **Locked Split-Line Spike Zoom**: In Layout A (with facecam), apply the 1.20x punch-in zoom inside the gameplay clip (bottom 65%, `1080x1248`) *before* stacking in `CompositeVideoClip`, keeping the facecam intact and the 35%/65% split line strictly locked at `y = 672`.
-    - **Active Narration Caption Coordination**: Suppress ducked streamer speech captions during active narration windows (`[0.0, intro_dur]` and `[outro_start, clip_duration]`), and burn tone-matched narration commentary cards (`narration_intro` / `narration_outro`) in `Style: Hormozi` so on-screen text matches what viewers hear.
-    - Keep **Windows-safe `cwd` FFmpeg ASS burn-in**: round centiseconds cleanly in `_sec_to_ass_time()` (no `60.00` overflow), sanitize `\r`/`\n` and escape ASS delimiters safely in `_escape_ass_text()`, honor `captions.style`/`color`/`stroke_color`, use semi-transparent `OutlineColour=&H99000000` on `Style: ChatTicker` (`BorderStyle=3`), write & close the `.ass` file, then invoke `ffmpeg` with `cwd=str(ass_path.resolve().parent)` and `-vf ass={ass_path.name}` (avoiding Windows drive-letter colon escaping bugs), supporting `h264_nvenc` with automatic `libx264` fallback.
-    - **Single Video Re-encode Architecture**: Write intermediate composed temp MP4s at high quality (`preset="ultrafast"`, `-crf 18`), close `clip` + `_source_clip` / `_source_clips` in a `try/finally` block BEFORE deleting temp files on Windows, and pass `-c:v copy` in `mix_narration_with_ducking()` so audio is mixed directly onto the container without re-encoding video. The single final lossy video encode occurs during `burn_captions()` with configured `video.codec` and `video.crf`.
-    - Standardize `output/organizer.py` on `FileOrganizer(config)` with `get_clip_path(game, streamer, index, date_str=None) -> Path` and `save_clip(video_path, metadata, transcript_text="") -> ClipResult` (matching `pipeline.py` and `tests/test_pipeline.py`).
-    - In `assembly/narrator.py`, support pluggable TTS engines (`kokoro` with `tts_voice`, `edge-tts` with `edge_tts_voice`, optional `elevenlabs` via `ELEVENLABS_API_KEY` + `voice_id`, and custom `--voice-intro` / `--voice-outro` WAVs). Check Windows `espeak-ng` library availability via `_is_espeak_available()` before attempting Kokoro, falling back cleanly to `edge-tts` when absent. Normalize narrator tracks to `48000 Hz` stereo (`aresample=48000,aformat=channel_layouts=stereo` + stereo `adelay=ms|ms`) before `amix`, append `:eval=frame` on the FFmpeg `volume` filter so time-varying ducking evaluates per frame, and dynamically construct the filtergraph for active inputs (`inputs = 1 + len(active_tracks)`) with overlap budget clamping (capped to at most 30% per window / 75% total budget) on short clips.
-12. **MCP SDK v2 (`MCPServer`) & Signal-Filtered Chunks (`mcp_server/server.py`)**: Use `from mcp.server.mcpserver import MCPServer` (`mcp>=2.0.0`, `mcp = MCPServer("streamclipper")`) with `@mcp.tool()` and `mcp.run()` (NEVER `FastMCP` or low-level `Server`). Note MCP SDK v2 uses `Tool.input_schema` (snake_case) on `await mcp.list_tools()` and returns `CallToolResult` from `await mcp.call_tool(...)`. Keep `only_with_signals: bool = True` default on `get_transcript_chunks`, resolve cached state cleanly via `url` or `StepCache.find_by_audio_path()`, and accept YPP narrative/story/auto/raw/voiceover parameters on `submit_highlights` and `render_clip`.
-
-## 5. Git Branching, Model Routing & Reporting Protocol
-
-### 5.1 Branching Strategy
-- `main`: Protected integration branch; receives merges only via `git merge --no-ff <phase-branch>` after Phase Review approval.
-- Phase branches:
-  1. `phase-1-foundation` (Packages `1.1` – `1.3`) — **✅ COMPLETE & MERGED INTO `main`**
-  2. `phase-2-core-pipeline` (Packages `2.1` – `2.6`) — **✅ COMPLETE & MERGED INTO `main`**
-  3. `phase-3-ai-scoring` (Packages `3.1` – `3.3` + Review `3.R`) — **✅ COMPLETE & MERGED INTO `main`**
-  4. `phase-4-video-assembly` (Packages `4.1` – `4.6`, including `4.5` YPP Narrator & Audio Ducking + Review `4.R`) — **✅ COMPLETE & MERGED INTO `main`**
-  5. `phase-5-mcp-server` (Packages `5.1` – `5.2` + Review `5.R`) — **✅ COMPLETE & MERGED INTO `main`**
-
-### 5.2 Model Responsibilities
-- **Gemini 3.8 (high)**: Implements all 🟢 Easy, 🟡 Medium, and 🟠 Hard packages (`1.1`, `1.2`, `1.3`, `2.1`, `2.2`, `2.3`, `2.4`, `2.5`, `2.6`, `3.2`, `4.1`, `4.2`, `4.4`, `4.5`, `4.6`, `5.2`).
-- **Claude Opus 4.6**: Implements all 🔴 Critical packages (`3.1`, `3.3`, `4.3`, `5.1`) and performs Phase Reviews (`2.R` – `5.R`).
-
-### 5.3 Mandatory Package & Phase Audit Reports
-Every package implementation turn MUST produce a structured Markdown report before committing:
-- **Package Report Path**: `reports/phase-{N}/package-{X.Y}-report.md`
-- **Phase Summary Path**: `reports/phase-{N}/phase-{N}-final-report.md`
-- **Required Report Sections**:
-  1. **Metadata**: Package ID, Phase, Branch name, Commit hash, Timestamp, and Model used.
-  2. **Files Created / Modified**: File paths, line counts, and summary of classes/functions.
-  3. **Acceptance Criteria Verification**: Table mapping every acceptance criterion from `docs/streamclipper-implementation-guide-v2.md` to the exact test or command output that proved it passed.
-  4. **Test & CLI Output**: Verbatim terminal output from `D:\GTA6-Clipper\.venv\Scripts\pytest.exe -v` and relevant CLI checks.
-  5. **Architectural Notes & Edge Cases**: Proactive fixes, Windows/CUDA considerations, and handoff notes for the next package.
+For every ticket in `docs/v4/v4-antigravity-prompts.md`:
+1. Read only the target files named in the prompt.
+2. Implement the exact change and add/update unit tests covering the new behavior.
+3. Run targeted `pytest` first, then run the full `pytest -v` suite.
+4. Do NOT invent extra features outside the ticket.
+5. Report back with:
+   - Modified files and summary of changes
+   - Exact `pytest` pass/fail counts
+   - Any edge cases or manual config needed before the user runs the real-video render test.

@@ -13,9 +13,11 @@ from typing import Any
 from moviepy import CompositeVideoClip, VideoFileClip, concatenate_videoclips
 
 from streamclipper.assembly.captions import (
+    AssCaptionBurner,
     _escape_ass_text,
     _escape_ffmpeg_ass_filename,
     _sec_to_ass_time,
+    resolve_font,
 )
 from streamclipper.assembly.composer import VideoComposer
 from streamclipper.assembly.longform import _probe_duration
@@ -54,8 +56,9 @@ def _calculate_clip_trims(
     target_min: float = 35.0,
     target_max: float = 60.0,
     min_clip_dur: float = 4.0,
+    peak_offsets: list[float | None] | None = None,
 ) -> list[tuple[EvidenceClip, Path, float, float]]:
-    """Trim each evidence clip around its middle so the Short lands in 35–60 s.
+    """Trim each evidence clip around its middle (or peak_offset) so the Short lands in 35–60 s.
 
     Guarantees that each clip keeps >= 4 s (or its full duration if shorter than 4 s).
     """
@@ -86,14 +89,36 @@ def _calculate_clip_trims(
     else:
         allocated = [dur for _, _, dur in clips_with_durations]
 
-    # Trim each clip around its middle
+    # Trim each clip around peak_offset or its middle
     results: list[tuple[EvidenceClip, Path, float, float]] = []
-    for (clip, path, raw_dur), alloc_dur in zip(clips_with_durations, allocated):
+    for idx, ((clip, path, raw_dur), alloc_dur) in enumerate(zip(clips_with_durations, allocated)):
+        peak_offset = (
+            peak_offsets[idx]
+            if peak_offsets is not None and idx < len(peak_offsets)
+            else None
+        )
         if alloc_dur < raw_dur:
-            mid = raw_dur / 2.0
-            t_start = max(0.0, mid - alloc_dur / 2.0)
-            t_end = min(raw_dur, t_start + alloc_dur)
-            t_start = max(0.0, t_end - alloc_dur)
+            if (
+                peak_offset is not None
+                and not isinstance(peak_offset, bool)
+                and isinstance(peak_offset, (int, float))
+                and math.isfinite(peak_offset)
+                and 0 < peak_offset < raw_dur
+            ):
+                t_start = peak_offset - 0.60 * alloc_dur
+                if t_start < 0.0:
+                    t_start = 0.0
+                    t_end = min(raw_dur, t_start + alloc_dur)
+                elif t_start + alloc_dur > raw_dur:
+                    t_end = raw_dur
+                    t_start = max(0.0, t_end - alloc_dur)
+                else:
+                    t_end = t_start + alloc_dur
+            else:
+                mid = raw_dur / 2.0
+                t_start = max(0.0, mid - alloc_dur / 2.0)
+                t_end = min(raw_dur, t_start + alloc_dur)
+                t_start = max(0.0, t_end - alloc_dur)
         else:
             t_start = 0.0
             t_end = raw_dur
@@ -108,25 +133,70 @@ def _build_shorts_ass(
     credit_windows: list[tuple[float, float, str]],
     narration_windows: list[tuple[float, float, str]],
     total_duration: float,
-    font_name: str = "Arial",
+    font_name: str | None = None,
+    config: Config | None = None,
 ) -> Path:
-    """Generate 9:16 vertical ASS file with persistent hook title, credit tags, and narration cards."""
+    """Generate 9:16 vertical ASS file with persistent hook title, credit tags,
+    and active-word highlighted Hormozi captions positioned in the safe zone (MarginV >= 460).
+    """
     ass_path = Path(ass_path)
     ass_path.parent.mkdir(parents=True, exist_ok=True)
+
+    burner = AssCaptionBurner(config) if config is not None else AssCaptionBurner(Config())
+    if font_name is not None and str(font_name).strip():
+        resolved_header_font = resolve_font(str(font_name).strip())
+        burner.font = resolved_header_font
+    else:
+        resolved_header_font = burner.font
+
+    # Style colors & borders for Hormozi captions
+    bgr_raw = burner.highlight_bgr.strip().replace("&", "")
+    if bgr_raw.startswith("H") or bgr_raw.startswith("h"):
+        bgr_raw = bgr_raw[1:]
+    if len(bgr_raw) == 8:
+        secondary_style_color = f"&H{bgr_raw.upper()}"
+    elif len(bgr_raw) == 6:
+        secondary_style_color = f"&H00{bgr_raw.upper()}"
+    else:
+        secondary_style_color = "&H0000E6FF"
+
+    # Strictly position above YouTube Shorts bottom ~420px title/channel UI zone (MarginV >= 460)
+    hormozi_margin_v = max(460, burner.margin_v)
+
+    if burner.box_style:
+        hormozi_border_style = 3
+        hormozi_outline = burner.box_padding
+        hormozi_shadow = 0
+        hormozi_outline_col = burner.box_color
+        hormozi_back_col = burner.box_color
+    else:
+        hormozi_border_style = 1
+        hormozi_outline = burner.stroke_width
+        hormozi_shadow = burner.shadow_offset
+        hormozi_outline_col = burner.stroke_color
+        hormozi_back_col = burner.shadow_color
+
+    if burner.style == "karaoke":
+        style_primary_col = secondary_style_color
+        style_secondary_col = burner.primary_color
+    else:
+        style_primary_col = burner.primary_color
+        style_secondary_col = secondary_style_color
 
     header = f"""[Script Info]
 Title: StreamClipper Topic Short
 ScriptType: v4.00+
-PlayResX: 1080
-PlayResY: 1920
+PlayResX: {burner.width}
+PlayResY: {burner.height}
 WrapStyle: 0
 ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: HookTitle,{font_name},52,&H0000FFFF,&H000000FF,&H99000000,&H99000000,1,0,0,0,100,100,0,0,3,3,0,8,60,60,180,1
-Style: CreditTag,{font_name},28,&H00FFFFFF,&H000000FF,&H99000000,&H99000000,0,0,0,0,100,100,0,0,3,2,0,1,40,40,280,1
-Style: NarrationCard,{font_name},46,&H00FFFFFF,&H000000FF,&H99000000,&H99000000,1,0,0,0,100,100,0,0,3,3,0,2,60,60,400,1
+Style: HookTitle,{resolved_header_font},52,&H0000FFFF,&H000000FF,&H99000000,&H99000000,1,0,0,0,100,100,0,0,3,3,0,8,60,60,220,1
+Style: CreditTag,{resolved_header_font},28,&H00FFFFFF,&H000000FF,&H99000000,&H99000000,0,0,0,0,100,100,0,0,3,2,0,1,40,40,280,1
+Style: Hormozi,{burner.font},{burner.font_size},{style_primary_col},{style_secondary_col},{hormozi_outline_col},{hormozi_back_col},-1,0,0,0,100,100,0,0,{hormozi_border_style},{hormozi_outline},{hormozi_shadow},2,60,60,{hormozi_margin_v},1
+Style: NarrationCard,{burner.font},{burner.font_size},{style_primary_col},{style_secondary_col},{hormozi_outline_col},{hormozi_back_col},-1,0,0,0,100,100,0,0,{hormozi_border_style},{hormozi_outline},{hormozi_shadow},2,60,60,{hormozi_margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -135,7 +205,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     # 1. Persistent Hook Title (shown across the entire Short duration)
     clean_hook = (hook_title or "").strip()
-    if clean_hook:
+    if clean_hook and total_duration > 0:
         escaped_hook = _escape_ass_text(clean_hook)
         events.append(
             f"Dialogue: 0,0:00:00.00,{_sec_to_ass_time(total_duration)},HookTitle,,0,0,0,,{escaped_hook}"
@@ -143,6 +213,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     # 2. Credit tags for each clip during its playback window
     for st, et, credit_text in credit_windows:
+        st = max(0.0, float(st))
+        et = min(float(total_duration), float(et)) if total_duration > 0 else float(et)
         if et <= st or not credit_text:
             continue
         escaped_credit = _escape_ass_text(credit_text)
@@ -150,14 +222,17 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             f"Dialogue: 0,{_sec_to_ass_time(st)},{_sec_to_ass_time(et)},CreditTag,,0,0,0,,{escaped_credit}"
         )
 
-    # 3. Narration cards (intro, callout, outro)
+    # 3. Active-word highlighted Hormozi narration events (chunked 2-3 words with pop/bounce)
+    primary_inline_bgr = "&H" + burner.primary_color[4:].rstrip("&") + "&"
     for st, et, narr_text in narration_windows:
+        st = max(0.0, float(st))
+        et = min(float(total_duration), float(et)) if total_duration > 0 else float(et)
         if et <= st or not narr_text:
             continue
-        escaped_narr = _escape_ass_text(narr_text)
-        events.append(
-            f"Dialogue: 0,{_sec_to_ass_time(st)},{_sec_to_ass_time(et)},NarrationCard,,0,0,0,,{escaped_narr}"
+        chunk_events = burner._generate_narration_chunk_events(
+            narr_text, st, et, primary_inline_bgr
         )
+        events.extend(chunk_events)
 
     ass_path.write_text(header + "\n".join(events) + "\n", encoding="utf-8")
     return ass_path
@@ -294,8 +369,35 @@ def render_topic_shorts(
                 dur = max(4.0, c_end - c_start)
             clips_with_durations.append((clip, seg_path, dur))
 
-        # 3. Calculate trims around the middle so total duration lands in 35–60 s
-        trimmed_clips = _calculate_clip_trims(clips_with_durations, target_min=35.0, target_max=60.0, min_clip_dur=4.0)
+        # 3. Calculate trims around peak_offsets / middle so total duration lands in 35–60 s
+        peak_offsets: list[float | None] = []
+        for c, _, _ in clips_with_durations:
+            if isinstance(c, dict):
+                po = c.get("peak_offset")
+                pt = c.get("peak_time")
+                c_start = float(c.get("start", 0.0))
+                c_end = float(c.get("end", 0.0))
+            else:
+                po = getattr(c, "peak_offset", None)
+                pt = getattr(c, "peak_time", None)
+                c_start = float(getattr(c, "start", 0.0))
+                c_end = float(getattr(c, "end", 0.0))
+
+            if po is None and pt is not None:
+                try:
+                    pt_val = float(pt)
+                    if c_start < pt_val < c_end:
+                        po = pt_val - c_start
+                except (TypeError, ValueError):
+                    pass
+            peak_offsets.append(po)
+        trimmed_clips = _calculate_clip_trims(
+            clips_with_durations,
+            target_min=35.0,
+            target_max=60.0,
+            min_clip_dur=4.0,
+            peak_offsets=peak_offsets,
+        )
 
         # 4. Compose each clip into 9:16 layout (blur_fill) and concatenate
         composed_beat_clips: list[CompositeVideoClip] = []
@@ -420,7 +522,8 @@ def render_topic_shorts(
         credit_windows: list[tuple[float, float, str]] = []
         for st, et, c in clip_timeline_spans:
             if c.kind == "official":
-                tag = "Rockstar Games"
+                raw_ch = (c.channel or "").strip().lstrip("@")
+                tag = raw_ch if raw_ch else f"Official {plan.game} footage"
             else:
                 raw_ch = (c.channel or "").strip().lstrip("@")
                 tag = f"@{raw_ch}" if raw_ch else "@Unknown"
@@ -461,6 +564,7 @@ def render_topic_shorts(
             narration_windows=narration_windows,
             total_duration=total_duration,
             font_name=font_name,
+            config=config,
         )
 
         # 9. Single final lossy encode with loudnorm (-14 LUFS) and ASS burn-in

@@ -69,7 +69,7 @@ def load_env_files(paths: list[Path] | None = None) -> list[str]:
 VALID_WEIGHT_KEYS = frozenset({"loudness", "chat_velocity", "heatmap", "llm_score"})
 # Keys a user override may omit (backward compat: pre-heatmap configs list only three weights).
 OPTIONAL_WEIGHT_KEYS = frozenset({"heatmap"})
-VALID_GAME_FITS = frozenset({"full", "balanced"})
+VALID_GAME_FITS = frozenset({"full", "balanced", "full_bleed"})
 VALID_TRANSFORMATION_MODES = frozenset({"auto", "narrative", "story", "breakdown", "raw", "top3"})
 
 
@@ -297,7 +297,39 @@ class Config:
         self._data, self.hardware_profile = resolve_hardware_config(
             self._data, profile=hardware_profile
         )
+        self.active_channel: str | None = None
         self._validate()
+
+    def apply_channel_profile(self, channel: str | None) -> "Config":
+        """Apply channel profile overrides (e.g. 'en' or 'hi').
+
+        When channel is provided (e.g. 'en' or 'hi'), overrides:
+          - general.output_dir
+          - transformation.narration_language
+          - topics.ledger_name
+        from channels.<channel> while keeping general.cache_dir and library.db_path shared!
+        When channel is None, leaves configuration untouched.
+        """
+        if channel is None:
+            return self
+
+        ch = str(channel).strip().lower()
+        if not ch:
+            return self
+
+        channel_cfg = self.get(f"channels.{ch}")
+        if not isinstance(channel_cfg, dict):
+            raise ValueError(f"Unknown channel profile: {channel!r}")
+
+        self.active_channel = ch
+        if "output_dir" in channel_cfg:
+            self._data.setdefault("general", {})["output_dir"] = channel_cfg["output_dir"]
+        if "narration_language" in channel_cfg:
+            self._data.setdefault("transformation", {})["narration_language"] = channel_cfg["narration_language"]
+        if "ledger_name" in channel_cfg:
+            self._data.setdefault("topics", {})["ledger_name"] = channel_cfg["ledger_name"]
+
+        return self
 
     def get(self, dotted_key: str, default: Any = None) -> Any:
         """Access nested config: config.get('analysis.weights.loudness')."""

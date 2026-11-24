@@ -13,6 +13,25 @@ from streamclipper.topics.planner import plan_dir
 
 logger = logging.getLogger(__name__)
 
+STOPWORDS: frozenset[str] = frozenset({
+    # Common English stopwords
+    "the", "and", "for", "how", "every", "what", "this", "that", "with",
+    "from", "into", "actually", "really", "all", "are", "about", "above",
+    "after", "again", "against", "any", "because", "been", "before", "being",
+    "below", "between", "both", "but", "can", "could", "did", "does", "doing",
+    "down", "during", "each", "few", "further", "had", "has", "have", "having",
+    "her", "here", "hers", "herself", "him", "himself", "his", "just", "more",
+    "most", "not", "now", "off", "once", "only", "other", "our", "ours", "out",
+    "over", "own", "same", "she", "should", "some", "such", "than", "then",
+    "there", "these", "they", "through", "too", "under", "until", "very", "was",
+    "were", "when", "where", "which", "while", "who", "whom", "why", "will",
+    "you", "your", "yours", "its", "itself", "one", "two", "first", "second",
+    # Common Hinglish stopwords
+    "hai", "bhi", "aur", "yeh", "woh", "kya", "kyu", "kyun", "kaise", "hota",
+    "karte", "wali", "wale", "wala", "mein", "par", "se", "ko", "ke", "ki",
+    "ka", "kare", "karna", "nahi", "tha", "thi", "the", "ab", "sab",
+})
+
 
 def _format_chapters(chapters: list[tuple[str, str]] | list[str] | str) -> list[str]:
     """Normalize chapters into a list of formatted YouTube chapter strings."""
@@ -46,6 +65,122 @@ def _format_timestamp_url(url: str, start_seconds: float) -> str:
         return f"{clean_url}{sep}t={t_sec}s"
 
 
+def generate_long_title_variants(plan: TopicPlan) -> list[str]:
+    """Generate 3–5 punchy curiosity-gap title variants for YouTube Studio A/B testing."""
+    primary = (plan.video_title or plan.topic_title or "Topic Video").strip()
+    game = (plan.game or "GTA 6").strip()
+    topic = (plan.topic_title or primary).strip()
+    core_topic = topic
+    if core_topic.lower().startswith(game.lower()):
+        core_topic = core_topic[len(game):].lstrip(":- ").strip()
+    if not core_topic:
+        core_topic = primary
+
+    candidates: list[str] = []
+
+    # 1. High-intrigue curiosity statement
+    candidates.append(f"Rockstar Hid THIS in {game} (And Nobody Noticed)")
+
+    # 2. Reframed from thumbnail or core topic
+    if plan.thumbnail_text and plan.thumbnail_text.strip():
+        thumb_clean = plan.thumbnail_text.strip().title()
+        candidates.append(f"{thumb_clean}: What You Completely Missed")
+    else:
+        candidates.append(f"The Truth About {core_topic}")
+
+    # 3. Point-based or numbered breakdown
+    if plan.points and len(plan.points) >= 2:
+        candidates.append(f"{len(plan.points)} Insane Secrets Hidden Inside {game}")
+        first_pt = (getattr(plan.points[0], "heading", None) or getattr(plan.points[0], "title", None) or "").strip()
+        if first_pt:
+            candidates.append(f"Why {first_pt} Changes Everything in {game}")
+    else:
+        candidates.append(f"We Analyzed {core_topic} — Here's What We Found")
+
+    # 4. Curiosity gap questions
+    candidates.append(f"Did Everyone Miss This In {game}?")
+    candidates.append(f"The Craziest Detail In {game} That Explains Everything")
+
+    unique: list[str] = []
+    seen: set[str] = {primary.lower()}
+    for c in candidates:
+        c_clean = c.strip()
+        if c_clean and c_clean.lower() not in seen:
+            seen.add(c_clean.lower())
+            unique.append(c_clean)
+        if len(unique) == 5:
+            break
+
+    fallbacks = [
+        f"Wait... Did Rockstar Actually Put This in {game}?",
+        f"Everything You Need To Know About {core_topic}",
+        f"This Changes Everything We Know About {game}",
+    ]
+    for fb in fallbacks:
+        if len(unique) >= 3:
+            break
+        if fb.lower() not in seen:
+            seen.add(fb.lower())
+            unique.append(fb)
+
+    return unique[:5]
+
+
+def generate_short_title_variants(plan: TopicPlan, short: ShortPlan) -> list[str]:
+    """Generate 3–5 punchy curiosity-gap title variants for YouTube Shorts A/B testing."""
+    primary = (short.hook_title or plan.topic_title or "Topic Short").strip()
+    game = (plan.game or "GTA 6").strip()
+    callout = (short.callout or "").strip()
+
+    candidates: list[str] = []
+
+    # 1. Callout or hook reaction
+    if callout:
+        callout_clean = callout.rstrip(".!?- ")
+        candidates.append(f"Wait, did you see {callout_clean}?! 😱")
+    else:
+        candidates.append(f"Wait... did you catch this in {game}?!")
+
+    # 2. Disbelief angle
+    candidates.append(f"Rockstar really thought we wouldn't notice this in {game}...")
+
+    # 3. Shortened punchy hook
+    words = primary.split()
+    if len(words) > 3:
+        shortened = " ".join(words[:4]).rstrip(":-,.!")
+        candidates.append(f"{shortened} (Wait for the end!)")
+    else:
+        candidates.append(f"This {game} detail is INSANE (Watch till end)")
+
+    # 4. Curiosity questions
+    candidates.append(f"Is this the craziest secret in {game}?")
+    candidates.append(f"No way this is actually in {game} 💀")
+
+    unique: list[str] = []
+    seen: set[str] = {primary.lower()}
+    for c in candidates:
+        c_clean = c.strip()
+        if c_clean and c_clean.lower() not in seen:
+            seen.add(c_clean.lower())
+            unique.append(c_clean)
+        if len(unique) == 5:
+            break
+
+    fallbacks = [
+        f"Did you know about this in {game}?",
+        "Watch what happens at the end...",
+        f"The secret nobody talks about in {game}",
+    ]
+    for fb in fallbacks:
+        if len(unique) >= 3:
+            break
+        if fb.lower() not in seen:
+            seen.add(fb.lower())
+            unique.append(fb)
+
+    return unique[:5]
+
+
 def write_long_post(
     config: Config,
     plan: TopicPlan,
@@ -74,7 +209,11 @@ def write_long_post(
             seen_sources.add(key)
             timed_url = _format_timestamp_url(clip.url, clip.start)
             if clip.kind == "official":
-                sources_entries.append(f"- Official footage (Rockstar Games): {timed_url}")
+                raw_channel = (clip.channel or "").strip().lstrip("@")
+                if raw_channel:
+                    sources_entries.append(f"- Official footage ({raw_channel}): {timed_url}")
+                else:
+                    sources_entries.append(f"- Official {plan.game} footage: {timed_url}")
             else:
                 raw_channel = (clip.channel or "").strip().lstrip("@")
                 channel_str = f"@{raw_channel}" if raw_channel else "@Unknown"
@@ -94,23 +233,46 @@ def write_long_post(
 
     desc_parts.append("SOURCES")
     if has_official:
-        desc_parts.append("Official footage: Rockstar Games")
+        official_names: list[str] = []
+        for point in plan.points:
+            for clip in point.evidence:
+                if clip.kind == "official":
+                    raw_ch = (clip.channel or "").strip().lstrip("@")
+                    if raw_ch and raw_ch not in official_names:
+                        official_names.append(raw_ch)
+        if official_names:
+            desc_parts.append(f"Official footage: {', '.join(official_names)}")
+        else:
+            desc_parts.append(f"Official {plan.game} footage")
     desc_parts.extend(sources_entries)
     desc_parts.append("")
 
-    # Tags / Hashtags
+    # Tags / Hashtags: game tag + up to 3 meaningful topic tags (cap 4)
+    max_hashtags = int(config.get("metadata.hashtag_count", 4) or 4)
     game_tag = "".join(ch for ch in plan.game if ch.isalnum())
-    tags_list = [f"#{game_tag}"] if game_tag else []
+    tags_list: list[str] = [f"#{game_tag}"] if game_tag else []
+    seen_tags_lower: set[str] = {t.lower() for t in tags_list}
+
     for word in (plan.topic_title or "").split():
+        if len(tags_list) >= max_hashtags:
+            break
         cleaned = "".join(ch for ch in word if ch.isalnum())
-        if len(cleaned) >= 3 and f"#{cleaned}" not in tags_list:
-            tags_list.append(f"#{cleaned}")
-    if "#Gaming" not in tags_list:
+        if len(cleaned) >= 3 and cleaned.lower() not in STOPWORDS:
+            candidate = f"#{cleaned}"
+            if candidate.lower() not in seen_tags_lower:
+                tags_list.append(candidate)
+                seen_tags_lower.add(candidate.lower())
+
+    if len(tags_list) < max_hashtags and "#gaming" not in seen_tags_lower:
         tags_list.append("#Gaming")
 
+    title_variants = generate_long_title_variants(plan)
     lines = [
         "TITLE",
         title,
+        "",
+        "TITLE VARIANTS (A/B TEST)",
+        *[f"- {v}" for v in title_variants],
         "",
         "DESCRIPTION",
         *desc_parts,
@@ -171,7 +333,11 @@ def write_short_post(
             seen_sources.add(key)
             timed_url = _format_timestamp_url(clip.url, clip.start)
             if clip.kind == "official":
-                sources_entries.append(f"- Official footage (Rockstar Games): {timed_url}")
+                raw_channel = (clip.channel or "").strip().lstrip("@")
+                if raw_channel:
+                    sources_entries.append(f"- Official footage ({raw_channel}): {timed_url}")
+                else:
+                    sources_entries.append(f"- Official {plan.game} footage: {timed_url}")
             else:
                 raw_channel = (clip.channel or "").strip().lstrip("@")
                 channel_str = f"@{raw_channel}" if raw_channel else "@Unknown"
@@ -188,20 +354,45 @@ def write_short_post(
     if sources_entries:
         desc_parts.append("SOURCES")
         if has_official:
-            desc_parts.append("Official footage: Rockstar Games")
+            official_names: list[str] = []
+            for point in plan.points:
+                if target_point_indexes and point.index not in target_point_indexes:
+                    continue
+                for clip in point.evidence:
+                    if clip.kind == "official":
+                        raw_ch = (clip.channel or "").strip().lstrip("@")
+                        if raw_ch and raw_ch not in official_names:
+                            official_names.append(raw_ch)
+            if official_names:
+                desc_parts.append(f"Official footage: {', '.join(official_names)}")
+            else:
+                desc_parts.append(f"Official {plan.game} footage")
         desc_parts.extend(sources_entries)
         desc_parts.append("")
 
-    # Tags / Hashtags
+    # Tags / Hashtags: #Shorts + game tag + up to 2 meaningful topic tags (cap 4)
+    max_hashtags = int(config.get("metadata.hashtag_count", 4) or 4)
     tags_list: list[str] = ["#Shorts"]
+    seen_tags_lower: set[str] = {"#shorts"}
+
     game_tag = "".join(ch for ch in plan.game if ch.isalnum())
-    if game_tag:
-        tags_list.append(f"#{game_tag}")
+    if game_tag and len(tags_list) < max_hashtags:
+        candidate_game = f"#{game_tag}"
+        if candidate_game.lower() not in seen_tags_lower:
+            tags_list.append(candidate_game)
+            seen_tags_lower.add(candidate_game.lower())
+
     for word in (plan.topic_title or "").split():
+        if len(tags_list) >= max_hashtags:
+            break
         cleaned = "".join(ch for ch in word if ch.isalnum())
-        if len(cleaned) >= 3 and f"#{cleaned}" not in tags_list:
-            tags_list.append(f"#{cleaned}")
-    if "#Gaming" not in tags_list:
+        if len(cleaned) >= 3 and cleaned.lower() not in STOPWORDS:
+            candidate = f"#{cleaned}"
+            if candidate.lower() not in seen_tags_lower:
+                tags_list.append(candidate)
+                seen_tags_lower.add(candidate.lower())
+
+    if len(tags_list) < max_hashtags and "#gaming" not in seen_tags_lower:
         tags_list.append("#Gaming")
 
     # Reminders
@@ -211,9 +402,13 @@ def write_short_post(
     if is_teaser:
         reminders.append("- Set YouTube's Related Video to the long video")
 
+    title_variants = generate_short_title_variants(plan, short)
     lines = [
         "TITLE",
         title,
+        "",
+        "TITLE VARIANTS (A/B TEST)",
+        *[f"- {v}" for v in title_variants],
         "",
         "DESCRIPTION",
         *desc_parts,
