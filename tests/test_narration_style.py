@@ -17,8 +17,10 @@ from streamclipper.models import Highlight, PipelineState, PipelineStatus, Platf
 from streamclipper.narration_style import (
     BANNED_PHRASES,
     EXAMPLES,
+    PLAY_BY_PLAY_PHRASES,
     STYLE_RULES,
     check_narration,
+    check_narration_beats,
     narration_guide,
 )
 from streamclipper.scoring import ollama_scorer
@@ -53,7 +55,7 @@ def test_N1_guide_has_rules_examples_and_banned() -> None:
     assert "STYLE EXAMPLES" in guide and "Do NOT copy" in guide
     assert "Would you have bailed out there? Be honest." in guide
     assert "cold open" in guide and "Old outro line here." in guide
-    for phrase in ("pure comedy right here", "like and subscribe", "crazy moment"):
+    for phrase in ("pure comedy right here", "like and subscribe", "crazy moment", "kya tumne kabhi dekha", "kya tum ise khelna", "watch till end"):
         assert phrase in BANNED_PHRASES and phrase in guide
     for mt in ("funny", "fail", "graphics_detail", "hype", "clutch", "chat_chaos", "lore_secret", "analysis", "reaction"):
         assert mt in guide
@@ -302,3 +304,206 @@ async def test_N3_render_clip_rejects_bad_narration_unless_lenient(env) -> None:
     # Lenient mode passes the narration check (it fails later, for other reasons: no audio).
     lenient = _data(await _REAL_CALL_TOOL("render_clip", {**args, "narration_strict": False}))
     assert "quality check" not in lenient.get("error", "")
+
+
+# ---------------------------------------------------------------------------
+# N4 Progressive narration_beats checks
+# ---------------------------------------------------------------------------
+def test_N4_banned_phrases_include_new_additions() -> None:
+    for phrase in ("kya tumne kabhi dekha", "kya tum ise khelna", "watch till end", "you won't believe"):
+        assert phrase in BANNED_PHRASES
+    guide = narration_guide("english")
+    for phrase in ("kya tumne kabhi dekha", "kya tum ise khelna", "watch till end", "you won't believe"):
+        assert phrase in guide
+
+
+def test_N4_style_rules_contain_progressive_story_arc() -> None:
+    assert "PROGRESSIVE STORY ARC" in STYLE_RULES
+    assert "Beat 1 (0s, Hook)" in STYLE_RULES
+    assert "Beat 2 (Escalation)" in STYLE_RULES
+    assert "Gap (2–4s)" in STYLE_RULES
+    assert "Beat 3 (Payoff / Breakdown)" in STYLE_RULES
+    assert "Beat 4 (Sharp Closer)" in STYLE_RULES
+
+
+def test_N4_check_narration_beats_clean_passes() -> None:
+    beats = [
+        {"at_second": 0.0, "text": "He thought the helicopter was safe on that roof..."},
+        {"at_second": 4.5, "text": "Engine smoking with zero clearance on both blades."},
+        {"at_second": 11.0, "text": "The tail rotor clipped the billboard at full speed!"},
+        {"at_second": 16.0, "text": "Never letting him pilot the escape vehicle again."},
+    ]
+    # Grounded against EXCERPT ("NO WAY HELICOPTER EXPLODED")
+    problems = check_narration_beats(beats, transcript_excerpt=EXCERPT)
+    assert problems == []
+
+
+def test_N4_check_narration_beats_flags_banned_phrases() -> None:
+    beats = [
+        {"at_second": 0.0, "text": "Watch till end to see what happens!"},
+        {"at_second": 5.0, "text": "Kya tumne kabhi dekha itna crazy helicopter?"},
+        {"at_second": 10.0, "text": "Kya tum ise khelna chahoge?"},
+        {"at_second": 15.0, "text": "You won't believe how this ended."},
+    ]
+    problems = check_narration_beats(beats)
+    text = _joined(problems)
+    assert "watch till end" in text
+    assert "kya tumne kabhi dekha" in text
+    assert "kya tum ise khelna" in text
+    assert "you won't believe" in text
+
+
+def test_N4_check_narration_beats_flags_sentence_length() -> None:
+    beats = [
+        {
+            "at_second": 0.0,
+            "text": "Bro the helicopter just flew directly into the side of the skyscraper and burst into giant flames",
+        },
+    ]
+    problems = check_narration_beats(beats)
+    text = _joined(problems)
+    assert "words (max 14)" in text
+
+
+def test_N4_check_narration_beats_flags_play_by_play_filler() -> None:
+    beats = [
+        {"at_second": 0.0, "text": "As you can see, the helicopter is flying."},
+        {"at_second": 5.0, "text": "Now he is shooting at the cops on the roof."},
+        {"at_second": 10.0, "text": "What would you do in this situation?"},
+    ]
+    problems = check_narration_beats(beats)
+    text = _joined(problems)
+    assert "play-by-play filler" in text
+    assert "as you can see" in text
+    assert "now he is" in text
+    assert "what would you do" in text
+
+
+def test_N4_check_narration_beats_flags_overlapping_timestamps() -> None:
+    # 1. Out of order
+    out_of_order = [
+        {"at_second": 5.0, "text": "First beat."},
+        {"at_second": 2.0, "text": "Second beat out of order."},
+    ]
+    assert "overlapping" in _joined(check_narration_beats(out_of_order))
+
+    # 2. Same start time
+    same_start = [
+        {"at_second": 0.0, "text": "Beat A."},
+        {"at_second": 0.0, "text": "Beat B."},
+    ]
+    assert "overlapping" in _joined(check_narration_beats(same_start))
+
+    # 3. Explicit duration overlap
+    explicit_overlap = [
+        {"at_second": 0.0, "duration": 5.0, "text": "Beat one here."},
+        {"at_second": 3.0, "duration": 3.0, "text": "Beat two overlaps."},
+    ]
+    problems = check_narration_beats(explicit_overlap)
+    assert "overlaps" in _joined(problems)
+
+    # 4. Spoken length overlap (without explicit duration)
+    long_speech_overlap = [
+        {"at_second": 0.0, "text": "The helicopter blades are spinning wildly out of control right now."},  # 11 words
+        {"at_second": 1.0, "text": "Next beat starts way too early."},
+    ]
+    problems = check_narration_beats(long_speech_overlap)
+    assert "overlaps" in _joined(problems)
+
+
+def test_N4_check_narration_beats_flags_subscribe_and_repeats() -> None:
+    beats = [
+        {"at_second": 0.0, "text": "Check out this helicopter flight."},
+        {"at_second": 6.0, "text": "Subscribe for more awesome gaming content!"},
+    ]
+    assert "subscribe" in _joined(check_narration_beats(beats))
+
+    avoid = ["Never letting him pilot again."]
+    repeated_beats = [
+        {"at_second": 0.0, "text": "Never letting him pilot again."},
+    ]
+    assert "repeats" in _joined(check_narration_beats(repeated_beats, avoid_phrases=avoid))
+
+
+def test_N4_check_narration_beats_grounding() -> None:
+    beats = [
+        {"at_second": 0.0, "text": "Looking at the beautiful sunshine on the water."},
+    ]
+    # EXCERPT is "NO WAY HELICOPTER EXPLODED"
+    assert "not grounded" in _joined(check_narration_beats(beats, transcript_excerpt=EXCERPT))
+    # Ungrounded when require_grounding is True and no excerpt
+    assert "ungrounded" in _joined(check_narration_beats(beats, require_grounding=True))
+
+
+def test_N4_check_narration_dict_and_integration() -> None:
+    clean_beats = [
+        {"at_second": 0.0, "text": "Helicopter on the edge of the building..."},
+        {"at_second": 6.0, "text": "Pure panic in the cockpit right now!"},
+    ]
+    # Accepts dict wrapping narration_beats
+    assert check_narration_beats({"narration_beats": clean_beats}, transcript_excerpt=EXCERPT) == []
+    # Integration with check_narration
+    assert check_narration({"narration_beats": clean_beats}, transcript_excerpt=EXCERPT) == []
+    bad_beats = [{"at_second": 0.0, "text": "Watch till end guys!"}]
+    assert "watch till end" in _joined(check_narration({"narration_beats": bad_beats}))
+
+
+def test_N4_check_narration_beats_parses_string_and_colon_timestamps() -> None:
+    # String timestamps like "00:04", "4.5s", and "1:10" should parse without ValueError
+    beats = [
+        {"at_second": "00:00", "text": "Helicopter on the edge of the building..."},
+        {"at_second": "4.5s", "text": "Pure panic in the cockpit right now!"},
+        {"at_second": "00:10", "text": "Made it across safely in the end."},
+    ]
+    assert check_narration_beats(beats, transcript_excerpt=EXCERPT) == []
+
+
+def test_N4_check_narration_beats_flags_invalid_timestamps_without_crashing() -> None:
+    # Invalid string timestamps, negative start, or end < start should report errors cleanly without throwing
+    beats = [
+        {"at_second": "invalid_time", "text": "Helicopter blades spinning."},
+        {"at_second": -3.5, "text": "Another line."},
+        {"at_second": 10.0, "end": 5.0, "text": "Reversed end time."},
+    ]
+    problems = check_narration_beats(beats, transcript_excerpt=EXCERPT)
+    text = _joined(problems)
+    assert "invalid timestamp" in text
+    assert "negative timestamp" in text
+    assert "before start time" in text
+
+
+def test_N4_check_narration_beats_flags_contractions_and_filler() -> None:
+    beats = [
+        {"at_second": 0.0, "text": "Look at them panic on the roof!"},
+        {"at_second": 5.0, "text": "Now he's driving straight into danger."},
+        {"at_second": 10.0, "text": "Now they're calling backup."},
+    ]
+    problems = check_narration_beats(beats)
+    text = _joined(problems)
+    assert "play-by-play filler" in text
+    assert "look at them" in text
+    assert "now he's" in text
+    assert "now they're" in text
+
+
+def test_N4_check_narration_beats_malformed_inputs() -> None:
+    # Non-list/dict input
+    assert "must be a list" in _joined(check_narration_beats("not_a_list"))
+    # List of non-dicts
+    assert "must be a dictionary" in _joined(check_narration_beats([None, "string_beat"]))
+    # Missing narration text
+    assert "missing narration text" in _joined(check_narration_beats([{"at_second": 0.0, "text": ""}]))
+
+
+def test_N4_check_narration_grounding_with_beats_and_intro() -> None:
+    # When narration_intro has hook energy ("Watch this!") and beats have concrete details ("helicopter"),
+    # check_narration should accept them as grounded together without spurious errors
+    fields = {
+        "narration_intro": "Chat, watch this immediate chaos unfold!",
+        "narration_beats": [
+            {"at_second": 0.0, "text": "Helicopter clipped the corner of the building..."},
+            {"at_second": 6.0, "text": "Zero control left as it starts spinning!"},
+        ],
+    }
+    assert check_narration(fields, transcript_excerpt=EXCERPT) == []
+

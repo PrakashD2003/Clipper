@@ -30,6 +30,12 @@ VOICE: you are a hyped gamer friend reacting LIVE next to the viewer, not a narr
 - Use gaming slang where it sounds natural: clutch, cooked, sent it, no way, GG, "bro really said...". Do not force it.
 - SPECIFICS BEAT ENERGY: every line must hook onto a concrete detail from the TRANSCRIPT EXCERPT or CHAT (what the streamer said or did, an object, a chat message). Energy never replaces specifics. Never invent events.
 - Every sentence is 12 words or fewer. Short, punchy, spoken out loud.
+- PROGRESSIVE STORY ARC (narration_beats):
+  - Beat 1 (0s, Hook): Open with an intriguing twist or high-stakes claim—NEVER describe what is visibly happening on screen.
+  - Beat 2 (Escalation): Explain the hidden context or buildup while the stream is ducked.
+  - Gap (2–4s): Let the streamer's raw peak reaction play at 100% volume without narrator talk-over.
+  - Beat 3 (Payoff / Breakdown): Reveal why the moment is wild, funny, or mechanically impressive using concrete details from the transcript/screen.
+  - Beat 4 (Sharp Closer): Land a witty 1-line punchline or bold verdict—NO generic "kya tumne kabhi dekha tha?" or "what would you do?" filler questions.
 - INTRO (narration_intro, 1-2 sentences): hook the viewer into what is about to happen WITHOUT spoiling the payoff.
 - CALLOUT (callout, 4-6 words): hype words said right before the payoff, e.g. "Wait wait wait, watch the bridge!".
 - OUTRO (narration_outro, 1-2 sentences): YOUR OWN reaction, verdict or question to the viewer that invites comments, e.g. "Would you have bailed out there? Be honest." NEVER a summary of what happened. NEVER ask for subscribe / follow / like.
@@ -120,6 +126,27 @@ BANNED_PHRASES: tuple[str, ...] = (
     "you have to see",
     "absolutely insane",
     "crazy moment",
+    "kya tumne kabhi dekha",
+    "kya tum ise khelna",
+    "watch till end",
+)
+
+PLAY_BY_PLAY_PHRASES: tuple[str, ...] = (
+    "as you can see",
+    "here you can see",
+    "here we see",
+    "we can see",
+    "look at him",
+    "look at her",
+    "look at them",
+    "now he is",
+    "now he's",
+    "now she is",
+    "now she's",
+    "now they are",
+    "now they're",
+    "what would you do",
+    "kya tumne kabhi dekha tha",
 )
 
 _STOPWORDS = frozenset(
@@ -174,6 +201,31 @@ def _overlap(a: list[str], b: list[str]) -> float:
     return len(sa & sb) / max(1, min(len(sa), len(sb)))
 
 
+def _parse_time(val: Any) -> float | None:
+    """Safely parse float seconds, numeric strings ('4.5', '4.5s'), or colon time ('00:04', '1:23')."""
+    if val is None:
+        return None
+    if isinstance(val, (int, float)):
+        return float(val)
+    s = str(val).strip().rstrip("sS")
+    if not s:
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        pass
+    parts = s.split(":")
+    if 2 <= len(parts) <= 3:
+        try:
+            total = 0.0
+            for part in parts:
+                total = total * 60.0 + float(part)
+            return total
+        except ValueError:
+            return None
+    return None
+
+
 def narration_guide(
     language: str,
     hook_style: str = "",
@@ -216,6 +268,18 @@ def narration_guide(
     return "\n".join(parts)
 
 
+def _get_field(obj: Any, *keys: str, default: Any = None) -> Any:
+    if isinstance(obj, dict):
+        for k in keys:
+            if k in obj and obj[k] is not None:
+                return obj[k]
+    else:
+        for k in keys:
+            if hasattr(obj, k) and getattr(obj, k) is not None:
+                return getattr(obj, k)
+    return default
+
+
 def check_narration(
     fields: dict[str, Any],
     *,
@@ -237,6 +301,15 @@ def check_narration(
     named = [(n, t) for n, t in named if t]
     problems: list[str] = []
     if not named:
+        if "narration_beats" in fields and fields["narration_beats"]:
+            return check_narration_beats(
+                fields["narration_beats"],
+                transcript_excerpt=transcript_excerpt,
+                chat_samples=chat_samples,
+                avoid_phrases=avoid_phrases,
+                max_words_per_sentence=max_words_per_sentence,
+                require_grounding=require_grounding,
+            )
         return problems
 
     # 1. banned generic phrases
@@ -307,6 +380,12 @@ def check_narration(
             line_words: set[str] = set()
             for _, text in named:
                 line_words |= _content_words(text)
+            if "narration_beats" in fields and isinstance(fields["narration_beats"], (list, tuple)):
+                for b in fields["narration_beats"]:
+                    if isinstance(b, dict):
+                        b_txt = _norm(_get_field(b, "text", "narration", "line", default=""))
+                        if b_txt:
+                            line_words |= _content_words(b_txt)
             if not (src_words & line_words):
                 problems.append(
                     "NOT GROUNDED: no line mentions a concrete detail (a word the streamer said, an "
@@ -321,6 +400,186 @@ def check_narration(
                 "NOT INTERACTIVE: narration_outro has no viewer-directed element (ask a question or "
                 "address the viewer with you/bro/comment)"
             )
+
+    # 8. narration_beats validation (if provided)
+    if "narration_beats" in fields and fields["narration_beats"]:
+        beat_problems = check_narration_beats(
+            fields["narration_beats"],
+            transcript_excerpt=transcript_excerpt,
+            chat_samples=chat_samples,
+            avoid_phrases=avoid_phrases,
+            max_words_per_sentence=max_words_per_sentence,
+            require_grounding=require_grounding,
+        )
+        for bp in beat_problems:
+            if bp not in problems:
+                problems.append(bp)
+
+    return problems
+
+
+def check_narration_beats(
+    beats: list[dict[str, Any]] | list[Any] | dict[str, Any],
+    *,
+    transcript_excerpt: str = "",
+    chat_samples: list[str] | None = None,
+    avoid_phrases: list[str] | None = None,
+    max_words_per_sentence: int = DEFAULT_MAX_WORDS_PER_SENTENCE,
+    require_grounding: bool = False,
+) -> list[str]:
+    """Validate progressive narration beats for banned phrases, sentence length, filler, and overlaps."""
+    if isinstance(beats, dict):
+        beats_list = beats.get("narration_beats")
+        if beats_list is None:
+            return []
+    elif isinstance(beats, (list, tuple)):
+        beats_list = beats
+    elif not beats:
+        return []
+    else:
+        return ["narration_beats must be a list of beat objects"]
+
+    if not isinstance(beats_list, (list, tuple)):
+        return ["narration_beats must be a list of beat objects"]
+
+    if not beats_list:
+        return []
+
+    problems: list[str] = []
+    parsed_beats: list[tuple[int, float, float, str]] = []  # (index, start, end, text)
+
+    for i, b in enumerate(beats_list):
+        idx = i + 1
+        if not isinstance(b, dict):
+            problems.append(f'beat {idx} must be a dictionary with "text" and "at_second"')
+            continue
+
+        text = _norm(_get_field(b, "text", "narration", "line", default=""))
+        raw_start = _get_field(b, "at_second", "start", "start_second", "time", default=None)
+        start = _parse_time(raw_start)
+        if raw_start is None:
+            start = 0.0 if idx == 1 else None
+            if idx > 1:
+                problems.append(f'beat {idx} is missing a timestamp ("at_second")')
+        elif start is None:
+            problems.append(f'beat {idx} has an invalid timestamp: {raw_start!r}')
+        elif start < 0:
+            problems.append(f'beat {idx} has a negative timestamp ({start:.1f}s)')
+
+        toks = _tokens(text)
+
+        if start is not None:
+            explicit_dur = _get_field(b, "duration", default=None)
+            explicit_end = _get_field(b, "end_second", "end", default=None)
+            if explicit_end is not None:
+                parsed_end = _parse_time(explicit_end)
+                if parsed_end is None:
+                    problems.append(f'beat {idx} has an invalid end timestamp: {explicit_end!r}')
+                    end = start + 1.0
+                else:
+                    end = parsed_end
+            elif explicit_dur is not None:
+                parsed_dur = _parse_time(explicit_dur)
+                if parsed_dur is None or parsed_dur <= 0:
+                    problems.append(f'beat {idx} has an invalid duration: {explicit_dur!r}')
+                    end = start + 1.0
+                else:
+                    end = start + parsed_dur
+            else:
+                # Estimate spoken duration (~2.5 words per sec, min 0.5s if text present)
+                est_dur = max(0.5, len(toks) / 2.5) if toks else 0.0
+                end = start + est_dur
+
+            if end < start:
+                problems.append(f'beat {idx} end time ({end:.1f}s) is before start time ({start:.1f}s)')
+
+            parsed_beats.append((idx, start, end, text))
+
+        if not text:
+            problems.append(f'beat {idx} is missing narration text')
+            continue
+
+        low = text.lower()
+
+        # 1. Banned generic phrases
+        for phrase in BANNED_PHRASES:
+            if phrase in low:
+                problems.append(f'beat {idx} uses the banned generic phrase "{phrase}"')
+
+        # 2. Play-by-play filler
+        for filler in PLAY_BY_PLAY_PHRASES:
+            if filler in low:
+                problems.append(f'beat {idx} contains play-by-play filler ("{filler}")')
+
+        # 3. Sentence length
+        for sent in _sentences(text):
+            n = len(_tokens(sent))
+            if n > max_words_per_sentence:
+                problems.append(
+                    f'beat {idx} has a sentence of {n} words (max {max_words_per_sentence}): "{sent[:50]}"'
+                )
+
+        # 4. Subscribe / follow / like
+        if _NOT_SUBSCRIBE_RE.search(text):
+            problems.append(f'beat {idx} asks to subscribe/follow/like')
+
+        # 5. Avoid phrases (repeating recent lines)
+        avoid = [_norm(p) for p in (avoid_phrases or []) if _norm(p)]
+        cand_texts = [text] + _sentences(text)
+        flagged: str | None = None
+        for a in avoid:
+            a_low = a.lower()
+            a_texts = [a] + _sentences(a)
+            for ct in cand_texts:
+                ct_low = ct.lower()
+                if len(a_low) >= 6 and a_low in ct_low:
+                    flagged = a
+                elif len(ct_low) >= 12 and ct_low in a_low:
+                    flagged = a
+                else:
+                    ctoks = _tokens(ct)
+                    if any(_overlap(ctoks, _tokens(at)) >= AVOID_TOKEN_OVERLAP for at in a_texts):
+                        flagged = a
+                if flagged:
+                    break
+            if flagged:
+                break
+        if flagged:
+            problems.append(f'beat {idx} repeats a recent clip\'s line ("{flagged[:60]}"); write something new')
+
+    # 6. Non-overlapping timestamps check
+    for i in range(len(parsed_beats) - 1):
+        idx_curr, curr_start, curr_end, _ = parsed_beats[i]
+        idx_next, next_start, _, _ = parsed_beats[i + 1]
+        if next_start <= curr_start:
+            problems.append(
+                f'beat {idx_curr} and beat {idx_next} have overlapping or out-of-order timestamps ({curr_start:.1f}s vs {next_start:.1f}s)'
+            )
+        elif curr_end > next_start + 0.05:
+            problems.append(
+                f'beat {idx_curr} overlaps with beat {idx_next} (ends at {curr_end:.1f}s, next starts at {next_start:.1f}s)'
+            )
+
+    # 7. Grounding check
+    all_text = " ".join(t for _, _, _, t in parsed_beats if t).strip()
+    source = " ".join([_norm(transcript_excerpt)] + [_norm(c) for c in (chat_samples or [])]).strip()
+    if not source:
+        if require_grounding and all_text:
+            problems.append(
+                "UNGROUNDED: narration beats provided but no transcript excerpt or chat "
+                "samples are available to ground them. Run transcribe_audio first or use mode: raw."
+            )
+    elif all_text:
+        dev_chars = len(_DEVANAGARI_RE.findall(source))
+        letters = max(1, len(re.findall(r"\w", source)))
+        if dev_chars / letters < DEVANAGARI_TRANSCRIPT_RATIO:
+            src_words = _content_words(source)
+            line_words = _content_words(all_text)
+            if not (src_words & line_words):
+                problems.append(
+                    "NOT GROUNDED: no beat mentions a concrete detail (a word the streamer said, an "
+                    "object, a chat message) from the transcript excerpt or chat"
+                )
 
     return problems
 

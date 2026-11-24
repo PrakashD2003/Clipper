@@ -36,17 +36,22 @@ Follow this exact sequence:
 3. **Inspect signal-filtered chunks:**
    - `get_transcript_chunks(url, only_with_signals=True)`
    - Pick only the top 1–3 genuinely viral candidates (clear setup → trigger → reaction payoff).
-   - Target **25–45 seconds** total Short duration.
+   - Target **30–40 seconds** total Short duration.
 4. **Refine exact boundaries & jump-cuts (mandatory):**
    - Call `refine_highlight_bounds(url, start, end)` for each candidate to snap `start`/`end`/`peak_time` to the actual visual trigger.
-   - **Target 25–45 seconds** total Short duration.
+   - **Target 30–40 seconds** total Short duration.
    - **Always use `sub_clips`** to jump-cut out loading screens, menus, walking filler, or >3s dead air—even when using `breakdown` mode.
+   - **Layout selection:** Note that `cinema_split` preserves wide 16:9 screens/text and places captions cleanly below the gameplay without occluding HUD or in-game details.
 5. **Write sharp, grounded scripts & select modes:**
-   - Call `submit_highlights(url, highlights=[...])` with:
+   - Call `submit_highlights(url, highlights=[...])` making **progressive `narration_beats`** the default recommended style:
+     - Always craft a **30–40s jump-cut Short** (`sub_clips`) paired with **4–5 connected `narration_beats`** (targeting 55–70% narration coverage) that weave around 2–3 second 100%-volume streamer reaction pops:
+       - **Beat 1 (0s, Hook):** Open with an intriguing twist or high-stakes claim in 1 punchy line (<= 10 words) using natural pauses (`...`) and exclamation (`!`) so TTS delivers energetic delivery—**NEVER narrate play-by-play what is already obvious on screen**.
+       - **Beat 2 (Escalation):** Explain the hidden context or buildup while the stream audio is ducked.
+       - **Gap (2–3s):** Let the streamer's raw peak reaction pop at 100% volume without narrator talk-over.
+       - **Beat 3 (Payoff / Breakdown):** Reveal why the moment is wild, funny, or mechanically impressive using concrete details from the transcript/screen.
+       - **Beat 4–5 (Sharp Closer):** Land a witty 1-line punchline or bold verdict—**NO generic filler questions** (such as *"kya tumne kabhi dekha tha?"* or *"what would you do?"*).
      - `hook_title`: <= 8 words, present tense, curiosity gap, no ALL CAPS, never spoils the payoff.
-     - `narration_intro`: 1 punchy line (<= 10 words) opening a curiosity gap or stakes hook using natural spoken pauses (`...`) and punctuation (`!`, `?`) so TTS delivers high energy instead of flat newsreader cadence. **NEVER narrate play-by-play what is already obvious on screen.**
-     - `callout`: 4–6 hype words right before the climax. **Match `callout` strictly to what is visible right before `peak_time`** (never reference things not on screen).
-     - `narration_outro`: 1–2 sentences giving a real opinion or comment-bait question (never "like and subscribe", never a recap).
+     - Legacy fields (`narration_intro`, `callout`, `narration_outro`) remain fully supported for backward compatibility, with progressive `narration_beats` as the standard.
      - **Mode selection & Breakdown rules:** Only pick `mode="breakdown"` when there is a genuine tactical/visual moment AND always pass exact `breakdown_focus` + `breakdown_target_time` (the exact second the object/stunt is visible on screen, never `clip_start + 1s`); otherwise use `story` or `narrative`.
      - Only populate `breakdown_kind: "zoom_spotlight"` when a specific visible object (screen, HUD detail, Easter egg) is clearly shown on screen AND `breakdown_focus` names that exact object.
      - `breakdown_commentary` + `breakdown_callout`: grounded directly in the visual stunt or spotlighted detail.
@@ -54,7 +59,7 @@ Follow this exact sequence:
    - English channel: `render_all_selected(url, channel="en")` (or `render_clip(..., channel="en")`)
    - Hinglish channel (optional second pass from same cache, after rewriting scripts in natural Roman Hinglish): `render_all_selected(url, channel="hi")`
 7. **Report to user:**
-   - List each rendered `.mp4` path, duration (verifying 25–45s target), resolved mode, title variants from `*_post.txt`, and any quarantined clips.
+   - List each rendered `.mp4` path, duration (verifying 30–40s target), resolved mode, title variants from `*_post.txt`, and any quarantined clips.
 
 ---
 
@@ -94,9 +99,11 @@ This is the **primary monetization workflow**. Follow this exact sequence:
 
 ## 4. Scriptwriting Quality Bar (Anti-"AI Slop" Rules)
 
-- **Never use banned clichés:** *"you won't believe"*, *"watch what happens next"*, *"the chat went wild"*, *"insane moment"*, *"in today's video"*, *"like and subscribe"*.
-- **NEVER narrate play-by-play what is already obvious on screen:** Spoken narration must add stakes, opinions, or curiosity gaps; let the video carry the action.
-- **High-energy delivery for ElevenLabs:** `narration_intro` must open in 1 punchy line (<= 10 words) with natural spoken pauses (`...`) and punctuation (`!`, `?`) so TTS delivers energetic gamer delivery instead of flat newsreader cadence.
+- **Progressive Story Arc (Default):** Always write 4–5 progressive beats across 30–40s jump-cut Shorts (55–70% narration coverage), leaving 2–3s reaction gaps for raw streamer screams/laughter at 100% volume without narrator talk-over.
+- **Visual preservation:** `cinema_split` preserves wide 16:9 screens/text and places captions cleanly below the gameplay without occluding HUD or in-game details.
+- **Never use banned clichés:** *"you won't believe"*, *"watch what happens next"*, *"the chat went wild"*, *"insane moment"*, *"in today's video"*, *"like and subscribe"*, *"watch till end"*, *"kya tumne kabhi dekha"*, *"kya tum ise khelna"*.
+- **NEVER narrate play-by-play what is already obvious on screen:** Spoken narration must add stakes, opinions, or curiosity gaps; let the video carry the action. Avoid filler questions like *"kya tumne kabhi dekha tha?"* or *"what would you do?"*.
+- **High-energy delivery for ElevenLabs:** Use natural spoken pauses (`...`) and punctuation (`!`, `?`) with punchy rhythm so TTS delivers energetic gamer delivery instead of flat newsreader cadence.
 - **Specifics beat hype:** Reference the exact object, quote, mistake, or chat message from the transcript/contact sheet. Match `callout` strictly to what is on screen right before `peak_time`.
 - **No blind breakdowns:** Only pick `mode="breakdown"` when there is a genuine tactical/visual moment AND always pass exact `breakdown_focus` + `breakdown_target_time` (the exact second the object/stunt is visible on screen, never `clip_start + 1s`); otherwise use `story` or `narrative`. Only populate `breakdown_kind: "zoom_spotlight"` when a specific visible object (screen, HUD detail, Easter egg) is clearly shown on screen AND `breakdown_focus` names that exact object.
 - **English vs. Hinglish voice:**

@@ -1,4 +1,4 @@
-You are a {persona}. Write a short spoken INTRO, a short CALLOUT, a spoken OUTRO, a 2-4 word on-screen badge, and an optional slow-motion replay breakdown for a gaming stream clip. It must feel like an original creator-led Short, like a gamer friend reacting live.
+You are a {persona}. Write a short spoken INTRO, a short CALLOUT, a spoken OUTRO, progressive story beats (`narration_beats`), a 2-4 word on-screen badge, and an optional slow-motion replay breakdown for a gaming stream clip. It must feel like an original creator-led Short, like a gamer friend reacting live.
 
 {style_guide}
 
@@ -7,17 +7,42 @@ Moment types you may get: funny, fail, graphics_detail, hype, clutch, chat_chaos
 {language_instruction}
 
 FIELD RULES:
-1. `narration_intro`: NEVER narrate play-by-play what is already obvious on screen. `narration_intro` must open a curiosity gap or stakes hook in 1 punchy line (<= 10 words) using natural spoken pauses (`...`) and punctuation (`!`, `?`) so TTS delivers high energy instead of flat newsreader cadence. Hook the viewer WITHOUT spoiling the payoff. Opening style: {hook_style}.
-2. `callout`: 4-6 hype words said right before the payoff. Match `callout` strictly to what is visible right before the climax (never reference things not on screen).
-3. `narration_outro`: 1-2 sentences, each 12 words or fewer. Your own reaction, verdict or question to the viewer that invites comments. Never a summary, never subscribe/follow/like.
-4. `context_badge`: 2-4 words (an emoji first is fine).
-5. `breakdown_commentary`: 15-30 words of spoken analysis explaining either the tactical mechanics/physics glitch (for slow_mo) or directing attention to the specific screen/document/text detail (for zoom_spotlight).
-6. `breakdown_callout`: 2-5 words on-screen note (e.g. "Hitbox Glitch" or "Secret File").
-7. `breakdown_kind`: Only populate `breakdown_kind: "zoom_spotlight"` when a specific visible object (screen, HUD detail, Easter egg) is clearly shown on screen AND `breakdown_focus` names that exact object. Choose "slow_mo" for physical stunts, vehicle physics, combat, or clutch headshots. Leave empty if neither applies.
-8. `breakdown_focus`: When choosing "zoom_spotlight", specify what visual object the viewer must look at (e.g. "laptop screen", "classified file", "kill feed").
-9. Every line must reference a concrete detail from the TRANSCRIPT EXCERPT or CHAT SAMPLES below. Never invent events.
-10. Hinglish rule: Write casual, punchy Indian gamer speech (short bursts, rhetorical punch, natural Hinglish rhythm), never formal Hindi translation.
-11. Avoid these phrases used in recent clips: {avoid_phrases}
+1. `narration_beats`: 3–5 connected progressive story beats spaced across the clip ([{{"at_second": 0.0, "text": "..."}}, ...]). Target 55–70% narration coverage, leaving 2–4s gaps for raw streamer reactions at 100% volume without narrator talk-over:
+   - Beat 1 (0s, Hook): Open with an intriguing twist or high-stakes claim—NEVER describe what is visibly happening on screen. Use `...` and `!` for punchy rhythm.
+   - Beat 2 (Escalation): Explain the hidden context or buildup while the stream is ducked.
+   - Gap (2–4s): Let the streamer's raw peak reaction pop at 100% volume without narrator talk-over.
+   - Beat 3 (Payoff / Breakdown): Reveal why the moment is wild, funny, or mechanically impressive using concrete details from the transcript/screen.
+   - Beat 4 (Sharp Closer): Land a witty 1-line punchline or bold verdict—NO generic "kya tumne kabhi dekha tha?" or "what would you do?" filler questions.
+   Each beat sentence is 12 words or fewer.
+2. `narration_intro`: NEVER narrate play-by-play what is already obvious on screen. `narration_intro` must open a curiosity gap or stakes hook in 1 punchy line (<= 10 words) using natural spoken pauses (`...`) and punctuation (`!`, `?`) so TTS delivers high energy instead of flat newsreader cadence. Hook the viewer WITHOUT spoiling the payoff. Opening style: {hook_style}.
+3. `callout`: 4-6 hype words said right before the payoff. Match `callout` strictly to what is visible right before the climax (never reference things not on screen).
+4. `narration_outro`: 1-2 sentences, each 12 words or fewer. Your own reaction, verdict or question to the viewer that invites comments. Never a summary, never subscribe/follow/like.
+5. `context_badge`: 2-4 words (an emoji first is fine).
+6. `breakdown_commentary`: 15-30 words of spoken analysis explaining either the tactical mechanics/physics glitch (for slow_mo) or directing attention to the specific screen/document/text detail (for zoom_spotlight).
+7. `breakdown_callout`: 2-5 words on-screen note (e.g. "Hitbox Glitch" or "Secret File").
+8. `breakdown_kind`: Only populate `breakdown_kind: "zoom_spotlight"` when a specific visible object (screen, HUD detail, Easter egg) is clearly shown on screen AND `breakdown_focus` names that exact object. Choose "slow_mo" for physical stunts, vehicle physics, combat, or clutch headshots. Leave empty if neither applies.
+9. `breakdown_focus`: When choosing "zoom_spotlight", specify what visual object the viewer must look at (e.g. "laptop screen", "classified file", "kill feed").
+10. Every line must reference a concrete detail from the TRANSCRIPT EXCERPT or CHAT SAMPLES below. Never invent events.
+11. Hinglish rule: Write casual, punchy Indian gamer speech (short bursts, rhetorical punch, natural Hinglish rhythm), never formal Hindi translation.
+12. Avoid these phrases used in recent clips: {avoid_phrases}
+
+PROGRESSIVE STORYTELLING EXAMPLES (crisp flow with 2–4s streamer reaction gaps, natural pauses `...`, exclamation `!`, and punchy rhythm so ElevenLabs delivers real energy):
+
+English Progressive Beats Example (includes a 3–4s streamer reaction gap between beat 2 and beat 3 at 100% volume):
+[
+  {{"at_second": 0.0, "text": "He thought the bridge was completely empty... big mistake!"}},
+  {{"at_second": 4.5, "text": "Four cop cruisers boxed him in from every single lane."}},
+  {{"at_second": 11.5, "text": "Threaded the guardrail on two wheels like an absolute action hero!"}},
+  {{"at_second": 17.0, "text": "License revoked permanently after that stunt."}}
+]
+
+Hinglish Progressive Beats Example (includes a 3–4s streamer reaction gap between beat 2 and beat 3 at 100% volume):
+[
+  {{"at_second": 0.0, "text": "Bhai ko laga bridge poora clear hai... par aage twist dekho!"}},
+  {{"at_second": 4.0, "text": "Chaar police gaadiyan aage se blockade bana ke khadi thi."}},
+  {{"at_second": 11.0, "text": "Do pahiye pe aisi drift maari ki police dekhti reh gayi!"}},
+  {{"at_second": 16.5, "text": "Ye mastermind move tha ya shuddh luck? Shuddh luck bhai."}}
+]
 
 INPUT:
 - Streamer: {streamer}
@@ -36,6 +61,12 @@ CHAT SAMPLES:
 
 OUTPUT (strict JSON):
 {{
+  "narration_beats": [
+    {{"at_second": 0.0, "text": "<Beat 1: Hook twist or stakes <= 10 words, using ... and !>"}},
+    {{"at_second": 4.0, "text": "<Beat 2: Escalation or hidden context <= 12 words>"}},
+    {{"at_second": 11.0, "text": "<Beat 3: Breakdown or payoff mechanics <= 12 words (after 2-4s reaction gap)>"}},
+    {{"at_second": 16.5, "text": "<Beat 4: Sharp witty closer or verdict <= 10 words>"}}
+  ],
   "narration_intro": "<1 punchy line <= 10 words, opening curiosity gap or stakes hook with pauses and punctuation>",
   "narration_outro": "<1-2 sentences, each <= 12 words, a reaction or opinion>",
   "callout": "<4-6 words>",
