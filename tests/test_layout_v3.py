@@ -36,24 +36,30 @@ def test_A1_compute_layout_table():
     assert _boxes(compute_layout("stacked", "full")) == ((0, 180), (180, 660), (660, 1268), (1268, 1920))
     assert _boxes(compute_layout("stacked", "balanced")) == ((0, 180), (180, 680), (680, 1490), (1490, 1920))
     assert _boxes(compute_layout("stacked", "full_bleed")) == ((540, 720), (0, 640), (640, 1920), (1120, 1460))
+    assert _boxes(compute_layout("stacked", "cinema_split")) == ((540, 710), (0, 615), (615, 1380), (1380, 1540))
     # Default without explicit game_fit is full_bleed
     assert _boxes(compute_layout("stacked")) == ((540, 720), (0, 640), (640, 1920), (1120, 1460))
     assert _boxes(compute_layout("reaction", "balanced")) == ((0, 180), (0, 960), (960, 1568), (1568, 1920))
     assert _boxes(compute_layout("reaction", "full_bleed")) == ((0, 180), (0, 960), (960, 1568), (1568, 1920))
+    assert _boxes(compute_layout("reaction", "cinema_split")) == ((0, 180), (0, 960), (960, 1568), (1568, 1920))
     assert _boxes(compute_layout("blur_fill", "full")) == ((180, 520), None, (560, 1259), (1275, 1800))
     assert _boxes(compute_layout("blur_fill", "full_bleed")) == ((180, 520), None, (560, 1259), (1275, 1800))
     assert _boxes(compute_layout("blur_fill", "balanced")) == ((300, 540), None, (555, 1365), (1365, 1920))
+    assert _boxes(compute_layout("blur_fill", "cinema_split")) == ((300, 540), None, (555, 1365), (1365, 1920))
     g = compute_layout("stacked", "balanced")
     assert (g.game_box.w, g.game_box.h) == (1080, 810)
     g_fb = compute_layout("stacked", "full_bleed")
     assert (g_fb.game_box.w, g_fb.game_box.h) == (1080, 1280)
     assert (g_fb.facecam_box.w, g_fb.facecam_box.h) == (1080, 640)
+    g_cs = compute_layout("stacked", "cinema_split")
+    assert (g_cs.game_box.w, g_cs.game_box.h) == (1080, 765)
+    assert (g_cs.facecam_box.w, g_cs.facecam_box.h) == (1080, 615)
     with pytest.raises(ValueError):
         compute_layout("nope")
 
 
 def test_A2_stacked_layout_bands(tmp_path: Path):
-    # Default is full_bleed: zero black void, full canvas covered
+    # Default is cinema_split: darkened blurred gameplay behind bottom band (no black void)
     composer = VideoComposer(_make_config(tmp_path))
     clip = _make_dummy_clip(duration=2.0, size=(1920, 1080), color=(200, 40, 40))
     comp = composer.compose(clip, FACECAM)
@@ -62,7 +68,13 @@ def test_A2_stacked_layout_bands(tmp_path: Path):
     frame = comp.get_frame(0.5)
     assert frame[1000, 540].tolist() == [200, 40, 40]  # game area
     assert frame[500, 540].tolist() == [200, 40, 40]  # facecam area
-    assert frame[1700, 540].tolist() == [200, 40, 40]  # game fills bottom 66.7% (zero black void)
+    assert frame[1700, 540].tolist() == [100, 20, 20]  # blurred/darkened ~0.5 background under bottom band
+
+    # For stacked/full_bleed: game fills bottom 66.7% (zero black void)
+    comp_fb = VideoComposer(_make_config(tmp_path, overrides={"video": {"game_fit": "full_bleed"}}))
+    res_fb = comp_fb.compose(clip, FACECAM)
+    frame_fb = res_fb.get_frame(0.5)
+    assert frame_fb[1700, 540].tolist() == [200, 40, 40]
 
     # For stacked/full: blur background rendered behind canvas, eliminating black voids
     comp_full = VideoComposer(_make_config(tmp_path, overrides={"video": {"game_fit": "full"}}))

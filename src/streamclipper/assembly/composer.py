@@ -168,8 +168,8 @@ class VideoComposer:
         self.zoom_duration = float(
             config.get("transformation.zoom_duration_seconds", 3.5)
         )
-        raw_fit = str(config.get("video.game_fit", "full_bleed") or "full_bleed").strip().lower()
-        self.game_fit = raw_fit if raw_fit in {"full", "balanced", "full_bleed"} else "full_bleed"
+        raw_fit = str(config.get("video.game_fit", "cinema_split") or "cinema_split").strip().lower()
+        self.game_fit = raw_fit if raw_fit in {"full", "balanced", "full_bleed", "cinema_split"} else "cinema_split"
         try:
             self.blur_fill_game_scale = float(config.get("video.blur_fill_game_scale", 1.15))
         except (TypeError, ValueError):
@@ -313,7 +313,7 @@ class VideoComposer:
                 crop_h = max(1, min(clip.h, int(round(clip.w / target_ratio))))
                 y1 = (clip.h - crop_h) // 2
                 src = clip.cropped(x1=0, y1=y1, x2=clip.w, y2=y1 + crop_h)
-        elif self.game_fit == "balanced":
+        elif self.game_fit in {"balanced", "cinema_split"}:
             target_ratio = box.w / box.h
             if clip.w / clip.h > target_ratio:
                 crop_w = min(clip.w, int(round(clip.h * target_ratio)))
@@ -371,7 +371,7 @@ class VideoComposer:
             layout.kind in {"blur_fill", "reaction"}
             or layout.facecam_box is None
             or facecam is None
-            or (layout.kind == "stacked" and self.game_fit in {"full", "balanced"})
+            or (layout.kind == "stacked" and self.game_fit in {"full", "balanced", "cinema_split"})
         ):
             layers.append(self._blur_background(clip))
         if layout.facecam_box is not None and facecam is not None:

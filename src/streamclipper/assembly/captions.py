@@ -753,6 +753,7 @@ class AssCaptionBurner:
         layout: LayoutGeometry | None = None,
         callout: str = "",
         callout_window: tuple[float, float] | None = None,
+        narration_beats_windows: list[tuple[float, float, str]] | None = None,
     ) -> Path:
         """Write an .ass subtitle file honoring captions.style, optional ChatTicker events, and narration windows."""
         target_path = Path(ass_path)
@@ -853,7 +854,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 )
             )
 
-        # Filter streamer words: suppress speech during ducked intro & outro windows
+        # Filter streamer words: suppress speech during ducked intro & outro windows and narration beat windows
         cleaned_words: list[WordTimestamp] = []
         for w in words:
             if isinstance(w, dict):
@@ -886,7 +887,24 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 < float(breakdown_window[1])
             ):
                 continue
+            if narration_beats_windows:
+                w_start_rel = s_val - clip_start_offset
+                w_end_rel = float(w_obj.end) - clip_start_offset
+                if any(
+                    not (w_end_rel <= b_start or w_start_rel >= b_end)
+                    for b_start, b_end, _ in narration_beats_windows
+                ):
+                    continue
             cleaned_words.append(w_obj)
+
+        if narration_beats_windows:
+            for b_start, b_end, b_text in narration_beats_windows:
+                if b_text and float(b_end) > float(b_start):
+                    events.extend(
+                        self._generate_narration_chunk_events(
+                            b_text, float(b_start), float(b_end), primary_inline_bgr
+                        )
+                    )
 
         effective_group_size = (
             1 if self.style == "single_word" else max(1, self.words_per_group)

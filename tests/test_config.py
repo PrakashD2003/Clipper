@@ -772,7 +772,7 @@ def test_G12_default_config_copies_are_identical() -> None:
 
 def test_F1_default_config_has_v3_keys_and_hardware_stays_auto() -> None:
     cfg = Config()
-    assert cfg.get("video.game_fit") == "full_bleed"
+    assert cfg.get("video.game_fit") == "cinema_split"
     assert cfg.get("facecam.min_detection_ratio") == 0.6
     assert cfg.get("facecam.max_center_jitter") == 0.05
     assert cfg.get("facecam.overrides") == {}

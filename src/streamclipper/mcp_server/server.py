@@ -455,6 +455,44 @@ def _parse_raw_sub_clips(raw_sub_clips: Any) -> list[dict[str, Any]]:
     return parsed
 
 
+def _parse_narration_beats(raw_beats: Any) -> list[dict[str, Any]]:
+    """Parse raw narration beat dicts/json into normalized text and at_second dictionaries."""
+    if isinstance(raw_beats, str) and raw_beats.strip():
+        try:
+            raw_beats = json.loads(_clean_llm_text(raw_beats))
+        except Exception:
+            try:
+                raw_beats = json.loads(raw_beats)
+            except Exception:
+                return []
+    if not isinstance(raw_beats, list):
+        return []
+
+    parsed: list[dict[str, Any]] = []
+    for beat in raw_beats:
+        if not isinstance(beat, dict):
+            continue
+        text = _as_str(beat.get("text")).strip()
+        if not text:
+            continue
+        raw_at = beat.get("at_second")
+        if raw_at is None:
+            at_sec = 0.0
+        else:
+            try:
+                parsed_at = _parse_seconds(raw_at)
+                at_sec = float(parsed_at) if parsed_at is not None else 0.0
+            except (TypeError, ValueError):
+                at_sec = 0.0
+        parsed.append(
+            {
+                "text": text,
+                "at_second": max(0.0, at_sec),
+            }
+        )
+    return parsed
+
+
 def _finalize_hashtags_offline(
     config: Config, raw_tags: list[Any], streamer: str, game: str
 ) -> list[str]:
@@ -752,7 +790,7 @@ async def _render_single_highlight(
     if progress is None:
         progress = JobProgress(None)
 
-    use_multi_beat = clip_mode == "story" and len(valid_beats) >= 2
+    use_multi_beat = clip_mode in ("story", "breakdown") and len(valid_beats) >= 2
     if use_multi_beat:
         beat_ranges = [
             (float(beat["start"]), float(beat["end"])) for beat in valid_beats
@@ -815,6 +853,7 @@ async def _render_single_highlight(
             if (caption_style and caption_style != "auto")
             else getattr(highlight, "caption_style", "auto")
         ),
+        narration_beats=[] if clip_mode == "raw" else list(getattr(highlight, "narration_beats", []) or []),
     )
     # `callout` lands on ClipMetadata in Batch D; set it as an attribute so this works pre/post merge.
     metadata.callout = "" if clip_mode == "raw" else _as_str(getattr(highlight, "callout", ""))
@@ -1690,7 +1729,9 @@ async def submit_highlights(
                     continue
 
                 item_mode = _as_str(item.get("mode") or item.get("transformation_mode")).lower()
-                if item_mode != "raw":
+                parsed_narration_beats = _parse_narration_beats(item.get("narration_beats"))
+
+                if item_mode != "raw" and not parsed_narration_beats:
                     missing = [
                         f
                         for f in ("narration_intro", "narration_outro")
@@ -1704,7 +1745,7 @@ async def submit_highlights(
                                 "end": end,
                                 "reason": (
                                     f"missing {' and '.join(missing)}: every non-raw clip must "
-                                    "open with an intro voiceover and close with an outro. "
+                                    "open with an intro voiceover and close with an outro (or provide narration_beats). "
                                     "Write them (1-2 short sentences each, grounded in what "
                                     "the streamer says) in the narration language "
                                     f"'{narr_lang}' and resubmit this highlight."
@@ -1877,6 +1918,7 @@ async def submit_highlights(
                     breakdown_focus=item_breakdown_focus,
                     transformation_mode=item_mode,
                     caption_style=item_caption_style,
+                    narration_beats=parsed_narration_beats,
                 )
                 highlight.callout = callout
                 stitched = sum(float(b["end"]) - float(b["start"]) for b in validated_beats)
@@ -1954,17 +1996,27 @@ async def submit_highlights(
                     highlight, state.chat_spikes
                 )
                 if item_mode != "raw":
-                    problems = check_narration(
-                        {
-                            "narration_intro": narration_intro,
-                            "narration_outro": narration_outro,
-                            "callout": callout,
-                        },
-                        transcript_excerpt=_as_str(highlight.transcript_chunk),
-                        chat_samples=_chat_texts(highlight.chat_burst),
-                        avoid_phrases=recent_outros,
-                        require_grounding=True,
-                    )
+                    if parsed_narration_beats:
+                        from ..narration_style import check_narration_beats
+                        problems = check_narration_beats(
+                            parsed_narration_beats,
+                            transcript_excerpt=_as_str(highlight.transcript_chunk),
+                            chat_samples=_chat_texts(highlight.chat_burst),
+                            avoid_phrases=recent_outros,
+                            require_grounding=True,
+                        )
+                    else:
+                        problems = check_narration(
+                            {
+                                "narration_intro": narration_intro,
+                                "narration_outro": narration_outro,
+                                "callout": callout,
+                            },
+                            transcript_excerpt=_as_str(highlight.transcript_chunk),
+                            chat_samples=_chat_texts(highlight.chat_burst),
+                            avoid_phrases=recent_outros,
+                            require_grounding=True,
+                        )
                     if problems and narration_strict:
                         rejected_count += 1
                         rejected_reasons.append(
@@ -2071,6 +2123,7 @@ async def _prepare_render_clip(
     language: str = "",
     caption_style: str = "auto",
     channel: str | None = None,
+    narration_beats: list[dict[str, Any]] | str | None = None,
 ) -> str | dict[str, Any]:
     """Validate render_clip inputs synchronously; return an error JSON string or a prepared dict."""
     clean_url = url.strip() if isinstance(url, str) else ""
@@ -2087,6 +2140,8 @@ async def _prepare_render_clip(
         return _json_error(
             f"Invalid clip range: start={start!r}, end={end!r} (require 0 <= start < end)."
         )
+
+    parsed_narration_beats = _parse_narration_beats(narration_beats)
 
     clean_caption_style = _as_str(caption_style).lower() or "auto"
     if clean_caption_style != "auto" and clean_caption_style not in _VALID_CAPTION_STYLES:
@@ -2169,7 +2224,7 @@ async def _prepare_render_clip(
 
     base_mode = pipeline._resolve_base_mode(mode)
 
-    if base_mode != "raw":
+    if base_mode != "raw" and not parsed_narration_beats:
         missing_narr = [
             name
             for name, val, vpath in (
@@ -2181,13 +2236,45 @@ async def _prepare_render_clip(
         if missing_narr:
             return _json_error(
                 f"Missing {' and '.join(missing_narr)}: every non-raw clip must open with an "
-                "intro voiceover and close with an outro. Write them (1-2 short sentences "
+                "intro voiceover and close with an outro (or provide narration_beats). Write them (1-2 short sentences "
                 "each, grounded in what the streamer says, in the stream's narration "
                 "language) and call render_clip again, or use mode='raw' for an "
                 "un-narrated cut."
             )
 
-        if narration_strict and (_as_str(narration_intro) or _as_str(narration_outro)):
+    if base_mode != "raw":
+        if narration_strict and parsed_narration_beats:
+            from ..narration_style import check_narration_beats
+            nq_state = cache.load_state(clean_url)
+            nq_excerpt = ""
+            nq_chat: list[str] = []
+            if nq_state is not None:
+                probe_h = Highlight(
+                    start=float(start), end=float(end), score=0.0, title="", reason=""
+                )
+                if nq_state.transcript is not None:
+                    nq_excerpt = scorer._extract_transcript_for_range(
+                        nq_state.transcript, float(start), float(end)
+                    )
+                nq_chat = _chat_texts(
+                    scorer._extract_chat_burst(probe_h, nq_state.chat_spikes)
+                )
+            nq_problems = check_narration_beats(
+                parsed_narration_beats,
+                transcript_excerpt=nq_excerpt,
+                chat_samples=nq_chat,
+                avoid_phrases=_recent_outros(config),
+                require_grounding=True,
+            )
+            if nq_problems:
+                return _json_error(
+                    "Narration beats failed the quality check: "
+                    + "; ".join(nq_problems)
+                    + ". Rewrite following narration_guide from get_transcript_chunks "
+                    "(energetic, interactive gamer voice, grounded in the transcript) and "
+                    "call render_clip again, or pass narration_strict=false to render as is."
+                )
+        elif narration_strict and (_as_str(narration_intro) or _as_str(narration_outro)):
             nq_state = cache.load_state(clean_url)
             nq_excerpt = ""
             nq_chat: list[str] = []
@@ -2312,6 +2399,7 @@ async def _prepare_render_clip(
         "breakdown_kind": clean_breakdown_kind, "breakdown_target_time": clean_target_time,
         "breakdown_roi": clean_roi, "breakdown_zoom": clean_zoom, "breakdown_focus": clean_focus,
         "callout": callout, "language": clean_language, "caption_style": clean_caption_style,
+        "narration_beats": parsed_narration_beats,
     }
 
 
@@ -2361,6 +2449,7 @@ async def _execute_render_clip(p: dict[str, Any], progress: JobProgress) -> dict
             breakdown_zoom=float(p.get("breakdown_zoom", 2.2) or 2.2),
             breakdown_focus=_as_str(p.get("breakdown_focus", "")),
             bounds_adjustment=bounds_adjustment,
+            narration_beats=list(p.get("narration_beats", []) or []),
         )
         highlight.callout = _as_str(callout)
 
@@ -2479,6 +2568,7 @@ async def render_clip(
     wait: bool = False,
     caption_style: str = "auto",
     channel: str | None = None,
+    narration_beats: list[dict[str, Any]] | str | None = None,
 ) -> str:
     """Render a single highlight into a final 9:16 vertical clip (mode: auto | narrative | story | breakdown | raw) with YPP transformative narration, zoom, and ASS captions+chat ticker.
 
@@ -2542,6 +2632,7 @@ async def render_clip(
             language=language,
             caption_style=caption_style,
             channel=channel,
+            narration_beats=narration_beats,
         )
         if isinstance(prepared, str):
             return prepared

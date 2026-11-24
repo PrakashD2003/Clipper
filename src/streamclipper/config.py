@@ -69,7 +69,7 @@ def load_env_files(paths: list[Path] | None = None) -> list[str]:
 VALID_WEIGHT_KEYS = frozenset({"loudness", "chat_velocity", "heatmap", "llm_score"})
 # Keys a user override may omit (backward compat: pre-heatmap configs list only three weights).
 OPTIONAL_WEIGHT_KEYS = frozenset({"heatmap"})
-VALID_GAME_FITS = frozenset({"full", "balanced", "full_bleed"})
+VALID_GAME_FITS = frozenset({"full", "balanced", "full_bleed", "cinema_split"})
 VALID_TRANSFORMATION_MODES = frozenset({"auto", "narrative", "story", "breakdown", "raw", "top3"})
 
 

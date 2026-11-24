@@ -420,6 +420,66 @@ class TransformativeNarrator:
             language=language,
         )
 
+    def prepare_beat_tracks(
+        self,
+        narration_beats: list[dict[str, Any]],
+        temp_dir: Path | None = None,
+        clip_duration: float | None = None,
+        language: str | None = None,
+    ) -> list[tuple[Path, float, float, str]]:
+        """Synthesize progressive narration beats into individual WAV tracks.
+
+        Returns list of (wav_path, start_sec, duration_sec, text).
+        Automatically prevents beat overlap by shifting start_sec if a prior beat runs slightly long.
+        """
+        if not self.enabled or str(self.mode or "").strip().lower() == "raw" or not narration_beats:
+            return []
+
+        temp = temp_dir or Path(tempfile.gettempdir())
+        temp.mkdir(parents=True, exist_ok=True)
+        clip_dur = (
+            float(clip_duration)
+            if (clip_duration is not None and float(clip_duration) > 0.0)
+            else float("inf")
+        )
+
+        results: list[tuple[Path, float, float, str]] = []
+        current_time = 0.0
+
+        try:
+            for i, beat in enumerate(narration_beats):
+                if not isinstance(beat, dict):
+                    continue
+                text = str(beat.get("text") or "").strip()
+                if not text:
+                    continue
+                raw_at = float(beat.get("at_second") if beat.get("at_second") is not None else 0.0)
+                start_sec = max(current_time, max(0.0, raw_at))
+                if clip_dur != float("inf") and start_sec >= clip_dur:
+                    logger.warning("Beat %d start_sec=%.2f exceeds clip_duration=%.2f; skipping.", i, start_sec, clip_dur)
+                    break
+
+                out_wav = temp / f"narrator_beat_{i:02d}.wav"
+                max_s = max(0.1, clip_dur - start_sec) if clip_dur != float("inf") else None
+                synth_path = self.synthesize_speech(text, out_wav, max_seconds=max_s, language=language)
+                if synth_path is None or not synth_path.is_file():
+                    logger.warning("TTS failed for narration beat %d: %r", i, text)
+                    continue
+
+                dur = self._probe_audio_duration(synth_path) or 0.0
+                if dur <= 0.01:
+                    continue
+
+                if clip_dur != float("inf") and start_sec + dur > clip_dur:
+                    dur = max(0.01, clip_dur - start_sec)
+
+                results.append((synth_path, round(start_sec, 3), round(dur, 3), text))
+                current_time = start_sec + dur
+        finally:
+            self.release()
+
+        return results
+
     def get_effective_narration_durations(
         self,
         intro_dur: float | None,
@@ -531,9 +591,9 @@ class TransformativeNarrator:
 
     def _build_ducking_filtergraph(
         self,
-        intro_dur: float | None,
-        outro_dur: float | None,
-        clip_duration: float,
+        intro_dur: float | None = None,
+        outro_dur: float | None = None,
+        clip_duration: float = 0.0,
         has_video_audio: bool = True,
         *,
         breakdown_dur: float | None = None,
@@ -544,6 +604,7 @@ class TransformativeNarrator:
         finalize: bool = False,
         has_bgm: bool = False,
         bgm: bool | None = None,
+        beat_tracks: list[tuple[Any, float, float]] | None = None,
     ) -> tuple[str, int]:
         """Build dynamic FFmpeg filter_complex string and input count.
 
@@ -560,13 +621,14 @@ class TransformativeNarrator:
         if bgm is not None:
             has_bgm = bgm
 
+        has_beats = bool(beat_tracks)
         has_intro = intro_dur is not None and float(intro_dur) > 0.01
         has_outro = outro_dur is not None and float(outro_dur) > 0.01
         has_breakdown = breakdown_dur is not None and float(breakdown_dur) > 0.01
         has_callout = callout_dur is not None and float(callout_dur) > 0.01
         clip_dur = max(float(clip_duration), 0.1)
         norm = "aresample=48000,aformat=channel_layouts=stereo"
-        any_track = has_intro or has_outro or has_breakdown or has_callout
+        any_track = has_intro or has_outro or has_breakdown or has_callout or has_beats
 
         if not any_track and not has_bgm:
             if not has_video_audio:
@@ -595,7 +657,26 @@ class TransformativeNarrator:
                 )
             return ""
 
-        if has_breakdown:
+        if has_beats and beat_tracks is not None:
+            for b in beat_tracks:
+                if len(b) >= 3:
+                    b_start = float(b[1])
+                    b_dur = float(b[2])
+                else:
+                    b_start = float(b[0])
+                    b_dur = float(b[1])
+                b_delay = int(round(b_start * 1000))
+                b_end = min(clip_dur, b_start + b_dur)
+                eff_dur = max(0.01, b_end - b_start)
+                trim_filter = ""
+                if eff_dur < b_dur - 1e-4:
+                    st = max(0.0, eff_dur - 0.15)
+                    trim_filter = (
+                        f",atrim=0:{eff_dur:.2f},asetpts=PTS-STARTPTS"
+                        f",afade=t=out:st={st:.2f}:d=0.15"
+                    )
+                tracks.append((trim_filter, b_delay, (b_start, b_end)))
+        elif has_breakdown:
             win = self.compute_breakdown_windows(
                 intro_dur, outro_dur, breakdown_dur, clip_dur, replay_start_time
             )
@@ -642,7 +723,7 @@ class TransformativeNarrator:
                     )
                 )
 
-        if has_callout:
+        if not has_beats and has_callout:
             c_start = float(callout_start) if callout_start is not None else clip_dur * 0.35
             c_dur = float(callout_dur)  # type: ignore[arg-type]
             c_start = max(0.0, min(c_start, clip_dur - 0.2))
@@ -777,9 +858,9 @@ class TransformativeNarrator:
         self,
         input_video: Path,
         output_video: Path,
-        intro_wav: Path | None,
-        outro_wav: Path | None,
-        clip_duration: float,
+        intro_wav: Path | None = None,
+        outro_wav: Path | None = None,
+        clip_duration: float = 0.0,
         *,
         breakdown_wav: Path | None = None,
         replay_start_time: float | None = None,
@@ -788,6 +869,7 @@ class TransformativeNarrator:
         callout_start: float | None = None,
         duck_full: bool = False,
         bgm_path: Path | str | None = None,
+        beat_tracks: list[tuple[Any, float, float]] | None = None,
     ) -> Path:
         """Mix intro/outro/breakdown/callout voiceovers over ducked stream audio (-c:v copy).
 
@@ -816,6 +898,7 @@ class TransformativeNarrator:
         breakdown_dur = self._probe_audio_duration(breakdown_wav)
 
         callout_dur = self._probe_audio_duration(callout_wav)
+        has_beats = bool(beat_tracks)
 
         if (
             intro_dur is None
@@ -823,6 +906,7 @@ class TransformativeNarrator:
             and breakdown_dur is None
             and callout_dur is None
             and not has_bgm
+            and not has_beats
         ):
             return self._bypass_copy(input_video, output_video)
 
@@ -844,6 +928,7 @@ class TransformativeNarrator:
             duck_full=duck_full,
             finalize=True,
             has_bgm=has_bgm,
+            beat_tracks=beat_tracks,
         )
 
         same_file = False
@@ -859,14 +944,18 @@ class TransformativeNarrator:
         )
 
         cmd: list[str] = ["ffmpeg", "-y", "-i", str(input_video)]
-        if intro_dur is not None:
-            cmd.extend(["-i", str(intro_wav)])
-        if breakdown_dur is not None:
-            cmd.extend(["-i", str(breakdown_wav)])
-        if outro_dur is not None:
-            cmd.extend(["-i", str(outro_wav)])
-        if callout_dur is not None:
-            cmd.extend(["-i", str(callout_wav)])
+        if has_beats and beat_tracks is not None:
+            for bt in beat_tracks:
+                cmd.extend(["-i", str(bt[0])])
+        else:
+            if intro_dur is not None:
+                cmd.extend(["-i", str(intro_wav)])
+            if breakdown_dur is not None:
+                cmd.extend(["-i", str(breakdown_wav)])
+            if outro_dur is not None:
+                cmd.extend(["-i", str(outro_wav)])
+            if callout_dur is not None:
+                cmd.extend(["-i", str(callout_wav)])
         if has_bgm:
             cmd.extend(["-stream_loop", "-1", "-i", str(bgm_file)])
 

@@ -94,7 +94,7 @@ video:
   fps: 30
   codec: "auto"             # auto (h264_nvenc if CUDA+NVENC else libx264) | h264_nvenc | libx264
   audio_codec: "aac"
-  game_fit: "full_bleed"    # full_bleed (zero black bars, 1080x1280 bottom 66.7%) | full (16:9 game area) | balanced (4:3 centre crop, taller game area)
+  game_fit: "cinema_split"  # cinema_split (wide-safe 9:16 layout) | full_bleed (zero black bars, 1080x1280 bottom 66.7%) | full (16:9 game area) | balanced (4:3 centre crop, taller game area)
   blur_fill_game_scale: 1.15  # blur_fill layout: game width as a multiple of frame width (centre-cropped horizontally; 1.0-1.3). Higher = taller game, more cropped sides
   crf: 19                   # quality (libx264 -crf / h264_nvenc -cq, lower = better, 18-28 range; 19 = high quality)
   preset: "p4"              # nvenc preset (p1-p7, p4 = balanced) / libx264 preset (medium)

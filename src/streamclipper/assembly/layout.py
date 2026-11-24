@@ -43,11 +43,14 @@ _TABLE: dict[
     ("stacked", "full"): ((0, 180), (180, 660), (660, 1268), (1268, 1920)),
     ("stacked", "balanced"): ((0, 180), (180, 680), (680, 1490), (1490, 1920)),
     ("stacked", "full_bleed"): ((540, 720), (0, 640), (640, 1920), (1120, 1460)),
+    ("stacked", "cinema_split"): ((540, 710), (0, 615), (615, 1380), (1380, 1540)),
     ("reaction", "full"): ((0, 180), (0, 960), (960, 1568), (1568, 1920)),
     ("reaction", "balanced"): ((0, 180), (0, 960), (960, 1568), (1568, 1920)),
     ("reaction", "full_bleed"): ((0, 180), (0, 960), (960, 1568), (1568, 1920)),
+    ("reaction", "cinema_split"): ((0, 180), (0, 960), (960, 1568), (1568, 1920)),
     # blur_fill/full is computed from video.blur_fill_game_scale (see _blur_fill_full_rows).
     ("blur_fill", "balanced"): ((300, 540), None, (555, 1365), (1365, 1920)),
+    ("blur_fill", "cinema_split"): ((300, 540), None, (555, 1365), (1365, 1920)),
 }
 
 
@@ -88,7 +91,7 @@ def compute_layout(
     if kind not in {"stacked", "blur_fill", "reaction"}:
         raise ValueError(f"Unknown layout kind: {kind!r}")
     raw_fit = str(game_fit or "full_bleed").strip().lower()
-    if raw_fit in {"balanced", "full_bleed"}:
+    if raw_fit in {"balanced", "full_bleed", "cinema_split"}:
         fit = raw_fit
     else:
         fit = "full"

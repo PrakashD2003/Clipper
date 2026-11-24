@@ -1098,9 +1098,12 @@ class Pipeline:
                         music_confidence=highlight.music_confidence,
                         narration_language=narration_language,
                         caption_style=getattr(highlight, "caption_style", "auto"),
+                        narration_beats=getattr(highlight, "narration_beats", []) or [],
                     )
                 metadata.transformation_mode = clip_mode
                 metadata.narration_language = narration_language
+                if not getattr(metadata, "narration_beats", None) and getattr(highlight, "narration_beats", None):
+                    metadata.narration_beats = highlight.narration_beats
                 if clip_mode == "raw":
                     metadata.narration_intro = ""
                     metadata.narration_outro = ""
@@ -1940,12 +1943,25 @@ class Pipeline:
         if mode != "raw" and bool(self.config.get("transformation.callout_enabled", True)):
             callout_text = str(getattr(metadata, "callout", "") or "").strip()
         tts_speed = float(self.config.get("transformation.tts_speed", 1.0) or 1.0)
-        narr_words = len(
-            f"{metadata.narration_intro or ''} {metadata.narration_outro or ''}".split()
+        active_beats = (
+            getattr(highlight, "narration_beats", None)
+            or getattr(metadata, "narration_beats", None)
+            or []
         )
-        narration_seconds = (
-            narr_words / (_WORDS_PER_SECOND * max(0.5, tts_speed)) if mode != "raw" else 0.0
-        )
+        if active_beats and mode != "raw":
+            beats_words = sum(
+                len(str(b.get("text", "")).split())
+                for b in active_beats
+                if isinstance(b, dict)
+            )
+            narration_seconds = beats_words / (_WORDS_PER_SECOND * max(0.5, tts_speed))
+        else:
+            narr_words = len(
+                f"{metadata.narration_intro or ''} {metadata.narration_outro or ''}".split()
+            )
+            narration_seconds = (
+                narr_words / (_WORDS_PER_SECOND * max(0.5, tts_speed)) if mode != "raw" else 0.0
+            )
         callout_seconds = len(callout_text.split()) / _WORDS_PER_SECOND if callout_text else 0.0
         breakdown_text = str(
             getattr(metadata, "breakdown_commentary", None)
@@ -2031,25 +2047,19 @@ class Pipeline:
                 if (
                     isinstance(actual_durations, list)
                     and len(actual_durations) == len(beats)
-                    and any(
-                        abs(float(a) - (float(b["end"]) - float(b["start"]))) > 0.05
-                        for a, b in zip(actual_durations, beats)
-                    )
                 ):
-                    logger.warning(
-                        "Story beat durations differ from requested ranges; remapping "
-                        "captions/chat to actual durations."
-                    )
                     actual_beats = [
-                        {**b, "end": float(b["start"]) + float(a)}
+                        {**b, "start": float(b["start"]), "end": float(b["start"]) + float(a)}
                         for a, b in zip(actual_durations, beats)
                     ]
-                    remapped_words, remapped_chat, _ = remap_timeline_for_beats(
+                    remapped_words, remapped_chat, remapped_peak = remap_timeline_for_beats(
                         highlight.word_timestamps,
                         highlight.chat_burst,
                         highlight.peak_time,
                         actual_beats,
                     )
+                    if remapped_peak is not None:
+                        peak_offset = remapped_peak
                 clip_start_offset = 0.0
                 words_for_export = remapped_words
                 chat_for_export = remapped_chat
@@ -2263,7 +2273,7 @@ class Pipeline:
                 export_kwargs["language"] = metadata.narration_language
             if layout is not None:
                 export_kwargs["layout"] = layout
-            if callout_text:
+            if callout_text and not active_beats:
                 export_kwargs["callout"] = callout_text
                 eff_peak = (
                     peak_offset
@@ -2323,7 +2333,72 @@ class Pipeline:
                 if voice_breakdown_path is not None:
                     export_kwargs["voice_breakdown_path"] = voice_breakdown_path
 
+            beat_tracks: list[tuple[Path, float, float, str]] = []
+            mix_beats: list[tuple[Path, float, float]] = []
+            beat_windows: list[tuple[float, float, str]] = []
+            total_beat_sec = 0.0
+
+            if active_beats and mode != "raw":
+                beat_tracks = exporter.narrator.prepare_beat_tracks(
+                    active_beats,
+                    temp_dir=self.temp_dir,
+                    clip_duration=moment_seconds,
+                    language=getattr(metadata, "narration_language", None),
+                )
+                if beat_tracks:
+                    mix_beats = [(p, s, d) for (p, s, d, _) in beat_tracks]
+                    beat_windows = [(s, s + d, txt) for (p, s, d, txt) in beat_tracks]
+                    total_beat_sec = sum(d for (_, _, d, _) in beat_tracks)
+
+                    orig_mix = exporter.narrator.mix_narration_with_ducking
+                    def wrapped_mix(*args: Any, **kwargs: Any) -> Any:
+                        args_list = list(args)
+                        if len(args_list) > 2:
+                            args_list[2] = None
+                        if len(args_list) > 3:
+                            args_list[3] = None
+                        kwargs["beat_tracks"] = mix_beats
+                        kwargs["intro_wav"] = None
+                        kwargs["outro_wav"] = None
+                        return orig_mix(*args_list, **kwargs)
+                    exporter.narrator.mix_narration_with_ducking = wrapped_mix
+
+                    orig_gen = exporter.caption_burner.generate_ass
+                    def wrapped_gen(*args: Any, **kwargs: Any) -> Any:
+                        args_list = list(args)
+                        if len(args_list) > 4:
+                            args_list[4] = ""
+                        if len(args_list) > 5:
+                            args_list[5] = ""
+                        if len(args_list) > 6:
+                            args_list[6] = None
+                        if len(args_list) > 7:
+                            args_list[7] = None
+                        kwargs["narration_intro"] = ""
+                        kwargs["narration_outro"] = ""
+                        kwargs["intro_dur"] = None
+                        kwargs["outro_dur"] = None
+                        kwargs["narration_beats_windows"] = beat_windows
+                        return orig_gen(*args_list, **kwargs)
+                    exporter.caption_burner.generate_ass = wrapped_gen
+
+                    export_kwargs["narration_intro"] = "__BEATS__"
+                    export_kwargs["narration_outro"] = ""
+                    export_kwargs["voice_intro_path"] = beat_tracks[0][0]
+                    export_kwargs["voice_outro_path"] = None
+                else:
+                    logger.warning("TTS failed for all narration beats; no voiceover generated.")
+                    export_kwargs["narration_intro"] = "__BEATS__"
+
             final_video = exporter.export(**export_kwargs)
+            if beat_tracks:
+                if getattr(exporter, "last_export_info", None) is not None:
+                    exporter.last_export_info["intro_seconds"] = total_beat_sec
+                    exporter.last_export_info["spoken_seconds"] = total_beat_sec
+                    exporter.last_export_info["mix_ran"] = True
+                metadata.narration_beats = active_beats
+                metadata.narration_intro = ""
+                metadata.narration_outro = ""
         except Exception:
             self._close_composed_handles(composed)
             raise
@@ -2373,7 +2448,12 @@ class Pipeline:
         has_custom_voice: bool = False,
     ) -> None:
         """Guarantee a non-raw clip has intro text: narrative writer first, grounded fallback second."""
-        if str(metadata.narration_intro or "").strip() or has_custom_voice:
+        if (
+            str(metadata.narration_intro or "").strip()
+            or has_custom_voice
+            or bool(getattr(highlight, "narration_beats", None))
+            or bool(getattr(metadata, "narration_beats", None))
+        ):
             return
         writer = getattr(scorer, "generate_narrative", None)
         if callable(writer):

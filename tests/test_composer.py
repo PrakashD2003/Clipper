@@ -513,7 +513,11 @@ class TestRemapTimelineForBeats:
     def test_A5_spike_zoom_only_inside_game_box(self, tmp_path: Path):
         """Spike zoom changes pixels inside game_box only; facecam stays locked."""
         cfg = _make_config(
-            tmp_path, overrides={"transformation": {"punch_in_zoom": 1.20}}
+            tmp_path,
+            overrides={
+                "video": {"game_fit": "full_bleed"},
+                "transformation": {"punch_in_zoom": 1.20},
+            },
         )
         composer = VideoComposer(cfg)
         # Left half red, right half blue so a centre punch-in visibly changes game pixels.

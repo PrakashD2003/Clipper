@@ -189,6 +189,7 @@ class Highlight(SerializableModel):
     callout: str = ""                  # 4-6 word voiced callout said during the build-up
     transformation_mode: str = "auto"  # auto | narrative | story | breakdown | raw
     caption_style: str = "auto"        # auto | hormozi | bounce | pop | karaoke | box | single_word | sentence
+    narration_beats: list[dict[str, Any]] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Highlight":
@@ -242,6 +243,7 @@ class Highlight(SerializableModel):
             callout=data.get("callout") or "",
             transformation_mode=str(data.get("transformation_mode") or data.get("mode") or "auto"),
             caption_style=str(data.get("caption_style") or "auto"),
+            narration_beats=list(data.get("narration_beats") or []),
         )
 
 
@@ -295,6 +297,7 @@ class ClipMetadata(SerializableModel):
     callout: str = ""
     narration_language: str = ""
     caption_style: str = "auto"
+    narration_beats: list[dict[str, Any]] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ClipMetadata":
@@ -333,6 +336,7 @@ class ClipMetadata(SerializableModel):
             callout=data.get("callout") or "",
             narration_language=data.get("narration_language", "") or "",
             caption_style=str(data.get("caption_style") or "auto"),
+            narration_beats=list(data.get("narration_beats") or []),
         )
 
 
