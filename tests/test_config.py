@@ -776,10 +776,10 @@ def test_F1_default_config_has_v3_keys_and_hardware_stays_auto() -> None:
     assert cfg.get("facecam.min_detection_ratio") == 0.6
     assert cfg.get("facecam.max_center_jitter") == 0.05
     assert cfg.get("facecam.overrides") == {}
-    assert cfg.get("analysis.max_clip_seconds") == 90
+    assert cfg.get("analysis.max_clip_seconds") == 45
     assert cfg.get("analysis.skip_intro_minutes") == 5
     assert cfg.get("content_gate.enabled") is True
-    assert cfg.get("output.max_final_seconds") == 180
+    assert cfg.get("output.max_final_seconds") == 55
     assert cfg.get("output.queued_dir") == "queued"
     assert cfg.get("transformation.tts_engines") == ["chatterbox", "kokoro", "edge-tts"]
     assert cfg.get("transformation.target_lufs") == -14

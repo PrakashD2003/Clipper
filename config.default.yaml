@@ -39,7 +39,7 @@ transcription:
 analysis:
   chunk_minutes: 12
   min_clip_seconds: 15
-  max_clip_seconds: 90
+  max_clip_seconds: 45
   hard_max_clip_seconds: 180          # Ranges longer than this are rejected outright (Shorts limit)
   adjust_clip_bounds: true            # Widen short / trim long moments instead of rejecting them
   max_clips_per_stream: 5
@@ -154,7 +154,7 @@ output:
   filename_template: "clip_{index:02d}"
   save_metadata_json: true
   save_transcript_txt: true
-  max_final_seconds: 180               # Hard cap on final clip length (Shorts limit up to 3m)
+  max_final_seconds: 55                # Hard cap on final clip length (Shorts limit up to 3m)
   max_clips_per_streamer_per_day: 3    # Extra clips are routed to queued_dir
   queued_dir: "queued"                 # Sub-folder for clips over the daily cap
   write_post_file: true                # Write a ready-to-paste post .txt next to each clip
@@ -189,7 +189,7 @@ transformation:
     freeze_duration: 4.0
     freeze_zoom: 1.35
     zoom_spotlight:
-      duration: 5.7                   # Matched to breakdown voiceover duration
+      duration: 4.5                   # Matched to breakdown voiceover duration
       zoom_scale: 2.2                 # 2.2x zoom into target ROI
       ease_in_seconds: 1.2            # Sinusoidal ease-in zoom
       ease_out_seconds: 1.0           # Sinusoidal ease-out zoom

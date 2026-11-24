@@ -237,6 +237,7 @@ def render_replay_badge(
     as_pil: bool = False,
 ) -> np.ndarray | Image.Image:
     """Render a high-contrast sports broadcast 'INSTANT REPLAY' badge pill into an RGBA numpy array or PIL Image."""
+    text = strip_unrenderable(text)
     font = _load_font(font_name, font_size)
     tmp = Image.new("RGBA", (1, 1))
     d_tmp = ImageDraw.Draw(tmp)

@@ -215,7 +215,7 @@ class TestLayoutComposition:
         assert comp._layout.kind == "stacked"
         assert comp._layout.facecam_box.h == 640
         assert comp._layout.game_box.h == 1280
-        assert comp._layout.hook_band.y == 220
+        assert comp._layout.hook_band.y == 540
         assert comp._layout.caption_band.y == 1120
         # Exactly 2 layers (facecam + game), no redundant blur background needed because canvas is 100% covered
         assert len(comp.clips) == 2

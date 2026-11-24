@@ -349,7 +349,7 @@ class Pipeline:
                 ).strip().lower()
                 highlight.breakdown_kind = cfg_default if cfg_default in {"slow_mo", "zoom_spotlight"} else "slow_mo"
 
-        max_clip_seconds = float(self.config.get("analysis.max_clip_seconds", 90))
+        max_clip_seconds = float(self.config.get("analysis.max_clip_seconds", 45))
         valid_beats = Scorer._validate_sub_clips(
             highlight.sub_clips,
             highlight.start,
@@ -359,7 +359,7 @@ class Pipeline:
         if base_mode == "breakdown":
             why = self._breakdown_ineligible_reason(highlight)
             if not why:
-                return "breakdown", []
+                return "breakdown", valid_beats if len(valid_beats) >= 2 else []
             logger.info("Breakdown not suitable for this highlight (%s); using narrative/story.", why)
             if len(valid_beats) >= 2:
                 return "story", valid_beats
@@ -371,7 +371,7 @@ class Pipeline:
             #   2. validated multi-beat sub_clips -> story (never discard valid beats)
             #   3. otherwise -> narrative
             if not self._breakdown_ineligible_reason(highlight):
-                return "breakdown", []
+                return "breakdown", valid_beats if len(valid_beats) >= 2 else []
             if len(valid_beats) >= 2:
                 return "story", valid_beats
             return "narrative", []
@@ -812,7 +812,7 @@ class Pipeline:
             wb = float(self.config.get("refinement.window_before", 120.0))
             wa = float(self.config.get("refinement.window_after", 60.0))
             min_clip_seconds = float(self.config.get("analysis.min_clip_seconds", 30))
-            max_clip_seconds = float(self.config.get("analysis.max_clip_seconds", 90))
+            max_clip_seconds = float(self.config.get("analysis.max_clip_seconds", 45))
             hard_max_clip_seconds = float(self.config.get("analysis.hard_max_clip_seconds", 180))
             adjust_clip_bounds = bool(self.config.get("analysis.adjust_clip_bounds", True))
             stream_dur: float | None = (
@@ -1008,11 +1008,13 @@ class Pipeline:
                 if available:
                     chosen = variety.next_format(available)
                     if chosen == "breakdown":
-                        clip_mode, valid_beats = "breakdown", []
+                        clip_mode = "breakdown"
+                        if len(valid_beats) < 2:
+                            valid_beats = []
                     elif chosen == "narrative":
                         clip_mode, valid_beats = "narrative", []
-            use_multi_beat = clip_mode == "story" and len(valid_beats) >= 2
-            if clip_mode != "story" and valid_beats:
+            use_multi_beat = clip_mode in ("story", "breakdown") and len(valid_beats) >= 2
+            if clip_mode not in ("story", "breakdown") and valid_beats:
                 logger.info(
                     "Ignoring %d validated sub_clips beats for highlight %d (mode=%s).",
                     len(valid_beats),
@@ -1487,7 +1489,7 @@ class Pipeline:
         replay_window: float = 5.0,
         replay_speed: float = 0.5,
         freeze_duration: float = 4.0,
-        spotlight_duration: float = 5.7,
+        spotlight_duration: float = 4.5,
         narration_seconds: float = 0.0,
         callout_seconds: float = 0.0,
         can_trim_moment: bool = True,
@@ -1499,7 +1501,7 @@ class Pipeline:
         Order: shrink the replay window first, then trim the moment (around the peak, by the
         caller). Returns moment, replay_window, replay_len, total and commentary coverage.
         """
-        max_final = float(self.config.get("output.max_final_seconds", 180))
+        max_final = float(self.config.get("output.max_final_seconds", 55))
         min_ratio = float(self.config.get("output.min_commentary_ratio", 0.35))
         speed = max(0.1, float(replay_speed))
         replay_on = mode == "breakdown"
@@ -1688,14 +1690,29 @@ class Pipeline:
                             mag = np.abs(lap)
                             kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (17, 5))
                             thresh = (mag > 25.0).astype(np.uint8) * 255
+
+                            # Mask out the outer 15% border margins (x < 0.15, x > 0.85, y < 0.15, y > 0.85)
+                            # so streamer timers, overlays, and facecam corners can never win saliency.
+                            m_y = int(fh * 0.15)
+                            m_x = int(fw * 0.15)
+                            thresh[:m_y, :] = 0
+                            thresh[fh - m_y :, :] = 0
+                            thresh[:, :m_x] = 0
+                            thresh[:, fw - m_x :] = 0
+
                             morphed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
                             contours, _ = cv2.findContours(morphed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
                             text_boxes = []
                             for cnt in contours:
                                 bx, by, bw, bh = cv2.boundingRect(cnt)
-                                # Filter out banner/hook title area at top of frame (y < fh * 0.08)
-                                if by < fh * 0.08:
+                                # Filter out outer 15% border margins (x < 0.15, x > 0.85, y < 0.15, y > 0.85)
+                                if (
+                                    by < fh * 0.15
+                                    or (by + bh) > fh * 0.85
+                                    or bx < fw * 0.15
+                                    or (bx + bw) > fw * 0.85
+                                ):
                                     continue
                                 if bw >= 40 and bh >= 15 and (bw * bh) < (fw * fh * 0.85):
                                     density = float(np.mean(mag[by : by + bh, bx : bx + bw]))
@@ -1714,10 +1731,10 @@ class Pipeline:
                                 ]
                                 pad_x = int(fw * 0.04)
                                 pad_y = int(fh * 0.04)
-                                min_x = max(0, min(b[0] for b in cluster) - pad_x)
-                                min_y = max(0, min(b[1] for b in cluster) - pad_y)
-                                max_x = min(fw, max(b[0] + b[2] for b in cluster) + pad_x)
-                                max_y = min(fh, max(b[1] + b[3] for b in cluster) + pad_y)
+                                min_x = max(int(fw * 0.15), min(b[0] for b in cluster) - pad_x)
+                                min_y = max(int(fh * 0.15), min(b[1] for b in cluster) - pad_y)
+                                max_x = min(int(fw * 0.85), max(b[0] + b[2] for b in cluster) + pad_x)
+                                max_y = min(int(fh * 0.85), max(b[1] + b[3] for b in cluster) + pad_y)
 
                                 cluster_score = float(np.mean([b[4] for b in cluster])) * math.sqrt(len(cluster))
                                 if cluster_score > best_score:
@@ -1777,12 +1794,12 @@ class Pipeline:
         """
         if valid_beats is not None:
             beats = valid_beats
-        elif mode == "story":
+        elif mode in ("story", "breakdown"):
             beats = Scorer._validate_sub_clips(
                 highlight.sub_clips,
                 highlight.start,
                 highlight.end,
-                max_duration=float(self.config.get("analysis.max_clip_seconds", 90)),
+                max_duration=float(self.config.get("analysis.max_clip_seconds", 45)),
             )
         else:
             beats = []
@@ -1870,6 +1887,38 @@ class Pipeline:
                 cfg_default = str(self.config.get("transformation.breakdown.default_kind", "auto") or "auto").strip().lower()
                 b_kind = cfg_default if cfg_default in {"slow_mo", "zoom_spotlight"} else "slow_mo"
 
+        # If breakdown_kind == "zoom_spotlight" has NO explicit breakdown_roi and NO VLM-verified ROI
+        # (e.g. breakdown_focus is empty or VLM localization failed), do NOT blindly fall back to OpenCV guessing—
+        # fall back the clip's mode to "story" (if sub_clips exist) or "narrative" instead.
+        if mode == "breakdown" and b_kind == "zoom_spotlight":
+            explicit_roi = list(
+                getattr(metadata, "breakdown_roi", None)
+                or getattr(highlight, "breakdown_roi", [])
+                or []
+            )
+            has_explicit_roi = (
+                len(explicit_roi) == 4
+                and (explicit_roi != [0.0, 0.0, 1.0, 1.0])
+                and (explicit_roi != [0.20, 0.20, 0.80, 0.80])
+            )
+            vlm_roi = getattr(highlight, "_vlm_breakdown_roi", None)
+            focus = str(
+                getattr(metadata, "breakdown_focus", None)
+                or getattr(highlight, "breakdown_focus", "")
+                or ""
+            ).strip()
+            has_vlm_roi = bool(vlm_roi and len(vlm_roi) == 4 and focus)
+            if not has_explicit_roi and not has_vlm_roi:
+                fb_mode = "story" if len(beats) >= 2 else "narrative"
+                logger.info(
+                    "zoom_spotlight has no explicit or VLM-verified ROI (focus=%r); "
+                    "falling back mode to %s instead of OpenCV guessing.",
+                    focus,
+                    fb_mode,
+                )
+                mode = fb_mode
+                metadata.transformation_mode = fb_mode
+
         zs_cfg = self.config.get("transformation.breakdown.zoom_spotlight", {}) or {}
         zs_zoom = float(
             getattr(highlight, "breakdown_zoom", None)
@@ -1920,7 +1969,7 @@ class Pipeline:
         needed_spotlight = 0.0
         if mode == "breakdown" and (breakdown_seconds_est > 0.0 or outro_seconds_est > 0.0):
             needed_spotlight = breakdown_seconds_est + outro_seconds_est + 1.5
-        zs_duration = max(float(zs_cfg.get("duration", 5.7)), needed_spotlight)
+        zs_duration = max(float(zs_cfg.get("duration", 4.5)), needed_spotlight)
         duck_full = (
             mode != "raw"
             and highlight.music_risk == "HIGH_MUSIC_DETECTED"
@@ -1929,7 +1978,7 @@ class Pipeline:
         budget_plan: dict[str, float] = {}
 
         use_multi_beat = (
-            mode == "story"
+            mode in ("story", "breakdown")
             and len(beats) >= 2
             and len(segment_paths) == len(beats)
         )
@@ -2072,15 +2121,35 @@ class Pipeline:
                     )
                     metadata.breakdown_target_time = target_time
                     metadata.breakdown_roi = target_roi
-                    target_offset = (
-                        target_time - actual_start
-                        if not use_multi_beat
-                        else (target_time - highlight.start)
-                    )
+                    chosen_src = segment_paths[0] if segment_paths else None
+                    if use_multi_beat:
+                        target_offset = None
+                        target_offset_src = None
+                        cum = 0.0
+                        for i, b in enumerate(beats):
+                            bs = float(b["start"])
+                            be = float(b["end"])
+                            is_last = i == len(beats) - 1
+                            in_b = (bs <= target_time <= be) if is_last else (bs <= target_time < be)
+                            if in_b:
+                                target_offset = round(target_time - bs + cum, 3)
+                                if i < len(segment_paths):
+                                    chosen_src = segment_paths[i]
+                                    lead_pad = bs - max(0.0, bs - buffer_seconds)
+                                    target_offset_src = lead_pad + (target_time - bs)
+                                break
+                            cum += (be - bs)
+                        if target_offset is None:
+                            target_offset = peak_offset if peak_offset is not None else 0.0
+                            target_offset_src = target_offset
+                    else:
+                        target_offset = target_time - actual_start
+                        target_offset_src = target_offset
+
                     composed, replay_start_time = composer.compose_zoom_spotlight_breakdown(
                         composed,
-                        source_video=segment_paths[0] if segment_paths else None,
-                        target_time_offset=target_offset,
+                        source_video=chosen_src,
+                        target_time_offset=target_offset_src,
                         roi=target_roi,
                         duration=zs_duration,
                         zoom_scale=zs_zoom,
@@ -2167,7 +2236,33 @@ class Pipeline:
                 export_kwargs["layout"] = layout
             if callout_text:
                 export_kwargs["callout"] = callout_text
-                export_kwargs["callout_start"] = 0.4 * moment_seconds if moment_seconds else None
+                eff_peak = (
+                    peak_offset
+                    if use_multi_beat
+                    else (
+                        max(0.0, highlight.peak_time - clip_start_offset)
+                        if peak_offset is not None
+                        else None
+                    )
+                )
+                intro_text = str(
+                    getattr(metadata, "narration_intro", None)
+                    or getattr(highlight, "narration_intro", "")
+                    or ""
+                ).strip()
+                intro_dur = (
+                    self._estimate_breakdown_seconds(intro_text, voice_intro_path, tts_speed)
+                    if mode != "raw"
+                    else 0.0
+                )
+                if eff_peak is not None and moment_seconds:
+                    low_bound = intro_dur + 1.0
+                    high_bound = max(low_bound, moment_seconds - 3.0)
+                    export_kwargs["callout_start"] = max(low_bound, min(high_bound, eff_peak - 2.0))
+                elif moment_seconds:
+                    export_kwargs["callout_start"] = 0.4 * moment_seconds
+                else:
+                    export_kwargs["callout_start"] = None
             if duck_full:
                 export_kwargs["duck_full"] = True
             from .assembly.captions import resolve_caption_style
@@ -2204,7 +2299,7 @@ class Pipeline:
             self._close_composed_handles(composed)
             raise
 
-        max_final = float(self.config.get("output.max_final_seconds", 180))
+        max_final = float(self.config.get("output.max_final_seconds", 55))
         self._hard_trim(Path(final_video), max_final)
 
         result = organizer.save_clip(

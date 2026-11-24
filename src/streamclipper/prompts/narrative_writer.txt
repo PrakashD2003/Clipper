@@ -7,16 +7,17 @@ Moment types you may get: funny, fail, graphics_detail, hype, clutch, chat_chaos
 {language_instruction}
 
 FIELD RULES:
-1. `narration_intro`: 1-2 sentences (~3-5 seconds spoken), each 12 words or fewer. Hook the viewer WITHOUT spoiling the payoff. Opening style: {hook_style}.
-2. `callout`: 4-6 hype words said right before the payoff.
+1. `narration_intro`: NEVER narrate play-by-play what is already obvious on screen. `narration_intro` must open a curiosity gap or stakes hook in 1 punchy line (<= 10 words) using natural spoken pauses (`...`) and punctuation (`!`, `?`) so TTS delivers high energy instead of flat newsreader cadence. Hook the viewer WITHOUT spoiling the payoff. Opening style: {hook_style}.
+2. `callout`: 4-6 hype words said right before the payoff. Match `callout` strictly to what is visible right before the climax (never reference things not on screen).
 3. `narration_outro`: 1-2 sentences, each 12 words or fewer. Your own reaction, verdict or question to the viewer that invites comments. Never a summary, never subscribe/follow/like.
 4. `context_badge`: 2-4 words (an emoji first is fine).
 5. `breakdown_commentary`: 15-30 words of spoken analysis explaining either the tactical mechanics/physics glitch (for slow_mo) or directing attention to the specific screen/document/text detail (for zoom_spotlight).
 6. `breakdown_callout`: 2-5 words on-screen note (e.g. "Hitbox Glitch" or "Secret File").
-7. `breakdown_kind`: Choose "zoom_spotlight" when the moment revolves around computer/phone screens, text clues, secret files, easter eggs, or documents (moment_type: analysis, lore_secret, graphics_detail). Choose "slow_mo" for physical stunts, vehicle physics, combat, or clutch headshots.
+7. `breakdown_kind`: Only populate `breakdown_kind: "zoom_spotlight"` when a specific visible object (screen, HUD detail, Easter egg) is clearly shown on screen AND `breakdown_focus` names that exact object. Choose "slow_mo" for physical stunts, vehicle physics, combat, or clutch headshots. Leave empty if neither applies.
 8. `breakdown_focus`: When choosing "zoom_spotlight", specify what visual object the viewer must look at (e.g. "laptop screen", "classified file", "kill feed").
 9. Every line must reference a concrete detail from the TRANSCRIPT EXCERPT or CHAT SAMPLES below. Never invent events.
-10. Avoid these phrases used in recent clips: {avoid_phrases}
+10. Hinglish rule: Write casual, punchy Indian gamer speech (short bursts, rhetorical punch, natural Hinglish rhythm), never formal Hindi translation.
+11. Avoid these phrases used in recent clips: {avoid_phrases}
 
 INPUT:
 - Streamer: {streamer}
@@ -35,12 +36,12 @@ CHAT SAMPLES:
 
 OUTPUT (strict JSON):
 {{
-  "narration_intro": "<1-2 sentences, each <= 12 words>",
+  "narration_intro": "<1 punchy line <= 10 words, opening curiosity gap or stakes hook with pauses and punctuation>",
   "narration_outro": "<1-2 sentences, each <= 12 words, a reaction or opinion>",
   "callout": "<4-6 words>",
   "context_badge": "<2-4 words>",
   "breakdown_commentary": "<15-30 words analyzing the climax action or visual detail>",
   "breakdown_callout": "<2-5 words>",
-  "breakdown_kind": "<zoom_spotlight | slow_mo>",
+  "breakdown_kind": "<zoom_spotlight | slow_mo | empty>",
   "breakdown_focus": "<e.g. laptop screen, classified document, or empty>"
 }}
