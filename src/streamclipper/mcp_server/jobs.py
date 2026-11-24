@@ -233,6 +233,9 @@ class JobProgress:
         if self.job is not None:
             set_stage(self.job, f"{self.clip_label}{text}")
 
+    def set_stage(self, text: str) -> None:
+        self.stage(text)
+
     def clip_done(self, result: dict[str, Any] | None = None) -> None:
         if self.job is not None:
             clip_done(self.job, result)

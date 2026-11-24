@@ -266,3 +266,16 @@ def test_J5_instructions_describe_async_rendering() -> None:
     text = mcp_server.SERVER_INSTRUCTIONS
     assert "get_render_status" in text and "ASYNCHRONOUS" in text
     assert "never fall back" in text
+
+
+def test_job_progress_set_stage_updates_job_stage(env) -> None:
+    config, _, _ = env
+    job = jobs.create_job(config, "library_add_source", URL, 1)
+    progress = jobs.JobProgress(job)
+    progress.set_stage("ingesting")
+    assert job["progress"]["stage"] == "ingesting"
+    assert jobs.get_job(job["job_id"])["progress"]["stage"] == "ingesting"
+
+    # Also verify JobProgress(None).set_stage(...) is a safe no-op
+    jobs.JobProgress(None).set_stage("ingesting")
+
