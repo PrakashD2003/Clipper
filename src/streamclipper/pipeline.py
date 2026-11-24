@@ -1907,9 +1907,15 @@ class Pipeline:
                 or getattr(highlight, "breakdown_focus", "")
                 or ""
             ).strip()
-            has_vlm_roi = bool(vlm_roi and len(vlm_roi) == 4 and focus)
+            has_vlm_roi = bool(
+                vlm_roi
+                and len(vlm_roi) == 4
+                and (vlm_roi != [0.0, 0.0, 1.0, 1.0])
+                and (vlm_roi != [0.20, 0.20, 0.80, 0.80])
+                and focus
+            )
             if not has_explicit_roi and not has_vlm_roi:
-                fb_mode = "story" if len(beats) >= 2 else "narrative"
+                fb_mode = "story" if (len(beats) >= 2 and len(segment_paths) >= len(beats)) else "narrative"
                 logger.info(
                     "zoom_spotlight has no explicit or VLM-verified ROI (focus=%r); "
                     "falling back mode to %s instead of OpenCV guessing.",
@@ -2139,11 +2145,34 @@ class Pipeline:
                                     target_offset_src = lead_pad + (target_time - bs)
                                 break
                             cum += (be - bs)
-                        if target_offset is None:
-                            target_offset = peak_offset if peak_offset is not None else 0.0
-                            target_offset_src = target_offset
+
+                        if target_offset is None or target_offset_src is None:
+                            # target_time fell in dead air outside any beat; snap to nearest beat
+                            best_idx = 0
+                            min_dist = float("inf")
+                            best_snapped_t = float(beats[0]["start"])
+                            for i, b in enumerate(beats):
+                                bs = float(b["start"])
+                                be = float(b["end"])
+                                clamped_t = max(bs, min(be, target_time))
+                                dist = abs(target_time - clamped_t)
+                                if dist < min_dist:
+                                    min_dist = dist
+                                    best_idx = i
+                                    best_snapped_t = clamped_t
+
+                            cum = sum(float(b["end"]) - float(b["start"]) for b in beats[:best_idx])
+                            bs = float(beats[best_idx]["start"])
+                            target_offset = round(cum + (best_snapped_t - bs), 3)
+                            if best_idx < len(segment_paths):
+                                chosen_src = segment_paths[best_idx]
+                                lead_pad = bs - max(0.0, bs - buffer_seconds)
+                                target_offset_src = lead_pad + (best_snapped_t - bs)
+                            else:
+                                chosen_src = segment_paths[0] if segment_paths else None
+                                target_offset_src = 0.0
                     else:
-                        target_offset = target_time - actual_start
+                        target_offset = max(0.0, target_time - actual_start)
                         target_offset_src = target_offset
 
                     composed, replay_start_time = composer.compose_zoom_spotlight_breakdown(
@@ -2256,7 +2285,7 @@ class Pipeline:
                     else 0.0
                 )
                 if eff_peak is not None and moment_seconds:
-                    low_bound = intro_dur + 1.0
+                    low_bound = min(intro_dur + 1.0, max(0.0, moment_seconds - 1.0))
                     high_bound = max(low_bound, moment_seconds - 3.0)
                     export_kwargs["callout_start"] = max(low_bound, min(high_bound, eff_peak - 2.0))
                 elif moment_seconds:

@@ -22,10 +22,11 @@ def generate_clip_title_variants(metadata: ClipMetadata, stream_info: StreamInfo
     """Generate 3–5 punchy curiosity-gap title variants for YouTube Shorts A/B testing."""
     primary = (metadata.hook_title or stream_info.title or "Insane Clip").strip()
     streamer = (metadata.streamer or stream_info.streamer or "").strip()
-    game = (metadata.game or stream_info.game or "GTA 6").strip()
+    game = (metadata.game or stream_info.game or "GTA 6").strip() or "GTA 6"
     callout = (getattr(metadata, "callout", None) or getattr(metadata, "breakdown_callout", None) or "").strip()
     moment_type = (metadata.moment_type or "").strip().lower()
-    lang = str(getattr(metadata, "narration_language", "english") or "english").strip().lower()
+    raw_lang = str(getattr(metadata, "narration_language", "english") or "english").strip().lower()
+    lang = "hinglish" if raw_lang in {"hinglish", "hi", "hindi"} else "english"
 
     def _is_banned(title: str) -> bool:
         t_low = title.lower()

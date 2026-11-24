@@ -454,3 +454,221 @@ def test_v4_1_title_variants_hinglish() -> None:
         v_low = v.lower()
         assert not any(p in v_low for p in BANNED_PHRASES)
         assert "you won't believe" not in v_low
+
+
+def test_v4_1_title_variants_hi_and_hindi_aliases() -> None:
+    """'hi' and 'hindi' aliases generate Hinglish variants rather than English."""
+    stream = StreamInfo(
+        url="https://youtube.com/watch?v=xyz",
+        title="Hindi Stream",
+        platform=Platform.YOUTUBE,
+        streamer="CarryisLive",
+        game="GTA 6",
+        duration_seconds=120.0,
+    )
+    for alias in ("hi", "hindi"):
+        meta = ClipMetadata(
+            hook_title="SECRET HEIST REVEALED",
+            caption="Caption",
+            hashtags=["GTA6"],
+            streamer="CarryisLive",
+            game="GTA 6",
+            source_url="https://youtube.com/watch?v=xyz",
+            clip_start=10.0,
+            clip_end=35.0,
+            highlight_score=9.0,
+            callout="Door open ho gaya",
+            narration_language=alias,
+        )
+        variants = generate_clip_title_variants(meta, stream)
+        assert 3 <= len(variants) <= 5
+        hinglish_markers = ("ko", "ye", "dekho", "kaise", "mein", "kya", "bhai", "nahi")
+        has_hinglish_word = any(
+            any(marker in v.lower().split() for marker in hinglish_markers)
+            for v in variants
+        )
+        assert has_hinglish_word, f"Expected Hinglish phrasing for language={alias}"
+
+
+def test_v4_1_zoom_spotlight_rejects_dummy_vlm_roi(tmp_path: Path) -> None:
+    """Dummy VLM ROI ([0, 0, 1, 1] or [0.2, 0.2, 0.8, 0.8]) falls back to story/narrative."""
+    cfg = _make_config(tmp_path)
+    pipeline = Pipeline(cfg)
+
+    h = Highlight(
+        start=10.0,
+        end=30.0,
+        score=8.5,
+        title="Dummy VLM ROI",
+        reason="Screen analysis with dummy VLM ROI",
+        moment_type="analysis",
+        breakdown_kind="zoom_spotlight",
+        breakdown_focus="laptop screen",
+        sub_clips=[{"start": 10.0, "end": 18.0}, {"start": 22.0, "end": 30.0}],
+    )
+    h._vlm_breakdown_roi = [0.0, 0.0, 1.0, 1.0]
+
+    meta = ClipMetadata(
+        hook_title="Dummy VLM ROI",
+        caption="Caption",
+        hashtags=[],
+        streamer="Streamer",
+        game="GTA 6",
+        source_url="http://example.com",
+        clip_start=10.0,
+        clip_end=30.0,
+        highlight_score=8.5,
+        moment_type="analysis",
+        breakdown_kind="zoom_spotlight",
+        breakdown_focus="laptop screen",
+    )
+
+    fake_comp = ColorClip(size=(1080, 1920), color=(0, 0, 0), duration=16.0)
+    fake_comp._layout = None
+
+    seg1 = tmp_path / "seg1.mp4"
+    seg2 = tmp_path / "seg2.mp4"
+    seg1.write_bytes(b"dummy")
+    seg2.write_bytes(b"dummy")
+
+    with patch("streamclipper.assembly.facecam.FacecamDetector.detect", return_value=None), \
+         patch("streamclipper.assembly.composer.VideoComposer.compose_story_beats", return_value=fake_comp) as mock_story, \
+         patch("streamclipper.assembly.composer.VideoComposer.compose_zoom_spotlight_breakdown") as mock_spotlight, \
+         patch("streamclipper.output.exporter.Exporter.export", return_value=seg1), \
+         patch("streamclipper.output.organizer.FileOrganizer.save_clip") as mock_save:
+        mock_save.return_value = ClipResult(video_path=seg1, metadata_path=None, metadata=meta, duration_seconds=16.0)
+        pipeline._assemble_highlight(
+            h,
+            meta,
+            [seg1, seg2],
+            1,
+            "breakdown",
+            None,
+            None,
+            valid_beats=h.sub_clips,
+        )
+        assert mock_story.called
+        assert not mock_spotlight.called
+        assert meta.transformation_mode == "story"
+
+
+def test_v4_1_zoom_spotlight_multi_beat_dead_air_snaps_to_nearest_beat(tmp_path: Path) -> None:
+    """In multi-beat breakdown zoom spotlight, target_time in dead air snaps to the nearest beat."""
+    cfg = _make_config(tmp_path)
+    pipeline = Pipeline(cfg)
+
+    # Beats: Beat 0 [10, 15] (5s), Beat 1 [19, 30] (11s)
+    # Target time: 17.5s (dead air between 15s and 19s; distance to beat 0 is 2.5s, distance to beat 1 is 1.5s -> snaps to beat 1 at 19.0s)
+    h = Highlight(
+        start=10.0,
+        end=30.0,
+        score=9.0,
+        title="Laptop in dead air",
+        reason="Clue",
+        moment_type="analysis",
+        breakdown_kind="zoom_spotlight",
+        breakdown_roi=[0.3, 0.3, 0.7, 0.7],  # explicit ROI so no fallback
+        breakdown_target_time=17.5,  # inside dead air, closer to beat 1 (starts at 19.0)
+        breakdown_commentary="Look at the laptop screen",
+        peak_time=25.0,
+        sub_clips=[{"start": 10.0, "end": 15.0}, {"start": 19.0, "end": 30.0}],
+    )
+
+    meta = ClipMetadata(
+        hook_title="Laptop Clue",
+        caption="Caption",
+        hashtags=[],
+        streamer="Streamer",
+        game="GTA 6",
+        source_url="http://example.com",
+        clip_start=10.0,
+        clip_end=30.0,
+        highlight_score=9.0,
+        moment_type="analysis",
+        breakdown_kind="zoom_spotlight",
+        breakdown_roi=[0.3, 0.3, 0.7, 0.7],
+        breakdown_target_time=17.5,
+        breakdown_commentary="Look at the laptop screen",
+        transformation_mode="breakdown",
+    )
+
+    fake_comp = ColorClip(size=(1080, 1920), color=(0, 0, 0), duration=16.0)
+    fake_comp._layout = None
+
+    seg0 = tmp_path / "seg0.mp4"
+    seg1 = tmp_path / "seg1.mp4"
+    seg0.write_bytes(b"dummy0")
+    seg1.write_bytes(b"dummy1")
+
+    with patch("streamclipper.assembly.facecam.FacecamDetector.detect", return_value=None), \
+         patch("streamclipper.assembly.composer.VideoComposer.compose_story_beats", return_value=fake_comp), \
+         patch("streamclipper.assembly.composer.VideoComposer.compose_zoom_spotlight_breakdown", return_value=(fake_comp, 16.0)) as mock_spotlight, \
+         patch("streamclipper.output.exporter.Exporter.export", return_value=seg0), \
+         patch("streamclipper.output.organizer.FileOrganizer.save_clip") as mock_save:
+        mock_save.return_value = ClipResult(video_path=seg0, metadata_path=None, metadata=meta, duration_seconds=16.0)
+        pipeline._assemble_highlight(
+            h,
+            meta,
+            [seg0, seg1],
+            1,
+            "breakdown",
+            None,
+            None,
+            valid_beats=h.sub_clips,
+            buffer_seconds=3.0,
+        )
+        assert mock_spotlight.called
+        kwargs = mock_spotlight.call_args[1]
+        # Since target_time=17.5 is closest to beat 1 (which starts at 19.0):
+        # chosen_src MUST be seg1 (segment_paths[1]), NOT seg0!
+        assert kwargs["source_video"] == seg1
+        # target_time clamped to 19.0 -> target_offset_src = lead_pad (3.0) + (19.0 - 19.0) = 3.0s
+        assert kwargs["target_time_offset"] == pytest.approx(3.0)
+
+
+def test_v4_1_callout_start_clamped_for_short_clips(tmp_path: Path) -> None:
+    """For short clips where intro_dur + 1.0 > moment_seconds - 3.0, callout_start does not exceed clip duration."""
+    cfg = _make_config(tmp_path)
+    pipeline = Pipeline(cfg)
+
+    seg = tmp_path / "seg.mp4"
+    seg.write_bytes(b"dummy")
+
+    # Clip duration 4.0s, peak at 3.0s, intro_dur ~ 2.0s
+    fake_comp = ColorClip(size=(1080, 1920), color=(0, 0, 0), duration=4.0)
+    fake_comp._trim_start = 0.0
+    fake_comp._layout = None
+
+    h = Highlight(
+        start=0.0,
+        end=4.0,
+        score=8.0,
+        title="Short",
+        reason="Fast",
+        peak_time=3.0,
+        loudness_score=1.0,
+    )
+    meta = ClipMetadata(
+        hook_title="Short",
+        caption="Caption",
+        hashtags=[],
+        streamer="Streamer",
+        game="GTA 6",
+        source_url="http://example.com",
+        clip_start=0.0,
+        clip_end=4.0,
+        highlight_score=8.0,
+        callout="Fast move!",
+        narration_intro="Intro text words",
+    )
+
+    with patch("streamclipper.assembly.facecam.FacecamDetector.detect", return_value=None), \
+         patch("streamclipper.assembly.composer.VideoComposer.compose", return_value=fake_comp), \
+         patch("streamclipper.output.exporter.Exporter.export", return_value=seg) as mock_export, \
+         patch("streamclipper.output.organizer.FileOrganizer.save_clip") as mock_save:
+        mock_save.return_value = ClipResult(video_path=seg, metadata_path=None, metadata=meta, duration_seconds=4.0)
+        pipeline._assemble_highlight(h, meta, [seg], 1, "narrative", None, None)
+        kw = mock_export.call_args[1]
+        assert kw["callout_start"] <= 4.0
+        assert kw["callout_start"] >= 0.0
+
