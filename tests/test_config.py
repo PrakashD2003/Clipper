@@ -841,10 +841,14 @@ def test_T6_channels_block_defaults_and_topics_ledger_name() -> None:
     assert cfg.get("channels.en.output_dir") == "./output/en"
     assert cfg.get("channels.en.narration_language") == "english"
     assert cfg.get("channels.en.ledger_name") == "topics_ledger_en.json"
+    assert cfg.get("channels.en.discovery_language") == "en-US"
+    assert cfg.get("channels.en.discovery_region") == "US"
 
     assert cfg.get("channels.hi.output_dir") == "./output/hi"
     assert cfg.get("channels.hi.narration_language") == "hinglish"
     assert cfg.get("channels.hi.ledger_name") == "topics_ledger_hi.json"
+    assert cfg.get("channels.hi.discovery_language") == "hi"
+    assert cfg.get("channels.hi.discovery_region") == "IN"
 
     assert cfg.get("topics.ledger_name") == "topics_ledger.json"
 
@@ -871,6 +875,8 @@ def test_T6_apply_channel_profile_isolation_and_shared_resources() -> None:
     assert cfg_en.get("general.output_dir") == "./output/en"
     assert cfg_en.get("transformation.narration_language") == "english"
     assert cfg_en.get("topics.ledger_name") == "topics_ledger_en.json"
+    assert cfg_en.get("discovery.language") == "en-US"
+    assert cfg_en.get("discovery.region") == "US"
     assert cfg_en.get("general.cache_dir") == shared_cache
     assert cfg_en.get("library.db_path") == shared_db
 
@@ -880,6 +886,8 @@ def test_T6_apply_channel_profile_isolation_and_shared_resources() -> None:
     assert cfg_hi.get("general.output_dir") == "./output/hi"
     assert cfg_hi.get("transformation.narration_language") == "hinglish"
     assert cfg_hi.get("topics.ledger_name") == "topics_ledger_hi.json"
+    assert cfg_hi.get("discovery.language") == "hi"
+    assert cfg_hi.get("discovery.region") == "IN"
     assert cfg_hi.get("general.cache_dir") == shared_cache
     assert cfg_hi.get("library.db_path") == shared_db
 

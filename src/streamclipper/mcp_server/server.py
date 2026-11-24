@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import json
 import logging
 import math
@@ -102,9 +103,90 @@ SERVER_INSTRUCTIONS = (
     "Read MCP resource streamclipper://workflow-guide for the full operator runbook, schemas, and starter prompt."
 )
 
-mcp = MCPServer("streamclipper", instructions=SERVER_INSTRUCTIONS)
+_OPERATOR_GUIDE_PATHS = [
+    Path(__file__).resolve().parents[3] / "docs" / "streamclipper-mcp-operator-guide.md",
+    Path(__file__).resolve().parents[3] / "docs" / "streamclipper_mcp_operator_guide.md",
+    Path.cwd() / "docs" / "streamclipper-mcp-operator-guide.md",
+    Path.cwd() / "docs" / "streamclipper_mcp_operator_guide.md",
+    Path("docs/streamclipper-mcp-operator-guide.md"),
+    Path("docs/streamclipper_mcp_operator_guide.md"),
+    Path(__file__).resolve().parents[2] / "docs" / "streamclipper-mcp-operator-guide.md",
+    Path(__file__).resolve().parent / "streamclipper-mcp-operator-guide.md",
+]
+
+_COMPACT_OPERATOR_GUIDE_FALLBACK = (
+    "StreamClipper v4 — MCP Operator Guide:\n"
+    "1. Dual-Channel Isolation (channel='en' | 'hi'): Confirm target channel before rendering. "
+    "Never mix English and Hinglish on the same channel. 'en' writes to output/en/ using topics_ledger_en.json. "
+    "'hi' writes Roman Hinglish to output/hi/ using topics_ledger_hi.json. Both share .cache/ and library.sqlite.\n"
+    "2. Mandatory Boundary Refinement (refine_highlight_bounds): Streamers react 15-90s late and chat reacts 5-25s late. "
+    "Always run refine_highlight_bounds before submit_highlights to snap start/end/peak_time to the actual visual trigger "
+    "and detect multi-beat sub_clips when dead air >= 5s exists.\n"
+    "3. Standalone Shorts Workflow: download_stream_audio -> transcribe_audio -> analyze_signals -> "
+    "get_transcript_chunks(only_with_signals=True) -> refine_highlight_bounds -> submit_highlights -> "
+    "render_all_selected(channel=...) -> generate_post_metadata -> cleanup_temp. Never render mode='raw' for channel uploads; "
+    "write grounded narration_intro, callout, narration_outro, and breakdown_commentary. Cap hashtags at 3-4 relevant tags.\n"
+    "4. Long-Form Topic Workflow (8-10 Min + 3 Companion Shorts): library_add_source -> suggest_topics(game, channel) -> "
+    "start_topic_plan(game, topic, channel) -> Human Approval Gate (MANDATORY: wait for explicit user approval before "
+    "approve_topic_plan) -> render_topic_video(plan_id, channel) -> render_topic_shorts(plan_id, channel).\n"
+    "5. Anti-AI Slop Quality Bar: Never use clichés ('you won't believe', 'watch what happens next', 'like and subscribe'). "
+    "Specifics beat hype. English: witty US/global gaming voice. Hinglish: natural Roman-script spoken Hindi+English mix.\n"
+    "6. Asynchronous Jobs: transcribe_audio, render_clip, render_all_selected, render_topic_video, and render_topic_shorts "
+    "return job_id immediately; poll get_render_status(job_id) every ~20s. Never assemble clips yourself with manual ffmpeg.\n"
+    "Call get_operator_guide() to read the full guide on demand."
+)
+
+
+def _find_operator_guide_path() -> Path | None:
+    """Find the path to the v4 operator guide markdown file."""
+    for p in _OPERATOR_GUIDE_PATHS:
+        if p.is_file():
+            return p
+    return None
+
+
+def _load_operator_guide() -> str:
+    """Load the full operator guide from docs, falling back to compact instructions if missing."""
+    p = _find_operator_guide_path()
+    if p is not None:
+        try:
+            content = p.read_text(encoding="utf-8").strip()
+            if content:
+                return content
+        except Exception as exc:
+            logger.warning("Failed to read operator guide from %s: %s", p, exc)
+    return _COMPACT_OPERATOR_GUIDE_FALLBACK
+
+
+mcp = MCPServer("streamclipper", instructions=_load_operator_guide())
 
 _GUIDE_PATH = Path(__file__).resolve().parents[3] / "docs" / "streamclipper-mcp-workflow-guide.md"
+
+
+@mcp.tool()
+def get_operator_guide() -> str:
+    """Return the complete StreamClipper v4 MCP operator guide and host LLM runbook.
+
+    Contains golden rules, dual-channel isolation ('en' vs 'hi'), Shorts workflow with
+    refine_highlight_bounds, 8-10 min Long-Form workflow with human approval gate,
+    and anti-AI slop scriptwriting quality guidelines.
+    """
+    return _load_operator_guide()
+
+
+@mcp.resource(
+    "streamclipper://operator-guide",
+    name="operator-guide",
+    title="StreamClipper v4 MCP Operator Guide",
+    description=(
+        "Comprehensive operator runbook for StreamClipper v4: Shorts & Long-Form workflows, "
+        "dual-channel isolation ('en' vs 'hi'), refine_highlight_bounds, and scriptwriting standards."
+    ),
+    mime_type="text/markdown",
+)
+def get_operator_guide_resource() -> str:
+    """Return the complete StreamClipper v4 MCP operator guide as a resource."""
+    return _load_operator_guide()
 
 
 @mcp.resource(
@@ -223,7 +305,10 @@ def _config_for_channel(channel: str | None = None) -> Config:
     """
     config = _get_config()
     if channel is not None and str(channel).strip():
-        config.apply_channel_profile(str(channel).strip())
+        scoped = copy.copy(config)
+        scoped._data = copy.deepcopy(config._data)
+        scoped.apply_channel_profile(str(channel).strip())
+        return scoped
     return config
 
 
@@ -799,17 +884,27 @@ async def _render_single_highlight(
 
 
 @mcp.tool()
-async def discover_streams(game: str = "GTA 6", max_results: int = 10) -> str:
+async def discover_streams(
+    game: str = "GTA 6",
+    max_results: int = 10,
+    channel: str | None = None,
+    language: str | None = None,
+    region: str | None = None,
+) -> str:
     """Find top recent streams on YouTube for a given game."""
     try:
         if isinstance(max_results, bool) or not isinstance(max_results, int) or max_results < 0:
             return _json_error(
                 f"max_results must be a non-negative integer, got {max_results!r}"
             )
-        config = _get_config()
+        config = _config_for_channel(channel)
         discovery = YouTubeDiscovery(config)
         streams = await asyncio.to_thread(
-            discovery.discover, game=game, max_streams=max_results
+            discovery.discover,
+            game=game,
+            max_streams=max_results,
+            language=language,
+            region=region,
         )
         return _json_ok(
             {

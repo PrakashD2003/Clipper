@@ -66,6 +66,7 @@ EXPECTED_TOOLS = {
     "render_topic_shorts",
     "inspect_moment_context",
     "refine_highlight_bounds",
+    "get_operator_guide",
 }
 
 
@@ -304,7 +305,14 @@ async def test_discover_streams_success_and_error(
         def __init__(self, config: Config) -> None:
             self.config = config
 
-        def discover(self, game: str | None = None, max_streams: int | None = None):
+        def discover(
+            self,
+            game: str | None = None,
+            max_streams: int | None = None,
+            *,
+            language: str | None = None,
+            region: str | None = None,
+        ):
             assert game == "GTA 6"
             assert max_streams == 3
             return sample_streams
@@ -321,6 +329,113 @@ async def test_discover_streams_success_and_error(
     bad_res = await mcp.call_tool("discover_streams", {"game": "GTA 6", "max_results": -1})
     bad_data = _extract_json(bad_res)
     assert "error" in bad_data
+
+
+@pytest.mark.asyncio
+async def test_discover_streams_channel_and_locale_overrides(
+    mcp_env: tuple[Config, StepCache, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: list[dict[str, Any]] = []
+
+    class MockDiscovery:
+        def __init__(self, config: Config) -> None:
+            self.config = config
+
+        def discover(
+            self,
+            game: str | None = None,
+            max_streams: int | None = None,
+            *,
+            language: str | None = None,
+            region: str | None = None,
+        ) -> list[StreamInfo]:
+            captured.append(
+                {
+                    "game": game,
+                    "max_streams": max_streams,
+                    "channel": getattr(self.config, "active_channel", None),
+                    "cfg_lang": self.config.get("discovery.language"),
+                    "cfg_region": self.config.get("discovery.region"),
+                    "arg_lang": language,
+                    "arg_region": region,
+                }
+            )
+            return []
+
+    monkeypatch.setattr(mcp_server, "YouTubeDiscovery", MockDiscovery)
+
+    # 1. channel=None preserves existing en-US/US defaults
+    res_default = await mcp.call_tool("discover_streams", {"game": "GTA 6"})
+    assert "error" not in _extract_json(res_default)
+    assert captured[-1]["channel"] is None
+    assert captured[-1]["cfg_lang"] == "en-US"
+    assert captured[-1]["cfg_region"] == "US"
+    assert captured[-1]["arg_lang"] is None
+    assert captured[-1]["arg_region"] is None
+
+    # 2. channel="hi" switches to hi/IN
+    res_hi = await mcp.call_tool("discover_streams", {"game": "GTA 6", "channel": "hi"})
+    assert "error" not in _extract_json(res_hi)
+    assert captured[-1]["channel"] == "hi"
+    assert captured[-1]["cfg_lang"] == "hi"
+    assert captured[-1]["cfg_region"] == "IN"
+    assert captured[-1]["arg_lang"] is None
+    assert captured[-1]["arg_region"] is None
+
+    # 3. Explicit language & region overrides forwarded
+    res_custom = await mcp.call_tool(
+        "discover_streams",
+        {"game": "GTA 6", "channel": "hi", "language": "en-US", "region": "US"},
+    )
+    assert "error" not in _extract_json(res_custom)
+    assert captured[-1]["arg_lang"] == "en-US"
+    assert captured[-1]["arg_region"] == "US"
+
+
+@pytest.mark.asyncio
+async def test_discover_streams_hindi_query_end_to_end(
+    mcp_env: tuple[Config, StepCache, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured_calls: list[tuple[str, dict[str, Any]]] = []
+
+    class MockYDL:
+        def __init__(self, opts: dict[str, Any]) -> None:
+            self.opts = opts
+
+        def __enter__(self) -> "MockYDL":
+            return self
+
+        def __exit__(self, *args: Any) -> None:
+            pass
+
+        def extract_info(self, search_term: str, download: bool = False) -> dict[str, Any]:
+            captured_calls.append((search_term, self.opts))
+            return {"entries": []}
+
+    monkeypatch.setattr("yt_dlp.YoutubeDL", MockYDL)
+
+    # 1. channel="hi" triggers "hindi live stream" and IN/hi opts
+    captured_calls.clear()
+    res_hi = await mcp.call_tool("discover_streams", {"game": "GTA 6", "channel": "hi"})
+    assert "error" not in _extract_json(res_hi)
+    assert len(captured_calls) > 0
+    search_term_hi, opts_hi = captured_calls[0]
+    assert "hindi live stream" in search_term_hi
+    assert opts_hi["geo_bypass_country"] == "IN"
+    assert opts_hi["http_headers"]["Accept-Language"].startswith("hi")
+    assert opts_hi["extractor_args"]["youtube"]["lang"] == ["hi"]
+
+    # 2. channel=None preserves "live stream" and US/en opts
+    captured_calls.clear()
+    res_default = await mcp.call_tool("discover_streams", {"game": "GTA 6"})
+    assert "error" not in _extract_json(res_default)
+    assert len(captured_calls) > 0
+    search_term_def, opts_def = captured_calls[0]
+    assert "hindi live stream" not in search_term_def
+    assert "live stream" in search_term_def
+    assert opts_def["geo_bypass_country"] == "US"
+    assert opts_def["http_headers"]["Accept-Language"].startswith("en-US")
+    assert opts_def["extractor_args"]["youtube"]["lang"] == ["en"]
 
 
 # ---------------------------------------------------------------------------
@@ -4693,6 +4808,52 @@ def test_mcp_topic_tools_unknown_channel_error() -> None:
         parsed = json.loads(res)
         assert "error" in parsed, f"Expected error in {res}"
         assert "Unknown channel profile" in parsed["error"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_server_initializes_with_v4_operator_instructions_and_tool() -> None:
+    """Verify mcp initializes with non-empty v4 instructions and get_operator_guide returns the guide cleanly."""
+    # 1. mcp.instructions must be non-empty and contain v4 rules
+    assert isinstance(mcp.instructions, str)
+    assert len(mcp.instructions) > 100
+    assert "channel=" in mcp.instructions or "channel" in mcp.instructions
+    assert "refine_highlight_bounds" in mcp.instructions
+    assert "Shorts" in mcp.instructions
+    assert "Long-Form" in mcp.instructions or "long-form" in mcp.instructions.lower()
+
+    # 2. get_operator_guide() tool function directly returns full guide
+    guide_text = mcp_server.get_operator_guide()
+    assert isinstance(guide_text, str)
+    assert len(guide_text) > 1000
+    assert "# StreamClipper v4 — MCP Operator Guide" in guide_text
+    assert 'channel="en"' in guide_text
+    assert 'channel="hi"' in guide_text
+    assert "refine_highlight_bounds" in guide_text
+    assert "Workflow A" in guide_text
+    assert "Workflow B" in guide_text
+    assert "Anti-\"AI Slop\"" in guide_text
+
+    # 3. get_operator_guide tool call via MCP protocol
+    tool_result = await mcp.call_tool("get_operator_guide", {})
+    assert tool_result is not None
+    assert not tool_result.is_error
+    assert len(tool_result.content) == 1
+    assert tool_result.content[0].text == guide_text
+
+    # 4. streamclipper://operator-guide resource read via MCP protocol
+    res_contents = list(await mcp.read_resource("streamclipper://operator-guide"))
+    assert len(res_contents) == 1
+    assert res_contents[0].content == guide_text
+
+    # 5. Fallback behavior when file is missing
+    from unittest.mock import patch
+    with patch.object(mcp_server, "_find_operator_guide_path", return_value=None):
+        fallback = mcp_server._load_operator_guide()
+        assert "StreamClipper v4 — MCP Operator Guide" in fallback
+        assert "channel='en' | 'hi'" in fallback
+        assert "refine_highlight_bounds" in fallback
+        assert "Human Approval Gate" in fallback
+
 
 
 

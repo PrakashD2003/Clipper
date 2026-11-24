@@ -372,3 +372,88 @@ def test_F5_blocked_streamers_are_dropped_case_insensitively(tmp_path):
         {**base, "id": "allowed0001", "uploader": "GoodOne"},
     ]
     assert [s.video_id for s in disc._filter_streams(entries, "GTA 6")] == ["allowed0001"]
+
+
+def test_discovery_channel_hi_switches_locale_and_hindi_query(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Verify channel='hi' switches discovery locale to hi/IN and appends 'hindi' to ytsearch query."""
+    captured_opts, captured_queries = _patch_yt_dlp_search(monkeypatch)
+
+    cfg = _make_config(tmp_path)
+    cfg.apply_channel_profile("hi")
+    assert cfg.get("discovery.language") == "hi"
+    assert cfg.get("discovery.region") == "IN"
+
+    discovery = YouTubeDiscovery(cfg)
+    assert discovery.language == "hi"
+    assert discovery.region == "IN"
+
+    discovery.discover(game="GTA 6", max_streams=5)
+
+    assert len(captured_queries) > 0
+    assert "hindi live stream" in captured_queries[0]
+    assert captured_queries[0].startswith("ytsearch")
+    assert len(captured_opts) > 0
+    assert captured_opts[0]["geo_bypass_country"] == "IN"
+    assert captured_opts[0]["http_headers"]["Accept-Language"].startswith("hi")
+    assert captured_opts[0]["extractor_args"]["youtube"]["lang"] == ["hi"]
+
+
+def test_discovery_channel_none_preserves_en_us_defaults(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Verify default / channel=None discovery preserves en-US/US and standard 'live stream' query."""
+    captured_opts, captured_queries = _patch_yt_dlp_search(monkeypatch)
+
+    cfg = _make_config(tmp_path)
+    cfg.apply_channel_profile(None)
+    assert cfg.get("discovery.language") == "en-US"
+    assert cfg.get("discovery.region") == "US"
+
+    discovery = YouTubeDiscovery(cfg)
+    assert discovery.language == "en-US"
+    assert discovery.region == "US"
+
+    discovery.discover(game="GTA 6", max_streams=5)
+
+    assert len(captured_queries) > 0
+    assert "hindi live stream" not in captured_queries[0]
+    assert "live stream" in captured_queries[0]
+    assert len(captured_opts) > 0
+    assert captured_opts[0]["geo_bypass_country"] == "US"
+    assert captured_opts[0]["http_headers"]["Accept-Language"].startswith("en-US")
+    assert captured_opts[0]["extractor_args"]["youtube"]["lang"] == ["en"]
+
+
+def test_discovery_discover_locale_overrides_per_call(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Verify discover(language=..., region=...) overrides instance defaults per call."""
+    captured_opts, captured_queries = _patch_yt_dlp_search(monkeypatch)
+
+    cfg = _make_config(tmp_path)
+    discovery = YouTubeDiscovery(cfg)
+    assert discovery.language == "en-US"
+    assert discovery.region == "US"
+
+    # 1. Override with hi/IN
+    discovery.discover(game="GTA 6", max_streams=5, language="hi", region="IN")
+    assert "hindi live stream" in captured_queries[0]
+    assert captured_opts[0]["geo_bypass_country"] == "IN"
+    assert captured_opts[0]["http_headers"]["Accept-Language"].startswith("hi")
+    assert captured_opts[0]["extractor_args"]["youtube"]["lang"] == ["hi"]
+
+    # 2. Subsequent call without overrides reverts to instance defaults
+    captured_queries.clear()
+    captured_opts.clear()
+    discovery.discover(game="GTA 6", max_streams=5)
+    assert "hindi live stream" not in captured_queries[0]
+    assert "live stream" in captured_queries[0]
+    assert captured_opts[0]["geo_bypass_country"] == "US"
+
+    # 3. hi-IN variant triggers startswith('hi')
+    captured_queries.clear()
+    captured_opts.clear()
+    discovery.discover(game="GTA 6", max_streams=5, language="hi-IN", region="IN")
+    assert "hindi live stream" in captured_queries[0]

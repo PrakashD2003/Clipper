@@ -307,6 +307,8 @@ class Config:
           - general.output_dir
           - transformation.narration_language
           - topics.ledger_name
+          - discovery.language
+          - discovery.region
         from channels.<channel> while keeping general.cache_dir and library.db_path shared!
         When channel is None, leaves configuration untouched.
         """
@@ -328,6 +330,14 @@ class Config:
             self._data.setdefault("transformation", {})["narration_language"] = channel_cfg["narration_language"]
         if "ledger_name" in channel_cfg:
             self._data.setdefault("topics", {})["ledger_name"] = channel_cfg["ledger_name"]
+        if "discovery_language" in channel_cfg:
+            self._data.setdefault("discovery", {})["language"] = channel_cfg["discovery_language"]
+        elif isinstance(channel_cfg.get("discovery"), dict) and "language" in channel_cfg["discovery"]:
+            self._data.setdefault("discovery", {})["language"] = channel_cfg["discovery"]["language"]
+        if "discovery_region" in channel_cfg:
+            self._data.setdefault("discovery", {})["region"] = channel_cfg["discovery_region"]
+        elif isinstance(channel_cfg.get("discovery"), dict) and "region" in channel_cfg["discovery"]:
+            self._data.setdefault("discovery", {})["region"] = channel_cfg["discovery"]["region"]
 
         return self
 

@@ -130,7 +130,12 @@ class YouTubeDiscovery:
         return target_game, queries or [target_game]
 
     def discover(
-        self, game: str | None = None, max_streams: int | None = None
+        self,
+        game: str | None = None,
+        max_streams: int | None = None,
+        *,
+        language: str | None = None,
+        region: str | None = None,
     ) -> list[StreamInfo]:
         """Find top recent streams for a game."""
         effective_max = (
@@ -139,32 +144,72 @@ class YouTubeDiscovery:
         if effective_max <= 0:
             return []
 
+        effective_lang = (
+            str(language).strip()
+            if language is not None and str(language).strip()
+            else self.language
+        )
+        effective_region = (
+            str(region).strip()
+            if region is not None and str(region).strip()
+            else self.region
+        )
+
         target_game, queries = self._build_queries(game)
         per_query_limit = max(20, effective_max * 2)
 
         all_results: list[dict[str, Any]] = []
         for query in queries:
-            all_results.extend(self._search_youtube(query, max_results=per_query_limit))
+            all_results.extend(
+                self._search_youtube(
+                    query,
+                    max_results=per_query_limit,
+                    language=effective_lang,
+                    region=effective_region,
+                )
+            )
 
         return self._filter_streams(all_results, target_game, max_streams=effective_max)
 
-    def _search_youtube(self, query: str, max_results: int = 20) -> list[dict[str, Any]]:
+    def _search_youtube(
+        self,
+        query: str,
+        max_results: int = 20,
+        *,
+        language: str | None = None,
+        region: str | None = None,
+    ) -> list[dict[str, Any]]:
         """Raw yt-dlp search using extract_flat=False."""
         clean_query = query.strip()
         if not clean_query or max_results <= 0:
             return []
 
-        search_term = f"ytsearch{max_results}:{clean_query} live stream"
+        effective_lang = (
+            str(language).strip()
+            if language is not None and str(language).strip()
+            else self.language
+        )
+        effective_region = (
+            str(region).strip()
+            if region is not None and str(region).strip()
+            else self.region
+        )
+
+        if effective_lang.lower().startswith("hi"):
+            search_term = f"ytsearch{max_results}:{clean_query} hindi live stream"
+        else:
+            search_term = f"ytsearch{max_results}:{clean_query} live stream"
+
         ydl_opts: dict[str, Any] = {
             "quiet": True,
             "no_warnings": True,
             "extract_flat": False,
             "skip_download": True,
             "ignoreerrors": True,
-            "http_headers": {"Accept-Language": f"{self.language},en;q=0.9"},
-            "geo_bypass_country": self.region,
+            "http_headers": {"Accept-Language": f"{effective_lang},en;q=0.9"},
+            "geo_bypass_country": effective_region,
             "extractor_args": {
-                "youtube": {"lang": [_to_ytdlp_youtube_lang(self.language)]}
+                "youtube": {"lang": [_to_ytdlp_youtube_lang(effective_lang)]}
             },
         }
         if self.proxy:

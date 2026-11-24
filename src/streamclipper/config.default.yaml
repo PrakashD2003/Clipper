@@ -294,9 +294,13 @@ channels:
     output_dir: "./output/en"
     narration_language: "english"
     ledger_name: "topics_ledger_en.json"
+    discovery_language: "en-US"
+    discovery_region: "US"
   hi:
     output_dir: "./output/hi"
     narration_language: "hinglish"
     ledger_name: "topics_ledger_hi.json"
+    discovery_language: "hi"
+    discovery_region: "IN"
 
 
