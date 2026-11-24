@@ -106,6 +106,59 @@ def _format_chapter_time(seconds: float) -> str:
     return f"{mins:02d}:{secs:02d}"
 
 
+def _attach_bgm_to_audio(
+    base_audio: Any,
+    duration: float,
+    bgm_file: Path | str | None,
+    bgm_volume_db: float,
+    opened_clips: list[Any],
+) -> Any:
+    """Attach background music bed under voiceover audio, ducked by -4 dB.
+
+    Returns base_audio unchanged if bgm_file is None or does not exist on disk.
+    Loops via AudioLoop(duration=duration) if shorter than duration,
+    or subclips to (0, duration) if longer.
+    """
+    if bgm_file is None:
+        return base_audio
+
+    bgm_path = Path(bgm_file)
+    if not bgm_path.is_file() or bgm_path.stat().st_size == 0:
+        return base_audio
+
+    dur = float(duration)
+    if dur <= 0:
+        return base_audio
+
+    try:
+        from moviepy import AudioFileClip, CompositeAudioClip
+        from moviepy.audio.fx import AudioLoop
+
+        bgm_clip = AudioFileClip(str(bgm_path))
+        opened_clips.append(bgm_clip)
+
+        bgm_dur = float(bgm_clip.duration or 0.0)
+        if bgm_dur > 0 and bgm_dur < dur:
+            bgm_audio = bgm_clip.with_effects([AudioLoop(duration=dur)])
+            opened_clips.append(bgm_audio)
+        elif bgm_dur > dur:
+            bgm_audio = bgm_clip.subclipped(0, dur)
+            opened_clips.append(bgm_audio)
+        else:
+            bgm_audio = bgm_clip
+
+        ducked_vol = 10.0 ** ((float(bgm_volume_db) - 4.0) / 20.0)
+        bgm_audio = bgm_audio.with_volume_scaled(ducked_vol)
+        opened_clips.append(bgm_audio)
+
+        composite = CompositeAudioClip([base_audio, bgm_audio])
+        opened_clips.append(composite)
+        return composite
+    except Exception as exc:
+        logger.warning("Failed loading BGM bed '%s' for narration audio: %s", bgm_file, exc)
+        return base_audio
+
+
 # ---------------------------------------------------------------------------
 # Visual processing: Dark blurred chapter card & Ken-Burns Zoom
 # ---------------------------------------------------------------------------
@@ -711,6 +764,14 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None) 
         credit_seconds = float(config.get("longform.credit_seconds", 4.0) or 4.0)
         kenburns_max_zoom = float(config.get("longform.kenburns_max_zoom", 1.08) or 1.08)
 
+        # Resolve BGM track once near start of block assembly
+        bgm_file = narrator._resolve_bgm_file() if hasattr(narrator, "_resolve_bgm_file") else None
+        bgm_volume_db = float(
+            getattr(narrator, "bgm_volume_db", None)
+            if getattr(narrator, "bgm_volume_db", None) is not None
+            else (config.get("transformation.bgm_volume_db", -26.0) or -26.0)
+        )
+
         # Helper to render a block to ultrafast MP4 and apply per-block loudnorm
         def render_block_mp4(
             clip: Any,
@@ -831,6 +892,8 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None) 
             else:
                 mixed_audio = nar_audio
 
+            mixed_audio = _attach_bgm_to_audio(mixed_audio, nar_dur, bgm_file, bgm_volume_db, opened_co)
+
             zoomed = zoomed.with_audio(mixed_audio).with_duration(nar_dur)
             block_file = render_block_mp4(zoomed, f"block_{block_counter:02d}_cold_open", clips_to_close=opened_co)
             actual_dur = _probe_duration(block_file) or nar_dur
@@ -890,16 +953,12 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None) 
                     card_clip = CompositeVideoClip([card_faded], size=(target_w, target_h)).with_duration(card_seconds)
                     clips_to_close.extend([card_faded, card_clip])
 
-                    bgm_file = narrator._resolve_bgm_file() if hasattr(narrator, "_resolve_bgm_file") else None
                     bgm_attached = False
                     if bgm_file is not None and Path(bgm_file).is_file():
                         try:
                             bgm_clip = AudioFileClip(str(bgm_file))
                             clips_to_close.append(bgm_clip)
-                            raw_bgm_vol = getattr(narrator, "bgm_volume_db", None)
-                            if raw_bgm_vol is None:
-                                raw_bgm_vol = float(config.get("transformation.bgm_volume_db", -26.0) or -26.0)
-                            bgm_vol = 10.0 ** (float(raw_bgm_vol) / 20.0)
+                            bgm_vol = 10.0 ** (bgm_volume_db / 20.0)
                             bgm_audio = bgm_clip.with_volume_scaled(bgm_vol)
                             clips_to_close.append(bgm_audio)
                             if bgm_audio.duration and bgm_audio.duration < card_seconds:
@@ -1019,6 +1078,8 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None) 
                 else:
                     mixed_audio = pt_audio
 
+                mixed_audio = _attach_bgm_to_audio(mixed_audio, pt_dur, bgm_file, bgm_volume_db, opened_pt)
+
                 zoomed = zoomed.with_audio(mixed_audio).with_duration(pt_dur)
                 nar_block_file = render_block_mp4(zoomed, f"block_{block_counter:02d}_pt_{pt.index}_narration", clips_to_close=opened_pt)
                 nar_actual_dur = _probe_duration(nar_block_file) or pt_dur
@@ -1092,6 +1153,8 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None) 
                 mixed_audio = CompositeAudioClip([ducked_broll_audio, out_audio])
             else:
                 mixed_audio = out_audio
+
+            mixed_audio = _attach_bgm_to_audio(mixed_audio, out_dur, bgm_file, bgm_volume_db, opened_out)
 
             zoomed = zoomed.with_audio(mixed_audio).with_duration(out_dur)
             block_file = render_block_mp4(zoomed, f"block_{block_counter:02d}_outro", clips_to_close=opened_out)

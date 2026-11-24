@@ -12,6 +12,7 @@ from click.testing import CliRunner
 from PIL import Image
 
 from streamclipper.assembly.longform import (
+    _attach_bgm_to_audio,
     _build_longform_ass,
     _ensure_synthetic_wav,
     _format_chapter_time,
@@ -913,6 +914,121 @@ def test_T4_chapter_card_corrupt_sfx_fallback_and_no_loudnorm_blowout(
     assert not any("card" in name for name in normalized_inputs)
     # Other blocks (cold open, point narration, evidence, outro) should still be normalized
     assert len(normalized_inputs) >= 3
+
+
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
+def test_T4_attach_bgm_to_audio_helper(tmp_path: Path) -> None:
+    """Verify _attach_bgm_to_audio mixes BGM bed ducked -4dB, handles loop/subclip, and handles missing/corrupt gracefully."""
+    from moviepy import AudioClip, CompositeAudioClip
+
+    base = AudioClip(lambda t: [0.1, 0.1], duration=3.0)
+    opened: list[Any] = []
+
+    # 1. None bgm_file -> returns base unchanged
+    res_none = _attach_bgm_to_audio(base, 3.0, None, -26.0, opened)
+    assert res_none is base
+
+    # 2. Non-existent bgm_file -> returns base unchanged
+    missing_file = tmp_path / "missing_bgm.mp3"
+    res_missing = _attach_bgm_to_audio(base, 3.0, missing_file, -26.0, opened)
+    assert res_missing is base
+
+    # 3. Corrupt bgm_file -> logs warning, returns base unchanged without raising
+    corrupt_file = tmp_path / "corrupt_bgm.mp3"
+    corrupt_file.write_bytes(b"not an audio file")
+    res_corrupt = _attach_bgm_to_audio(base, 3.0, corrupt_file, -26.0, opened)
+    assert res_corrupt is base
+
+    # 4. Valid BGM file longer than duration (3s duration, 5s BGM) -> subclipped and mixed
+    long_bgm = tmp_path / "long_bgm.wav"
+    _ensure_synthetic_wav(long_bgm, duration_seconds=5.0)
+    opened.clear()
+    res_long = _attach_bgm_to_audio(base, 3.0, long_bgm, -26.0, opened)
+    assert isinstance(res_long, CompositeAudioClip)
+    assert res_long.duration == 3.0
+    assert len(opened) >= 3
+    for c in opened:
+        if hasattr(c, "close"):
+            c.close()
+
+    # 5. Valid BGM file shorter than duration (4s duration, 2s BGM) -> looped via AudioLoop and mixed
+    short_bgm = tmp_path / "short_bgm.wav"
+    _ensure_synthetic_wav(short_bgm, duration_seconds=2.0)
+    opened.clear()
+    res_short = _attach_bgm_to_audio(base, 4.0, short_bgm, -26.0, opened)
+    assert isinstance(res_short, CompositeAudioClip)
+    assert res_short.duration == 4.0
+    for c in opened:
+        if hasattr(c, "close"):
+            c.close()
+
+
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
+def test_T4_longform_narration_blocks_mix_bgm_when_set_and_skip_when_empty(
+    test_config: Config, synthetic_plan: TopicPlan, tmp_path: Path
+) -> None:
+    """Verify long-form narration blocks mix BGM when transformation.bgm_path is set,
+
+    and skip cleanly when empty or None.
+    """
+    from streamclipper.assembly import longform as lf_mod
+
+    # Setup BGM file
+    bgm_wav = tmp_path / "narration_bed.wav"
+    _ensure_synthetic_wav(bgm_wav, duration_seconds=10.0)
+
+    # 1. When transformation.bgm_path is set:
+    _set_cfg(test_config, "transformation.bgm_path", str(bgm_wav))
+    _set_cfg(test_config, "transformation.bgm_volume_db", -24.0)
+
+    calls: list[tuple[float, Any, float]] = []
+    orig_attach = lf_mod._attach_bgm_to_audio
+
+    def spy_attach(base_audio, duration, bgm_file, bgm_volume_db, opened_clips):
+        calls.append((duration, bgm_file, bgm_volume_db))
+        return orig_attach(base_audio, duration, bgm_file, bgm_volume_db, opened_clips)
+
+    def mock_download(url, start, end, out_dir, **kwargs):
+        seg = out_dir / f"seg_{int(start)}.mp4"
+        return _create_synthetic_mp4(seg, duration=max(1.0, end - start), width=640, height=360)
+
+    save_plan(test_config, synthetic_plan)
+
+    with patch("streamclipper.assembly.longform.download_segment", side_effect=mock_download), \
+         patch("streamclipper.assembly.longform.CopyrightRiskDetector.detect", return_value=("CLEAN", 0.99)), \
+         patch("streamclipper.assembly.longform.TransformativeNarrator.synthesize_speech", side_effect=_mock_synthesize), \
+         patch.object(lf_mod, "_attach_bgm_to_audio", side_effect=spy_attach):
+        res = render_long_video(test_config, synthetic_plan)
+
+    assert res["status"] == "rendered"
+    assert Path(res["video_path"]).is_file()
+
+    # Cold open + 3 points + outro = 5 narration blocks attached
+    assert len(calls) == 5
+    for dur, bgm_f, vol_db in calls:
+        assert dur > 0.0
+        assert bgm_f == bgm_wav
+        assert vol_db == -24.0
+
+    # 2. When transformation.bgm_path is unset / empty:
+    _set_cfg(test_config, "transformation.bgm_path", "")
+    calls.clear()
+    synthetic_plan.status = "approved"
+    save_plan(test_config, synthetic_plan)
+
+    with patch("streamclipper.assembly.longform.download_segment", side_effect=mock_download), \
+         patch("streamclipper.assembly.longform.CopyrightRiskDetector.detect", return_value=("CLEAN", 0.99)), \
+         patch("streamclipper.assembly.longform.TransformativeNarrator.synthesize_speech", side_effect=_mock_synthesize), \
+         patch.object(lf_mod, "_attach_bgm_to_audio", side_effect=spy_attach):
+        res_empty = render_long_video(test_config, synthetic_plan)
+
+    assert res_empty["status"] == "rendered"
+    assert Path(res_empty["video_path"]).is_file()
+
+    # _attach_bgm_to_audio was called with bgm_f=None and skipped cleanly
+    assert len(calls) == 5
+    for dur, bgm_f, vol_db in calls:
+        assert bgm_f is None
 
 
 # ---------------------------------------------------------------------------
