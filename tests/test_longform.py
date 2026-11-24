@@ -765,3 +765,257 @@ def test_T1_no_duplicate_broll_footage_selection(test_config: Config, tmp_path: 
 
     assert res["status"] == "rendered"
     assert Path(res["video_path"]).is_file()
+
+
+# ---------------------------------------------------------------------------
+# Ticket T4 Tests: 1.2s Chapter Card, Transition SFX, CrossFade, and BGM Bed
+# ---------------------------------------------------------------------------
+
+
+def test_T4_chapter_card_duration_default_1_2s() -> None:
+    """Verify that default longform.card_seconds is 1.2 in both config and longform defaults."""
+    fresh_cfg = Config()
+    assert fresh_cfg.get("longform.card_seconds") == 1.2
+    assert fresh_cfg.get("longform.transition_sfx_path") == ""
+
+
+def test_T4_chapter_card_with_transition_sfx(test_config: Config, synthetic_plan: TopicPlan, tmp_path: Path) -> None:
+    """When longform.transition_sfx_path points to an audio file, card clip attaches it at -12 dB."""
+    sfx_wav = tmp_path / "whoosh.wav"
+    _ensure_synthetic_wav(sfx_wav, duration_seconds=0.8)
+    _set_cfg(test_config, "longform.transition_sfx_path", str(sfx_wav))
+    _set_cfg(test_config, "longform.card_seconds", 1.2)
+
+    captured_clips: dict[str, Any] = {}
+
+    from moviepy import VideoClip
+    orig_write = VideoClip.write_videofile
+
+    def spy_write(self, filename, *args, **kwargs):
+        name = Path(filename).stem.replace("_raw", "")
+        if "card" in name:
+            captured_clips[name] = {
+                "duration": self.duration,
+                "has_audio": self.audio is not None,
+                "is_composite": hasattr(self, "clips"),
+            }
+        return orig_write(self, filename, *args, **kwargs)
+
+    def mock_download(url, start, end, out_dir, **kwargs):
+        seg = out_dir / f"seg_{int(start)}.mp4"
+        return _create_synthetic_mp4(seg, duration=max(1.0, end - start), width=640, height=360)
+
+    save_plan(test_config, synthetic_plan)
+
+    with patch("streamclipper.assembly.longform.download_segment", side_effect=mock_download), \
+         patch("streamclipper.assembly.longform.CopyrightRiskDetector.detect", return_value=("CLEAN", 0.99)), \
+         patch("streamclipper.assembly.longform.TransformativeNarrator.synthesize_speech", side_effect=_mock_synthesize), \
+         patch.object(VideoClip, "write_videofile", spy_write):
+        res = render_long_video(test_config, synthetic_plan)
+
+    assert res["status"] == "rendered"
+    card_entries = [v for k, v in captured_clips.items() if "card" in k]
+    assert len(card_entries) > 0
+    for card_data in card_entries:
+        assert card_data["duration"] == 1.2
+        assert card_data["has_audio"] is True
+        # SFX path does not wrap in CompositeVideoClip with fade-in/fade-out
+        assert card_data["is_composite"] is False
+
+
+def test_T4_chapter_card_fades_and_bgm_bed_when_sfx_unset(test_config: Config, synthetic_plan: TopicPlan, tmp_path: Path) -> None:
+    """When transition_sfx_path is unset, card clip has visual fade-in/out and mixes BGM bed across card."""
+    bgm_wav = tmp_path / "ambient_bgm.wav"
+    _ensure_synthetic_wav(bgm_wav, duration_seconds=3.0)
+    _set_cfg(test_config, "longform.transition_sfx_path", "")
+    _set_cfg(test_config, "transformation.bgm_path", str(bgm_wav))
+    _set_cfg(test_config, "transformation.bgm_volume_db", -26.0)
+    _set_cfg(test_config, "longform.card_seconds", 1.2)
+
+    captured_clips: dict[str, Any] = {}
+
+    from moviepy import VideoClip
+    orig_write = VideoClip.write_videofile
+
+    def spy_write(self, filename, *args, **kwargs):
+        name = Path(filename).stem.replace("_raw", "")
+        if "card" in name:
+            captured_clips[name] = {
+                "duration": self.duration,
+                "has_audio": self.audio is not None,
+                "is_composite": hasattr(self, "clips"),
+            }
+        return orig_write(self, filename, *args, **kwargs)
+
+    def mock_download(url, start, end, out_dir, **kwargs):
+        seg = out_dir / f"seg_{int(start)}.mp4"
+        return _create_synthetic_mp4(seg, duration=max(1.0, end - start), width=640, height=360)
+
+    save_plan(test_config, synthetic_plan)
+
+    with patch("streamclipper.assembly.longform.download_segment", side_effect=mock_download), \
+         patch("streamclipper.assembly.longform.CopyrightRiskDetector.detect", return_value=("CLEAN", 0.99)), \
+         patch("streamclipper.assembly.longform.TransformativeNarrator.synthesize_speech", side_effect=_mock_synthesize), \
+         patch.object(VideoClip, "write_videofile", spy_write):
+        res = render_long_video(test_config, synthetic_plan)
+
+    assert res["status"] == "rendered"
+    card_entries = [v for k, v in captured_clips.items() if "card" in k]
+    assert len(card_entries) > 0
+    for card_data in card_entries:
+        assert card_data["duration"] == 1.2
+        assert card_data["has_audio"] is True
+        # Unset SFX wraps in CompositeVideoClip with CrossFadeIn/CrossFadeOut
+        assert card_data["is_composite"] is True
+
+
+def test_T4_chapter_card_corrupt_sfx_fallback_and_no_loudnorm_blowout(
+    test_config: Config, synthetic_plan: TopicPlan, tmp_path: Path
+) -> None:
+    """Zero-byte or invalid transition SFX must gracefully fall back to BGM fade without raising,
+
+    and chapter card block must NOT be loudnorm-boosted to -14 LUFS.
+    """
+    zero_sfx = tmp_path / "corrupt_whoosh.wav"
+    zero_sfx.write_bytes(b"")  # Zero-byte invalid file
+    bgm_wav = tmp_path / "bgm_bed.wav"
+    _ensure_synthetic_wav(bgm_wav, duration_seconds=3.0)
+
+    _set_cfg(test_config, "longform.transition_sfx_path", str(zero_sfx))
+    _set_cfg(test_config, "transformation.bgm_path", str(bgm_wav))
+    _set_cfg(test_config, "transformation.bgm_volume_db", -26.0)
+    _set_cfg(test_config, "longform.card_seconds", 1.2)
+
+    normalized_inputs: list[str] = []
+    from streamclipper.assembly.narrator import TransformativeNarrator
+    orig_norm = TransformativeNarrator.normalize_audio
+
+    def spy_norm(self, in_v, out_v):
+        normalized_inputs.append(Path(in_v).name)
+        return orig_norm(self, in_v, out_v)
+
+    def mock_download(url, start, end, out_dir, **kwargs):
+        seg = out_dir / f"seg_{int(start)}.mp4"
+        return _create_synthetic_mp4(seg, duration=max(1.0, end - start), width=640, height=360)
+
+    save_plan(test_config, synthetic_plan)
+
+    with patch("streamclipper.assembly.longform.download_segment", side_effect=mock_download), \
+         patch("streamclipper.assembly.longform.CopyrightRiskDetector.detect", return_value=("CLEAN", 0.99)), \
+         patch("streamclipper.assembly.longform.TransformativeNarrator.synthesize_speech", side_effect=_mock_synthesize), \
+         patch.object(TransformativeNarrator, "normalize_audio", spy_norm):
+        res = render_long_video(test_config, synthetic_plan)
+
+    assert res["status"] == "rendered"
+    assert Path(res["video_path"]).is_file()
+
+    # The chapter card must NOT have been sent to normalize_audio (which would blow up -26dB audio to -14 LUFS)
+    assert not any("card" in name for name in normalized_inputs)
+    # Other blocks (cold open, point narration, evidence, outro) should still be normalized
+    assert len(normalized_inputs) >= 3
+
+
+# ---------------------------------------------------------------------------
+# Ticket T5: Packaging Upgrade (Frame-Scored Thumbnails & Title Variants)
+# ---------------------------------------------------------------------------
+
+def test_T5_thumbnail_frame_scoring_and_3_word_cap(tmp_path: Path) -> None:
+    """Verify generate_topic_thumbnail caps text to 3 words, positions in safe zone, and applies enhancement."""
+    import cv2
+    import numpy as np
+    from streamclipper.assembly.longform import _score_thumbnail_frame
+
+    # Verify frame scoring logic: sharp > blurry > black/washed-out
+    black = np.zeros((720, 1280, 3), dtype=np.uint8)
+    white = np.full((720, 1280, 3), 255, dtype=np.uint8)
+    sharp = np.random.randint(40, 210, (720, 1280, 3), dtype=np.uint8)
+    blurry = cv2.GaussianBlur(sharp, (31, 31), 0)
+
+    score_black = _score_thumbnail_frame(black)
+    score_white = _score_thumbnail_frame(white)
+    score_sharp = _score_thumbnail_frame(sharp)
+    score_blurry = _score_thumbnail_frame(blurry)
+
+    assert score_sharp > score_blurry > score_black
+    assert score_blurry > score_white
+
+    # Test thumbnail generation from synthetic video
+    frame_mp4 = _create_synthetic_mp4(tmp_path / "t5_frame.mp4", duration=3.0)
+    thumb_path = tmp_path / "t5_thumb.jpg"
+
+    out = generate_topic_thumbnail(
+        frame_mp4,
+        "ONE TWO THREE FOUR FIVE SIX",
+        thumb_path,
+        target_w=1280,
+        target_h=720,
+    )
+    assert out.is_file()
+    with Image.open(out) as img:
+        assert img.size == (1280, 720)
+
+
+def test_T5_title_variants_in_long_post(test_config: Config, synthetic_plan: TopicPlan) -> None:
+    """Verify write_long_post outputs 3-5 punchy curiosity-gap title variants under TITLE."""
+    from streamclipper.output.topic_post import generate_long_title_variants
+
+    variants = generate_long_title_variants(synthetic_plan)
+    assert 3 <= len(variants) <= 5
+    for v in variants:
+        assert len(v.strip()) > 0
+        assert v.lower() != (synthetic_plan.video_title or "").lower()
+
+    post_path = write_long_post(test_config, synthetic_plan, ["00:00 Intro", "00:15 The Vault"])
+    text = post_path.read_text(encoding="utf-8")
+
+    assert "TITLE" in text
+    assert "TITLE VARIANTS (A/B TEST)" in text
+    for v in variants:
+        assert f"- {v}" in text
+
+
+def test_T5_title_variants_in_post_writer(tmp_path: Path) -> None:
+    """Verify write_post_file outputs 3-5 punchy curiosity-gap title variants under TITLE."""
+    from streamclipper.models import ClipMetadata, StreamInfo, Platform
+    from streamclipper.output.post_writer import generate_clip_title_variants, write_post_file
+
+    stream = StreamInfo(
+        url="https://youtube.com/watch?v=abc",
+        title="Epic Stream",
+        platform=Platform.YOUTUBE,
+        streamer="SpeedRunner",
+        game="GTA 6",
+        duration_seconds=120.0,
+    )
+    meta = ClipMetadata(
+        hook_title="IMPOSSIBLE VAULT HEIST",
+        caption="Check out this crazy vault heist",
+        hashtags=["GTA6", "Gaming"],
+        streamer="SpeedRunner",
+        game="GTA 6",
+        source_url="https://youtube.com/watch?v=abc",
+        clip_start=10.0,
+        clip_end=25.0,
+        highlight_score=0.92,
+        moment_type="funny",
+        callout="Vault door blown wide open",
+    )
+
+    variants = generate_clip_title_variants(meta, stream)
+    assert 3 <= len(variants) <= 5
+    for v in variants:
+        assert len(v.strip()) > 0
+        assert v.lower() != meta.hook_title.lower()
+
+    video_path = tmp_path / "test_clip.mp4"
+    video_path.write_bytes(b"dummy")
+    post_file = write_post_file(video_path, meta, stream)
+
+    assert post_file.is_file()
+    text = post_file.read_text(encoding="utf-8")
+    assert "TITLE" in text
+    assert meta.hook_title in text
+    assert "TITLE VARIANTS (A/B TEST)" in text
+    for v in variants:
+        assert f"- {v}" in text
+

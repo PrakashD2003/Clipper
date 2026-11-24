@@ -19,6 +19,7 @@ from streamclipper.assembly.composer import (
     remap_timeline_for_beats,
     remap_timestamps,
 )
+from streamclipper.assembly.layout import Box
 from streamclipper.config import Config, HardwareProfile
 from streamclipper.models import FacecamRegion, WordTimestamp
 
@@ -203,6 +204,46 @@ class TestLayoutComposition:
         assert result_b.size == (1080, 1920)
         assert result_b._source_clip is clip
         assert result_b._source_clips == [clip]
+
+    def test_full_bleed_stacked_composition(self, tmp_path: Path):
+        cfg = _make_config(tmp_path, overrides={"video": {"game_fit": "full_bleed"}})
+        composer = VideoComposer(cfg)
+        assert composer.game_fit == "full_bleed"
+        clip = _make_dummy_clip(duration=3.0, size=(1920, 1080))
+        facecam = FacecamRegion(x=100, y=50, w=300, h=300)
+        comp = composer.compose(clip, facecam=facecam)
+        assert comp._layout.kind == "stacked"
+        assert comp._layout.facecam_box.h == 640
+        assert comp._layout.game_box.h == 1280
+        assert comp._layout.hook_band.y == 220
+        assert comp._layout.caption_band.y == 1120
+        # Exactly 2 layers (facecam + game), no redundant blur background needed because canvas is 100% covered
+        assert len(comp.clips) == 2
+
+    def test_full_bleed_game_layer_aspect_preserving_crop(self, tmp_path: Path):
+        cfg = _make_config(tmp_path, overrides={"video": {"game_fit": "full_bleed"}})
+        composer = VideoComposer(cfg)
+        clip = _make_dummy_clip(duration=1.0, size=(1920, 1080))
+        # 1080x1280 box (ratio 27:32 = 0.84375)
+        layer = composer._game_layer(clip, Box(0, 640, 1080, 1280))
+        assert layer.size == (1080, 1280)
+        assert layer.pos(0) == (0, 640)
+
+    def test_stacked_full_and_balanced_include_blur_background(self, tmp_path: Path):
+        clip = _make_dummy_clip(duration=1.0, size=(1920, 1080))
+        facecam = FacecamRegion(x=100, y=50, w=300, h=300)
+
+        # stacked + full
+        cfg_full = _make_config(tmp_path, overrides={"video": {"game_fit": "full"}})
+        comp_full = VideoComposer(cfg_full).compose(clip, facecam=facecam)
+        # 3 layers: blur background + facecam + game
+        assert len(comp_full.clips) == 3
+
+        # stacked + balanced
+        cfg_bal = _make_config(tmp_path, overrides={"video": {"game_fit": "balanced"}})
+        comp_bal = VideoComposer(cfg_bal).compose(clip, facecam=facecam)
+        # 3 layers: blur background + facecam + game
+        assert len(comp_bal.clips) == 3
 
 
 # ============================================================================
@@ -470,7 +511,7 @@ class TestRemapTimelineForBeats:
         assert r_words2[0].confidence == pytest.approx(0.95)
 
     def test_A5_spike_zoom_only_inside_game_box(self, tmp_path: Path):
-        """Spike zoom changes pixels inside game_box only; facecam and caption band stay locked."""
+        """Spike zoom changes pixels inside game_box only; facecam stays locked."""
         cfg = _make_config(
             tmp_path, overrides={"transformation": {"punch_in_zoom": 1.20}}
         )
@@ -492,14 +533,13 @@ class TestRemapTimelineForBeats:
         assert comp.duration == pytest.approx(6.0)
         assert comp._layout.kind == "stacked"
         gb = comp._layout.game_box
-        assert (gb.y, gb.h) == (660, 608)
+        assert (gb.y, gb.h) == (640, 1280)
 
         plain = composer.compose(clip, facecam=facecam)
         zoomed_frame = comp.get_frame(2.5)
         plain_frame = plain.get_frame(2.5)
-        # Outside game_box: identical
-        assert np.array_equal(zoomed_frame[:660], plain_frame[:660])
-        assert np.array_equal(zoomed_frame[1268:], plain_frame[1268:])
+        # Outside game_box (facecam area 0..640): identical
+        assert np.array_equal(zoomed_frame[:640], plain_frame[:640])
         # Inside game_box the punch-in occurred (the red/blue edge moved)
         assert not np.array_equal(
             zoomed_frame[gb.y : gb.y2, :], plain_frame[gb.y : gb.y2, :]

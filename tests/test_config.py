@@ -772,7 +772,7 @@ def test_G12_default_config_copies_are_identical() -> None:
 
 def test_F1_default_config_has_v3_keys_and_hardware_stays_auto() -> None:
     cfg = Config()
-    assert cfg.get("video.game_fit") == "full"
+    assert cfg.get("video.game_fit") == "full_bleed"
     assert cfg.get("facecam.min_detection_ratio") == 0.6
     assert cfg.get("facecam.max_center_jitter") == 0.05
     assert cfg.get("facecam.overrides") == {}
@@ -784,6 +784,10 @@ def test_F1_default_config_has_v3_keys_and_hardware_stays_auto() -> None:
     assert cfg.get("transformation.tts_engines") == ["chatterbox", "kokoro", "edge-tts"]
     assert cfg.get("transformation.target_lufs") == -14
     assert cfg.get("transformation.format_rotation") == ["narrative", "story", "breakdown"]
+    assert cfg.get("transformation.bgm_path") == ""
+    assert cfg.get("transformation.bgm_volume_db") == -26.0
+    assert cfg.get("longform.card_seconds") == 1.2
+    assert cfg.get("longform.transition_sfx_path") == ""
     assert cfg.get("discovery.blocked_streamers") == []
     raw = yaml.safe_load(
         (Path(config_mod.__file__).resolve().parent / "config.default.yaml").read_text("utf-8")
@@ -808,6 +812,11 @@ def test_F2_game_fit_and_top3_mode_validation(tmp_path: Path) -> None:
     assert cfg.get("video.game_fit") == "balanced"
     assert cfg.get("transformation.mode") == "top3"
 
+    ok_fb = tmp_path / "ok_fb.yaml"
+    ok_fb.write_text(yaml.safe_dump({"video": {"game_fit": "full_bleed"}}), encoding="utf-8")
+    cfg_fb = Config(user_config_path=ok_fb)
+    assert cfg_fb.get("video.game_fit") == "full_bleed"
+
 
 def test_repo_user_config_fallback_when_running_outside_repo(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -825,4 +834,193 @@ def test_repo_user_config_fallback_when_running_outside_repo(
 
     cfg = Config()
     assert cfg.get("transformation.elevenlabs_voice_id") == "fallback_voice_id"
+
+
+def test_T6_channels_block_defaults_and_topics_ledger_name() -> None:
+    cfg = Config()
+    assert cfg.get("channels.en.output_dir") == "./output/en"
+    assert cfg.get("channels.en.narration_language") == "english"
+    assert cfg.get("channels.en.ledger_name") == "topics_ledger_en.json"
+
+    assert cfg.get("channels.hi.output_dir") == "./output/hi"
+    assert cfg.get("channels.hi.narration_language") == "hinglish"
+    assert cfg.get("channels.hi.ledger_name") == "topics_ledger_hi.json"
+
+    assert cfg.get("topics.ledger_name") == "topics_ledger.json"
+
+
+def test_T6_apply_channel_profile_isolation_and_shared_resources() -> None:
+    cfg_base = Config()
+    default_out = cfg_base.get("general.output_dir")
+    default_lang = cfg_base.get("transformation.narration_language")
+    default_ledger = cfg_base.get("topics.ledger_name")
+    shared_cache = cfg_base.get("general.cache_dir")
+    shared_db = cfg_base.get("library.db_path")
+
+    # None preserves exact existing defaults
+    cfg_none = Config()
+    res = cfg_none.apply_channel_profile(None)
+    assert res is cfg_none
+    assert cfg_none.get("general.output_dir") == default_out
+    assert cfg_none.get("transformation.narration_language") == default_lang
+    assert cfg_none.get("topics.ledger_name") == default_ledger
+
+    # English channel profile
+    cfg_en = Config()
+    cfg_en.apply_channel_profile("en")
+    assert cfg_en.get("general.output_dir") == "./output/en"
+    assert cfg_en.get("transformation.narration_language") == "english"
+    assert cfg_en.get("topics.ledger_name") == "topics_ledger_en.json"
+    assert cfg_en.get("general.cache_dir") == shared_cache
+    assert cfg_en.get("library.db_path") == shared_db
+
+    # Hinglish channel profile
+    cfg_hi = Config()
+    cfg_hi.apply_channel_profile("hi")
+    assert cfg_hi.get("general.output_dir") == "./output/hi"
+    assert cfg_hi.get("transformation.narration_language") == "hinglish"
+    assert cfg_hi.get("topics.ledger_name") == "topics_ledger_hi.json"
+    assert cfg_hi.get("general.cache_dir") == shared_cache
+    assert cfg_hi.get("library.db_path") == shared_db
+
+    # Case insensitive
+    cfg_upper = Config()
+    cfg_upper.apply_channel_profile("EN")
+    assert cfg_upper.get("general.output_dir") == "./output/en"
+
+    # Invalid channel raises ValueError
+    with pytest.raises(ValueError, match="Unknown channel profile"):
+        Config().apply_channel_profile("nonexistent_channel")
+
+
+def test_T6_topic_ledger_channel_isolation(tmp_path: Path) -> None:
+    from streamclipper.topics.ledger import TopicLedger
+
+    cache = tmp_path / "shared_cache"
+    cache.mkdir()
+
+    cfg_en = Config()
+    cfg_en._data["general"]["cache_dir"] = str(cache)
+    cfg_en.apply_channel_profile("en")
+
+    cfg_hi = Config()
+    cfg_hi._data["general"]["cache_dir"] = str(cache)
+    cfg_hi.apply_channel_profile("hi")
+
+    ledger_en = TopicLedger(cfg_en)
+    ledger_hi = TopicLedger(cfg_hi)
+
+    assert ledger_en.path == cache / "topics_ledger_en.json"
+    assert ledger_hi.path == cache / "topics_ledger_hi.json"
+
+    # Record in English ledger
+    ledger_en.record(
+        topic_id="en-topic-1",
+        title="Top 5 English Moments",
+        game="GTA 6",
+        shape="numbered",
+    )
+
+    # Record in Hinglish ledger
+    ledger_hi.record(
+        topic_id="hi-topic-1",
+        title="Top 5 Hinglish Moments",
+        game="GTA 6",
+        shape="countdown",
+    )
+
+    # Verify separate files exist in the same shared cache dir
+    assert (cache / "topics_ledger_en.json").exists()
+    assert (cache / "topics_ledger_hi.json").exists()
+
+    en_entries = ledger_en._load()
+    hi_entries = ledger_hi._load()
+
+    assert len(en_entries) == 1
+    assert en_entries[0]["topic_id"] == "en-topic-1"
+    assert len(hi_entries) == 1
+    assert hi_entries[0]["topic_id"] == "hi-topic-1"
+
+    # Default ledger path
+    cfg_default = Config()
+    cfg_default._data["general"]["cache_dir"] = str(cache)
+    ledger_default = TopicLedger(cfg_default)
+    assert ledger_default.path == cache / "topics_ledger.json"
+
+
+def test_T6_cli_channel_option_applied() -> None:
+    from unittest.mock import patch, MagicMock
+    from click.testing import CliRunner
+    from streamclipper.cli import cli
+
+    runner = CliRunner()
+
+    # 1. clip with --channel hi
+    with patch("streamclipper.pipeline.Pipeline") as mock_pipeline:
+        mock_instance = MagicMock()
+        mock_instance.process_stream = MagicMock()
+        import asyncio
+        async def mock_process(*args: object, **kwargs: object) -> list:
+            return []
+        mock_instance.process_stream.side_effect = mock_process
+        mock_pipeline.return_value = mock_instance
+
+        res = runner.invoke(cli, ["clip", "https://youtube.com/watch?v=123", "--channel", "hi", "--no-interactive"])
+        assert res.exit_code == 0, f"res.output: {res.output}"
+        cfg_passed = mock_pipeline.call_args[0][0]
+        assert cfg_passed.get("general.output_dir") == "./output/hi"
+        assert cfg_passed.get("transformation.narration_language") == "hinglish"
+        assert cfg_passed.get("topics.ledger_name") == "topics_ledger_hi.json"
+
+    # 2. auto with --channel en
+    with patch("streamclipper.discovery.youtube.YouTubeDiscovery") as mock_disc:
+        mock_disc_inst = MagicMock()
+        mock_disc_inst.discover.return_value = []
+        mock_disc.return_value = mock_disc_inst
+
+        res = runner.invoke(cli, ["auto", "--channel", "en"])
+        assert res.exit_code == 0, f"res.output: {res.output}"
+        cfg_passed = mock_disc.call_args[0][0]
+        assert cfg_passed.get("general.output_dir") == "./output/en"
+        assert cfg_passed.get("transformation.narration_language") == "english"
+        assert cfg_passed.get("topics.ledger_name") == "topics_ledger_en.json"
+
+    # 3. topics plan with --channel hi
+    with patch("streamclipper.topics.planner.plan_topic_local") as mock_plan:
+        mock_plan_inst = MagicMock()
+        mock_plan_inst.problems = []
+        mock_plan_inst.plan_id = "test-plan"
+        mock_plan.return_value = mock_plan_inst
+        with patch("streamclipper.topics.planner.format_plan_outline", return_value="Outline"):
+            res = runner.invoke(cli, ["topics", "plan", "GTA 6", "Secret Vault", "--channel", "hi"])
+            assert res.exit_code == 0, f"res.output: {res.output}"
+            cfg_passed = mock_plan.call_args[0][0]
+            assert cfg_passed.get("general.output_dir") == "./output/hi"
+            assert cfg_passed.get("transformation.narration_language") == "hinglish"
+            assert cfg_passed.get("topics.ledger_name") == "topics_ledger_hi.json"
+
+    # 4. topics render with --channel en
+    with patch("streamclipper.topics.planner.load_plan") as mock_load, \
+         patch("streamclipper.assembly.longform.render_long_video", return_value={}) as mock_render:
+        mock_p = MagicMock()
+        mock_p.status = "approved"
+        mock_load.return_value = mock_p
+        res = runner.invoke(cli, ["topics", "render", "test-plan", "--channel", "en"])
+        assert res.exit_code == 0, f"res.output: {res.output}"
+        cfg_passed = mock_load.call_args[0][0]
+        assert cfg_passed.get("general.output_dir") == "./output/en"
+        assert cfg_passed.get("transformation.narration_language") == "english"
+
+    # 5. topics shorts with --channel hi
+    with patch("streamclipper.topics.planner.load_plan") as mock_load, \
+         patch("streamclipper.assembly.topic_shorts.render_topic_shorts", return_value={}) as mock_shorts:
+        mock_p = MagicMock()
+        mock_p.status = "approved"
+        mock_load.return_value = mock_p
+        res = runner.invoke(cli, ["topics", "shorts", "test-plan", "--channel", "hi"])
+        assert res.exit_code == 0, f"res.output: {res.output}"
+        cfg_passed = mock_load.call_args[0][0]
+        assert cfg_passed.get("general.output_dir") == "./output/hi"
+        assert cfg_passed.get("transformation.narration_language") == "hinglish"
+
 

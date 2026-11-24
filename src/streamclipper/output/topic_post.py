@@ -65,6 +65,122 @@ def _format_timestamp_url(url: str, start_seconds: float) -> str:
         return f"{clean_url}{sep}t={t_sec}s"
 
 
+def generate_long_title_variants(plan: TopicPlan) -> list[str]:
+    """Generate 3–5 punchy curiosity-gap title variants for YouTube Studio A/B testing."""
+    primary = (plan.video_title or plan.topic_title or "Topic Video").strip()
+    game = (plan.game or "GTA 6").strip()
+    topic = (plan.topic_title or primary).strip()
+    core_topic = topic
+    if core_topic.lower().startswith(game.lower()):
+        core_topic = core_topic[len(game):].lstrip(":- ").strip()
+    if not core_topic:
+        core_topic = primary
+
+    candidates: list[str] = []
+
+    # 1. High-intrigue curiosity statement
+    candidates.append(f"Rockstar Hid THIS in {game} (And Nobody Noticed)")
+
+    # 2. Reframed from thumbnail or core topic
+    if plan.thumbnail_text and plan.thumbnail_text.strip():
+        thumb_clean = plan.thumbnail_text.strip().title()
+        candidates.append(f"{thumb_clean}: What You Completely Missed")
+    else:
+        candidates.append(f"The Truth About {core_topic}")
+
+    # 3. Point-based or numbered breakdown
+    if plan.points and len(plan.points) >= 2:
+        candidates.append(f"{len(plan.points)} Insane Secrets Hidden Inside {game}")
+        first_pt = (getattr(plan.points[0], "heading", None) or getattr(plan.points[0], "title", None) or "").strip()
+        if first_pt:
+            candidates.append(f"Why {first_pt} Changes Everything in {game}")
+    else:
+        candidates.append(f"We Analyzed {core_topic} — Here's What We Found")
+
+    # 4. Curiosity gap questions
+    candidates.append(f"Did Everyone Miss This In {game}?")
+    candidates.append(f"The Craziest Detail In {game} That Explains Everything")
+
+    unique: list[str] = []
+    seen: set[str] = {primary.lower()}
+    for c in candidates:
+        c_clean = c.strip()
+        if c_clean and c_clean.lower() not in seen:
+            seen.add(c_clean.lower())
+            unique.append(c_clean)
+        if len(unique) == 5:
+            break
+
+    fallbacks = [
+        f"Wait... Did Rockstar Actually Put This in {game}?",
+        f"Everything You Need To Know About {core_topic}",
+        f"This Changes Everything We Know About {game}",
+    ]
+    for fb in fallbacks:
+        if len(unique) >= 3:
+            break
+        if fb.lower() not in seen:
+            seen.add(fb.lower())
+            unique.append(fb)
+
+    return unique[:5]
+
+
+def generate_short_title_variants(plan: TopicPlan, short: ShortPlan) -> list[str]:
+    """Generate 3–5 punchy curiosity-gap title variants for YouTube Shorts A/B testing."""
+    primary = (short.hook_title or plan.topic_title or "Topic Short").strip()
+    game = (plan.game or "GTA 6").strip()
+    callout = (short.callout or "").strip()
+
+    candidates: list[str] = []
+
+    # 1. Callout or hook reaction
+    if callout:
+        callout_clean = callout.rstrip(".!?- ")
+        candidates.append(f"Wait, did you see {callout_clean}?! 😱")
+    else:
+        candidates.append(f"Wait... did you catch this in {game}?!")
+
+    # 2. Disbelief angle
+    candidates.append(f"Rockstar really thought we wouldn't notice this in {game}...")
+
+    # 3. Shortened punchy hook
+    words = primary.split()
+    if len(words) > 3:
+        shortened = " ".join(words[:4]).rstrip(":-,.!")
+        candidates.append(f"{shortened} (Wait for the end!)")
+    else:
+        candidates.append(f"This {game} detail is INSANE (Watch till end)")
+
+    # 4. Curiosity questions
+    candidates.append(f"Is this the craziest secret in {game}?")
+    candidates.append(f"No way this is actually in {game} 💀")
+
+    unique: list[str] = []
+    seen: set[str] = {primary.lower()}
+    for c in candidates:
+        c_clean = c.strip()
+        if c_clean and c_clean.lower() not in seen:
+            seen.add(c_clean.lower())
+            unique.append(c_clean)
+        if len(unique) == 5:
+            break
+
+    fallbacks = [
+        f"Did you know about this in {game}?",
+        "Watch what happens at the end...",
+        f"The secret nobody talks about in {game}",
+    ]
+    for fb in fallbacks:
+        if len(unique) >= 3:
+            break
+        if fb.lower() not in seen:
+            seen.add(fb.lower())
+            unique.append(fb)
+
+    return unique[:5]
+
+
 def write_long_post(
     config: Config,
     plan: TopicPlan,
@@ -150,9 +266,13 @@ def write_long_post(
     if len(tags_list) < max_hashtags and "#gaming" not in seen_tags_lower:
         tags_list.append("#Gaming")
 
+    title_variants = generate_long_title_variants(plan)
     lines = [
         "TITLE",
         title,
+        "",
+        "TITLE VARIANTS (A/B TEST)",
+        *[f"- {v}" for v in title_variants],
         "",
         "DESCRIPTION",
         *desc_parts,
@@ -282,9 +402,13 @@ def write_short_post(
     if is_teaser:
         reminders.append("- Set YouTube's Related Video to the long video")
 
+    title_variants = generate_short_title_variants(plan, short)
     lines = [
         "TITLE",
         title,
+        "",
+        "TITLE VARIANTS (A/B TEST)",
+        *[f"- {v}" for v in title_variants],
         "",
         "DESCRIPTION",
         *desc_parts,

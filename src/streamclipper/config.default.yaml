@@ -94,7 +94,7 @@ video:
   fps: 30
   codec: "auto"             # auto (h264_nvenc if CUDA+NVENC else libx264) | h264_nvenc | libx264
   audio_codec: "aac"
-  game_fit: "full"          # full (16:9 game area) | balanced (4:3 centre crop, taller game area)
+  game_fit: "full_bleed"    # full_bleed (zero black bars, 1080x1280 bottom 66.7%) | full (16:9 game area) | balanced (4:3 centre crop, taller game area)
   blur_fill_game_scale: 1.15  # blur_fill layout: game width as a multiple of frame width (centre-cropped horizontally; 1.0-1.3). Higher = taller game, more cropped sides
   crf: 19                   # quality (libx264 -crf / h264_nvenc -cq, lower = better, 18-28 range; 19 = high quality)
   preset: "p4"              # nvenc preset (p1-p7, p4 = balanced) / libx264 preset (medium)
@@ -218,6 +218,8 @@ transformation:
   edge_tts_rate: "+10%"
   target_lufs: -14                     # Final loudness normalization target
   narration_gain_db: 0.0   # Clean unity gain (no artificial digital boost)
+  bgm_path: ""                         # path to an .mp3/.wav file or directory of tracks; "" = disabled
+  bgm_volume_db: -26.0                 # quiet background level under speech
   crossfade_seconds: 0.25              # Ramp at every duck transition
   callout_enabled: true                # Short spoken callout over the key moment
   persona: "high-energy gamer friend reacting live — hyped, funny, talks straight to the viewer"
@@ -268,6 +270,7 @@ topics:
   min_sources: 2
   max_evidence: 12
   similarity_threshold: 0.5
+  ledger_name: "topics_ledger.json"
   long_min_seconds: 480
   long_max_seconds: 600
   min_narration_ratio: 0.40
@@ -280,8 +283,20 @@ longform:
   width: 1920
   height: 1080
   fps: 30
-  card_seconds: 2.5
+  card_seconds: 1.2
   broll_volume: 0.12
   credit_seconds: 4.0
   kenburns_max_zoom: 1.08
+  transition_sfx_path: ""
+
+channels:
+  en:
+    output_dir: "./output/en"
+    narration_language: "english"
+    ledger_name: "topics_ledger_en.json"
+  hi:
+    output_dir: "./output/hi"
+    narration_language: "hinglish"
+    ledger_name: "topics_ledger_hi.json"
+
 

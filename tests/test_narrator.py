@@ -1045,3 +1045,151 @@ def test_trim_includes_smooth_afade_out(base_config: Config) -> None:
     # st = max(0.0, 2.25 - 0.15) = 2.10
     assert "atrim=0:2.25,asetpts=PTS-STARTPTS,afade=t=out:st=2.10:d=0.15" in fg
 
+
+# ---------------------------------------------------------------------------
+# Ticket T4 Tests: Narration Gain, BGM Bed, and SFX
+# ---------------------------------------------------------------------------
+
+
+def test_T4_narration_gain_db_filtergraph_emission(base_config: Config) -> None:
+    """Verify narration_gain_db applies ,volume=...dB before adelay when abs(gain) > 0.05."""
+    # 1. Zero gain (default): no volume filter on narrator tracks
+    n0 = TransformativeNarrator(base_config)
+    n0.narration_gain_db = 0.0
+    fg0, count0 = n0._build_ducking_filtergraph(2.0, 2.0, 10.0)
+    assert count0 == 3
+    assert ",volume=" not in fg0
+    assert "[1:a]aresample=48000,aformat=channel_layouts=stereo[a1]" in fg0
+    assert "[2:a]aresample=48000,aformat=channel_layouts=stereo,adelay=" in fg0
+
+    # 2. Negligible gain <= 0.05: skipped
+    n_small = TransformativeNarrator(base_config)
+    n_small.narration_gain_db = 0.04
+    fg_small, _ = n_small._build_ducking_filtergraph(2.0, 2.0, 10.0)
+    assert ",volume=" not in fg_small
+
+    # 3. Positive gain > 0.05: applied to all narrator tracks before adelay
+    n_pos = TransformativeNarrator(base_config)
+    n_pos.narration_gain_db = 2.5
+    fg_pos, _ = n_pos._build_ducking_filtergraph(2.0, 2.0, 10.0)
+    assert "[1:a]aresample=48000,aformat=channel_layouts=stereo,volume=+2.5dB[a1]" in fg_pos
+    assert "[2:a]aresample=48000,aformat=channel_layouts=stereo,volume=+2.5dB,adelay=8000|8000[a2]" in fg_pos
+
+    # 4. Negative gain: properly formatted
+    n_neg = TransformativeNarrator(base_config)
+    n_neg.narration_gain_db = -3.0
+    fg_neg, _ = n_neg._build_ducking_filtergraph(2.0, None, 10.0)
+    assert "[1:a]aresample=48000,aformat=channel_layouts=stereo,volume=-3.0dB[a1]" in fg_neg
+
+
+def test_T4_bgm_bed_filtergraph_emission(base_config: Config) -> None:
+    """Verify BGM bed filtergraph emission, volume ducking (-4dB during narration), and loop trim."""
+    n = TransformativeNarrator(base_config)
+    n.bgm_volume_db = -26.0
+
+    # 1. With narration windows (intro + outro): ducked an extra -4dB (-30.0dB) under windows
+    fg, count = n._build_ducking_filtergraph(2.0, 2.0, 10.0, has_bgm=True)
+    assert count == 4  # stream + intro + outro + bgm
+    assert "[3:a]aresample=48000,aformat=channel_layouts=stereo,atrim=0:10.00,asetpts=PTS-STARTPTS,volume='if(between(t,0,2.00)+between(t,8.00,10.00),-30.0dB,-26.0dB)':eval=frame[a3];" in fg
+    assert "[a0][a1][a2][a3]amix=inputs=4:duration=first:normalize=0[aout]" in fg
+
+    # 2. With duck_full=True: volume=-30.0dB for the whole clip
+    fg_full, count_full = n._build_ducking_filtergraph(2.0, 2.0, 10.0, duck_full=True, has_bgm=True)
+    assert count_full == 4
+    assert "[3:a]aresample=48000,aformat=channel_layouts=stereo,atrim=0:10.00,asetpts=PTS-STARTPTS,volume='-30.0dB':eval=frame[a3];" in fg_full
+
+    # 3. With no narration tracks: BGM plays at -26.0dB steady
+    fg_none, count_none = n._build_ducking_filtergraph(None, None, 10.0, has_bgm=True)
+    assert count_none == 2  # stream + bgm
+    assert "[1:a]aresample=48000,aformat=channel_layouts=stereo,atrim=0:10.00,asetpts=PTS-STARTPTS,volume='-26.0dB':eval=frame[a1];" in fg_none
+    assert "[a0][a1]amix=inputs=2:duration=first:normalize=0[aout]" in fg_none
+
+    # 4. Without BGM (has_bgm=False): no BGM track
+    fg_no_bgm, count_no_bgm = n._build_ducking_filtergraph(2.0, 2.0, 10.0, has_bgm=False)
+    assert count_no_bgm == 3
+    assert "atrim=0:10.00" not in fg_no_bgm
+
+
+def test_T4_resolve_bgm_file(base_config: Config, tmp_path: Path) -> None:
+    """Verify _resolve_bgm_file resolution from file, directory, or missing paths."""
+    n = TransformativeNarrator(base_config)
+
+    # Empty / unset
+    n.bgm_path = ""
+    assert n._resolve_bgm_file() is None
+
+    # Missing file
+    n.bgm_path = str(tmp_path / "nonexistent.mp3")
+    assert n._resolve_bgm_file() is None
+
+    # Existing single file (.wav)
+    wav_file = tmp_path / "track1.wav"
+    wav_file.write_bytes(b"RIFFdummydata")
+    n.bgm_path = str(wav_file)
+    assert n._resolve_bgm_file() == wav_file
+
+    # Single non-audio file (.txt) should be rejected
+    txt_file = tmp_path / "not_audio.txt"
+    txt_file.write_bytes(b"not an audio track")
+    n.bgm_path = str(txt_file)
+    assert n._resolve_bgm_file() is None
+
+    # Zero-byte audio file (.wav) should be rejected
+    zero_file = tmp_path / "zero.wav"
+    zero_file.write_bytes(b"")
+    n.bgm_path = str(zero_file)
+    assert n._resolve_bgm_file() is None
+
+    # Directory with multiple tracks (should pick first in sorted order)
+    bgm_dir = tmp_path / "bgm_tracks"
+    bgm_dir.mkdir()
+    (bgm_dir / "b_track.mp3").write_bytes(b"ID3dummy")
+    (bgm_dir / "a_track.wav").write_bytes(b"RIFFdummy")
+    (bgm_dir / "ignored.txt").write_bytes(b"not music")
+    n.bgm_path = str(bgm_dir)
+    assert n._resolve_bgm_file() == bgm_dir / "a_track.wav"
+
+    # Directory without any audio files
+    empty_dir = tmp_path / "empty_dir"
+    empty_dir.mkdir()
+    (empty_dir / "readme.txt").write_bytes(b"hello")
+    n.bgm_path = str(empty_dir)
+    assert n._resolve_bgm_file() is None
+
+
+def test_T4_mix_narration_with_ducking_bgm(base_config: Config, tmp_path: Path) -> None:
+    """Verify mix_narration_with_ducking includes -stream_loop when BGM is present and skips when missing."""
+    n = TransformativeNarrator(base_config)
+    vid = create_synthetic_mp4(tmp_path / "bgm_in.mp4", duration_sec=4.0)
+    intro_wav = create_synthetic_wav(tmp_path / "bgm_intro.wav", duration_sec=1.0)
+    bgm_wav = create_synthetic_wav(tmp_path / "bgm_bed.wav", duration_sec=2.0)
+    out_with_bgm = tmp_path / "out_bgm.mp4"
+
+    # 1. With existing BGM path
+    with patch("subprocess.run", wraps=subprocess.run) as spy:
+        n.bgm_path = str(bgm_wav)
+        res = n.mix_narration_with_ducking(
+            vid, out_with_bgm, intro_wav, None, clip_duration=4.0
+        )
+        assert res == out_with_bgm
+        assert out_with_bgm.is_file()
+        assert out_with_bgm.stat().st_size > 0
+
+    ff_cmd = [c.args[0] for c in spy.call_args_list if c.args[0][0] == "ffmpeg"][-1]
+    assert "-stream_loop" in ff_cmd
+    assert str(bgm_wav) in ff_cmd
+
+    # 2. With empty / missing BGM path: skips BGM silently
+    out_no_bgm = tmp_path / "out_no_bgm.mp4"
+    with patch("subprocess.run", wraps=subprocess.run) as spy_no:
+        n.bgm_path = ""
+        res_no = n.mix_narration_with_ducking(
+            vid, out_no_bgm, intro_wav, None, clip_duration=4.0
+        )
+        assert res_no == out_no_bgm
+        assert out_no_bgm.is_file()
+
+    ff_cmd_no = [c.args[0] for c in spy_no.call_args_list if c.args[0][0] == "ffmpeg"][-1]
+    assert "-stream_loop" not in ff_cmd_no
+
+

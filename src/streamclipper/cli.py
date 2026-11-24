@@ -85,6 +85,12 @@ def cli(ctx: click.Context, config: str | None, verbose: bool) -> None:
     default=False,
     help="Ignore cached pipeline state and re-run from scratch",
 )
+@click.option(
+    "--channel",
+    type=click.Choice(["en", "hi"], case_sensitive=False),
+    default=None,
+    help="Channel profile to use (en | hi)",
+)
 @click.pass_context
 def clip(
     ctx: click.Context,
@@ -98,6 +104,7 @@ def clip(
     voice_outro: Path | None,
     force: bool,
     voice_breakdown: Path | None = None,
+    channel: str | None = None,
 ) -> None:
     """Clip highlights from a stream URL.
 
@@ -106,6 +113,7 @@ def clip(
     from .pipeline import Pipeline
 
     config: Config = ctx.obj["config"]
+    config.apply_channel_profile(channel)
     normalized_mode = mode.lower() if mode else None
     if voice_intro is not None and not voice_intro.exists():
         console.print(f"[yellow]⚠ Intro voiceover file not found yet:[/] {voice_intro}")
@@ -187,6 +195,12 @@ def clip(
     default=False,
     help="Ignore cached pipeline state and re-run from scratch",
 )
+@click.option(
+    "--channel",
+    type=click.Choice(["en", "hi"], case_sensitive=False),
+    default=None,
+    help="Channel profile to use (en | hi)",
+)
 @click.pass_context
 def auto(
     ctx: click.Context,
@@ -198,6 +212,7 @@ def auto(
     voice_outro: Path | None,
     force: bool,
     voice_breakdown: Path | None = None,
+    channel: str | None = None,
 ) -> None:
     """Auto-discover top streams and clip them all.
 
@@ -207,6 +222,7 @@ def auto(
     from .pipeline import Pipeline
 
     config: Config = ctx.obj["config"]
+    config.apply_channel_profile(channel)
     target_game = game or str(config.get("discovery.default_game", "GTA 6"))
     normalized_mode = mode.lower() if mode else None
     if voice_intro is not None and not voice_intro.exists():
@@ -752,6 +768,12 @@ def topics_ledger(ctx: click.Context, game_arg: str | None, game: str | None) ->
 @click.argument("topic_arg", required=False, default=None, metavar="[TOPIC]")
 @click.option("--game", "-g", default=None, help="Game name")
 @click.option("--topic", "-t", default=None, help="Topic title or idea")
+@click.option(
+    "--channel",
+    type=click.Choice(["en", "hi"], case_sensitive=False),
+    default=None,
+    help="Channel profile to use (en | hi)",
+)
 @click.pass_context
 def topics_plan(
     ctx: click.Context,
@@ -759,6 +781,7 @@ def topics_plan(
     topic_arg: str | None,
     game: str | None,
     topic: str | None,
+    channel: str | None = None,
 ) -> None:
     """Draft a topic plan with outline, script, clips, and validation."""
     from streamclipper.topics.planner import format_plan_outline, plan_topic_local
@@ -771,6 +794,7 @@ def topics_plan(
         )
 
     cfg: Config = ctx.obj["config"]
+    cfg.apply_channel_profile(channel)
     with console.status(f"[bold cyan]Drafting topic plan for '{resolved_topic}'...[/bold cyan]"):
         plan = plan_topic_local(cfg, resolved_game, resolved_topic)
 
@@ -880,13 +904,20 @@ def topics_approve(ctx: click.Context, plan_id: str) -> None:
 
 @topics_group.command(name="render")
 @click.argument("plan_id")
+@click.option(
+    "--channel",
+    type=click.Choice(["en", "hi"], case_sensitive=False),
+    default=None,
+    help="Channel profile to use (en | hi)",
+)
 @click.pass_context
-def topics_render(ctx: click.Context, plan_id: str) -> None:
+def topics_render(ctx: click.Context, plan_id: str, channel: str | None = None) -> None:
     """Render a 16:9 long topic video from an approved topic plan."""
     from streamclipper.assembly.longform import render_long_video
     from streamclipper.topics.planner import load_plan
 
     cfg: Config = ctx.obj["config"]
+    cfg.apply_channel_profile(channel)
     plan = load_plan(cfg, plan_id)
     if not plan:
         console.print(f"[red]Topic plan '{plan_id}' not found.[/red]")
@@ -934,13 +965,20 @@ def topics_render(ctx: click.Context, plan_id: str) -> None:
     default=None,
     help="Render only a specific Short slot (teaser, short_a, short_b). Defaults to all.",
 )
+@click.option(
+    "--channel",
+    type=click.Choice(["en", "hi"], case_sensitive=False),
+    default=None,
+    help="Channel profile to use (en | hi)",
+)
 @click.pass_context
-def topics_shorts(ctx: click.Context, plan_id: str, slot: str | None) -> None:
+def topics_shorts(ctx: click.Context, plan_id: str, slot: str | None, channel: str | None = None) -> None:
     """Render 9:16 vertical topic Shorts (teaser and/or standalone) from an approved topic plan."""
     from streamclipper.assembly.topic_shorts import render_topic_shorts
     from streamclipper.topics.planner import load_plan
 
     cfg: Config = ctx.obj["config"]
+    cfg.apply_channel_profile(channel)
     plan = load_plan(cfg, plan_id)
     if not plan:
         console.print(f"[red]Topic plan '{plan_id}' not found.[/red]")

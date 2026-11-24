@@ -61,7 +61,11 @@ class TransformativeNarrator:
         self.edge_tts_rate: str = str(config.get("transformation.edge_tts_rate", "+10%") or "")
         self.target_lufs: float = float(config.get("transformation.target_lufs", -14) or -14)
         raw_gain = config.get("transformation.narration_gain_db", 0.0)
-        self.narration_gain_db: float = float(0.0 if raw_gain is None else raw_gain)
+        self.narration_gain_db: float = float(raw_gain if raw_gain not in (None, "") else 0.0)
+        raw_bgm = config.get("transformation.bgm_path", "")
+        self.bgm_path: str = str("" if raw_bgm is None else raw_bgm)
+        raw_bgm_vol = config.get("transformation.bgm_volume_db", -26.0)
+        self.bgm_volume_db: float = float(raw_bgm_vol if raw_bgm_vol not in (None, "") else -26.0)
         raw_xf = config.get("transformation.crossfade_seconds", 0.25)
         self.crossfade_seconds: float = float(0.25 if raw_xf is None else raw_xf)
         self.callout_enabled: bool = bool(config.get("transformation.callout_enabled", True))
@@ -121,6 +125,34 @@ class TransformativeNarrator:
                 torch.cuda.empty_cache()
         except Exception as exc:
             logger.debug("torch.cuda.empty_cache unavailable: %s", exc)
+
+    def _resolve_bgm_file(self, override_path: Path | str | None = None) -> Path | None:
+        """Resolve background music track from a file path or directory of tracks.
+
+        Returns None if unset, nonexistent, or containing no .mp3/.wav files.
+        """
+        target = override_path if override_path is not None else self.bgm_path
+        if not target:
+            return None
+        p = Path(target)
+        try:
+            if p.is_file() and p.stat().st_size > 0 and p.suffix.lower() in {".mp3", ".wav"}:
+                return p
+            if p.is_dir():
+                candidates = sorted(
+                    [
+                        f
+                        for f in p.iterdir()
+                        if f.is_file()
+                        and f.stat().st_size > 0
+                        and f.suffix.lower() in {".mp3", ".wav"}
+                    ]
+                )
+                if candidates:
+                    return candidates[0]
+        except OSError:
+            return None
+        return None
 
     def _elevenlabs_voice_for(self, language: str | None = None) -> str:
         lang = str(language or self.language or "english").strip().lower()
@@ -510,6 +542,8 @@ class TransformativeNarrator:
         callout_start: float | None = None,
         duck_full: bool = False,
         finalize: bool = False,
+        has_bgm: bool = False,
+        bgm: bool | None = None,
     ) -> tuple[str, int]:
         """Build dynamic FFmpeg filter_complex string and input count.
 
@@ -523,6 +557,9 @@ class TransformativeNarrator:
           clean studio-bypass voice tracks directly into amix, and a final broadcast
           ``loudnorm`` to ``target_lufs``. ``finalize=False`` keeps the plain step-ducked graph.
         """
+        if bgm is not None:
+            has_bgm = bgm
+
         has_intro = intro_dur is not None and float(intro_dur) > 0.01
         has_outro = outro_dur is not None and float(outro_dur) > 0.01
         has_breakdown = breakdown_dur is not None and float(breakdown_dur) > 0.01
@@ -531,7 +568,7 @@ class TransformativeNarrator:
         norm = "aresample=48000,aformat=channel_layouts=stereo"
         any_track = has_intro or has_outro or has_breakdown or has_callout
 
-        if not any_track:
+        if not any_track and not has_bgm:
             if not has_video_audio:
                 return (
                     f"anullsrc=channel_layout=stereo:sample_rate=48000,"
@@ -625,11 +662,15 @@ class TransformativeNarrator:
             vol_expr = self._ramped_duck_expr(windows, self.duck_volume, self.crossfade_seconds)
         else:
             vol_expr = (
-                "if("
-                + "+".join(
-                    f"between(t,{0 if a == 0 else format(a, '.2f')},{b:.2f})" for a, b in windows
+                (
+                    "if("
+                    + "+".join(
+                        f"between(t,{0 if a == 0 else format(a, '.2f')},{b:.2f})" for a, b in windows
+                    )
+                    + f",{duck_vol_str},1.0)"
                 )
-                + f",{duck_vol_str},1.0)"
+                if windows
+                else "1.0"
             )
 
         base_branch = (
@@ -638,15 +679,37 @@ class TransformativeNarrator:
             else silent_base
         )
 
-        # Clean studio bypass: ElevenLabs audio is already mastered at ~-14.9 LUFS.
-        # Do not apply dynamic loudnorm or volume boost to individual voice tracks.
-        narr_tail = ""
+        narr_tail = (
+            f",volume={self.narration_gain_db:+.1f}dB"
+            if abs(self.narration_gain_db) > 0.05
+            else ""
+        )
         parts: list[str] = []
         for idx, (trim, delay_ms, _w) in enumerate(tracks, start=1):
             delay = f",adelay={delay_ms}|{delay_ms}" if delay_ms is not None else ""
             parts.append(f"[{idx}:a]{norm}{trim}{narr_tail}{delay}[a{idx}];")
 
-        total_inputs = 1 + len(tracks)
+        if has_bgm:
+            bgm_idx = 1 + len(tracks)
+            bgm_duck_db = f"{self.bgm_volume_db - 4.0:+.1f}dB"
+            bgm_base_db = f"{self.bgm_volume_db:+.1f}dB"
+            if duck_full:
+                bgm_vol_expr = bgm_duck_db
+            elif windows:
+                cond = "+".join(
+                    f"between(t,{0 if a == 0 else format(a, '.2f')},{b:.2f})"
+                    for a, b in windows
+                )
+                bgm_vol_expr = f"if({cond},{bgm_duck_db},{bgm_base_db})"
+            else:
+                bgm_vol_expr = bgm_base_db
+
+            parts.append(
+                f"[{bgm_idx}:a]{norm},atrim=0:{clip_dur:.2f},asetpts=PTS-STARTPTS,"
+                f"volume='{bgm_vol_expr}':eval=frame[a{bgm_idx}];"
+            )
+
+        total_inputs = 1 + len(tracks) + (1 if has_bgm else 0)
         amix_in = "".join(f"[a{i}]" for i in range(total_inputs))
         out_label = "[amixed]" if finalize else "[aout]"
         mix_part = f"{amix_in}amix=inputs={total_inputs}:duration=first:normalize=0{out_label}"
@@ -724,11 +787,14 @@ class TransformativeNarrator:
         callout_wav: Path | None = None,
         callout_start: float | None = None,
         duck_full: bool = False,
+        bgm_path: Path | str | None = None,
     ) -> Path:
         """Mix intro/outro/breakdown/callout voiceovers over ducked stream audio (-c:v copy).
 
         The callout is voiced over the moment (stream ducked under it only); ``duck_full``
         keeps the stream ducked for the whole clip. The mix ends in loudnorm to ``target_lufs``.
+        Optional background music bed (``transformation.bgm_path``) is looped seamlessly,
+        trimmed to clip duration, and mixed into amix ducked an extra -4dB during narration.
         """
         input_video = Path(input_video)
         output_video = Path(output_video)
@@ -738,7 +804,10 @@ class TransformativeNarrator:
             replay_start_time if replay_start_time is not None else replay_start
         )
 
-        # Bypass mixing if disabled, raw mode, or no voiceover exists
+        bgm_file = self._resolve_bgm_file(bgm_path)
+        has_bgm = bgm_file is not None
+
+        # Bypass mixing if disabled, raw mode, or no voiceover/BGM exists
         if not self.enabled or str(self.mode or "").strip().lower() == "raw":
             return self._bypass_copy(input_video, output_video)
 
@@ -753,6 +822,7 @@ class TransformativeNarrator:
             and outro_dur is None
             and breakdown_dur is None
             and callout_dur is None
+            and not has_bgm
         ):
             return self._bypass_copy(input_video, output_video)
 
@@ -773,6 +843,7 @@ class TransformativeNarrator:
             callout_start=callout_start,
             duck_full=duck_full,
             finalize=True,
+            has_bgm=has_bgm,
         )
 
         same_file = False
@@ -796,6 +867,8 @@ class TransformativeNarrator:
             cmd.extend(["-i", str(outro_wav)])
         if callout_dur is not None:
             cmd.extend(["-i", str(callout_wav)])
+        if has_bgm:
+            cmd.extend(["-stream_loop", "-1", "-i", str(bgm_file)])
 
         cmd.extend(
             [

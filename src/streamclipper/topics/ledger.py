@@ -52,7 +52,8 @@ class TopicLedger:
             cache_dir = Path(self.config.get("general.cache_dir", "./.cache"))
             self.threshold = float(self.config.get("topics.similarity_threshold", 0.5))
 
-        self.path = cache_dir / "topics_ledger.json"
+        ledger_name = self.config.get("topics.ledger_name", "topics_ledger.json") or "topics_ledger.json"
+        self.path = cache_dir / ledger_name
 
     def _load(self) -> list[dict[str, Any]]:
         """Load entries from the ledger file safely."""

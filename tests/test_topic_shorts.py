@@ -271,7 +271,12 @@ def test_T6_credit_tag_and_hook_present_in_ass(tmp_path: Path) -> None:
     assert "PlayResY: 1920" in content
     assert "Style: HookTitle" in content
     assert "Style: CreditTag" in content
-    assert "Style: NarrationCard" in content
+    assert "Style: Hormozi" in content
+
+    # Verify Hormozi style safe zone (MarginV >= 460) so captions never collide with Shorts bottom UI
+    hormozi_style_line = next(line for line in content.splitlines() if line.startswith("Style: Hormozi"))
+    margin_v = int(hormozi_style_line.split(",")[-2])
+    assert margin_v >= 460
 
     # Hook must be present and persistent across full duration (0:00:00.00 to 0:00:30.00)
     assert hook_title in content
@@ -282,10 +287,15 @@ def test_T6_credit_tag_and_hook_present_in_ass(tmp_path: Path) -> None:
     assert "Rockstar Games" in content
     assert "CreditTag" in content
 
-    # Narration cards must be present
-    assert "Watch this secret." in content
-    assert "Right here!" in content
-    assert "Subscribe for more." in content
+    # Active-word highlighted Hormozi narration captions must be present
+    assert "Hormozi" in content
+    assert "\\c&H" in content
+    assert "WATCH" in content
+    assert "SECRET." in content
+    assert "RIGHT" in content
+    assert "HERE!" in content
+    assert "SUBSCRIBE" in content
+    assert "MORE." in content
 
 
 def test_T6_post_files_teaser_vs_standalone(test_config: Config, synthetic_plan: TopicPlan, tmp_path: Path) -> None:
@@ -709,5 +719,206 @@ def test_T1_shorts_hashtag_stopwords_and_capping(test_config: Config, tmp_path: 
             # 5. Must be strictly capped at 4
             assert len(tags) == 4
             break
+
+
+def test_T2_calculate_clip_trims_preserves_off_center_peak_offset_near_end() -> None:
+    """_calculate_clip_trims anchors around peak_offset near the end rather than midpoint."""
+    from streamclipper.assembly.topic_shorts import _calculate_clip_trims
+
+    clip = EvidenceClip(url="http://example.com/vid", start=0.0, end=20.0)
+    path = Path("fake_path.mp4")
+    # Total raw = 20.0s, allocate around target_min=10.0, target_max=10.0 so alloc_dur=10.0
+    clips_with_durations = [(clip, path, 20.0)]
+    peak_offsets = [18.0]  # Near the end of the 20s clip
+
+    res = _calculate_clip_trims(
+        clips_with_durations,
+        target_min=10.0,
+        target_max=10.0,
+        min_clip_dur=4.0,
+        peak_offsets=peak_offsets,
+    )
+    assert len(res) == 1
+    c, p, t_start, t_end = res[0]
+    assert t_end == 20.0
+    assert t_start == 10.0
+    # Peak at 18.0 must be inside [t_start, t_end]
+    assert t_start <= 18.0 <= t_end
+    # Midpoint trimming would have produced [5.0, 15.0], completely missing 18.0!
+    assert t_start != 5.0
+
+
+def test_T2_calculate_clip_trims_preserves_off_center_peak_offset_near_start() -> None:
+    """_calculate_clip_trims anchors around peak_offset near start rather than midpoint."""
+    from streamclipper.assembly.topic_shorts import _calculate_clip_trims
+
+    clip = EvidenceClip(url="http://example.com/vid", start=0.0, end=20.0)
+    path = Path("fake_path.mp4")
+    clips_with_durations = [(clip, path, 20.0)]
+    peak_offsets = [2.0]  # Near the start of the 20s clip
+
+    res = _calculate_clip_trims(
+        clips_with_durations,
+        target_min=10.0,
+        target_max=10.0,
+        min_clip_dur=4.0,
+        peak_offsets=peak_offsets,
+    )
+    assert len(res) == 1
+    c, p, t_start, t_end = res[0]
+    assert t_start == 0.0
+    assert t_end == 10.0
+    assert t_start <= 2.0 <= t_end
+
+
+def test_T2_calculate_clip_trims_backward_compatibility() -> None:
+    """_calculate_clip_trims falls back to midpoint trim when peak_offsets is None or invalid."""
+    from streamclipper.assembly.topic_shorts import _calculate_clip_trims
+
+    clip = EvidenceClip(url="http://example.com/vid", start=0.0, end=20.0)
+    path = Path("fake_path.mp4")
+    clips_with_durations = [(clip, path, 20.0)]
+
+    # None passed
+    res_none = _calculate_clip_trims(
+        clips_with_durations,
+        target_min=10.0,
+        target_max=10.0,
+        min_clip_dur=4.0,
+    )
+    _, _, s1, e1 = res_none[0]
+    assert s1 == 5.0
+    assert e1 == 15.0
+
+    # Invalid peak_offset (<= 0 or >= raw_dur)
+    res_invalid = _calculate_clip_trims(
+        clips_with_durations,
+        target_min=10.0,
+        target_max=10.0,
+        min_clip_dur=4.0,
+        peak_offsets=[-5.0],
+    )
+    _, _, s2, e2 = res_invalid[0]
+    assert s2 == 5.0
+    assert e2 == 15.0
+
+    # Boolean peak_offset (True or False) must NOT be treated as 1.0s
+    res_bool = _calculate_clip_trims(
+        clips_with_durations,
+        target_min=10.0,
+        target_max=10.0,
+        min_clip_dur=4.0,
+        peak_offsets=[True],
+    )
+    _, _, s3, e3 = res_bool[0]
+    assert s3 == 5.0
+    assert e3 == 15.0
+
+
+def test_T3_shorts_ass_hormozi_active_word_highlighting_and_safe_zone(tmp_path: Path) -> None:
+    """Verify Ticket T3: active-word highlighted Hormozi captions in safe zone (MarginV >= 460)."""
+    ass_file = tmp_path / "t3_test.ass"
+    narration_windows = [
+        (0.0, 4.0, "Check this hidden garage entrance"),
+        (10.0, 13.5, "Nobody ever noticed this detail"),
+    ]
+    credit_windows = [(0.0, 4.0, "@GamerChannel")]
+
+    _build_shorts_ass(
+        ass_path=ass_file,
+        hook_title="SECRET LOCATION DISCOVERED",
+        credit_windows=credit_windows,
+        narration_windows=narration_windows,
+        total_duration=15.0,
+    )
+
+    assert ass_file.is_file()
+    text = ass_file.read_text(encoding="utf-8")
+
+    # Safe zone verification: MarginV >= 460 strictly above bottom 420px YouTube Shorts UI
+    hormozi_line = next(l for l in text.splitlines() if l.startswith("Style: Hormozi"))
+    fields = hormozi_line.split(",")
+    margin_v = int(fields[-2])
+    alignment = int(fields[-5])
+    assert alignment == 2  # Bottom-centered
+    assert margin_v >= 460  # At or above bottom 460px safe threshold
+
+    # HookTitle safe zone verification: MarginV == 220 below top status bar
+    hook_line = next(l for l in text.splitlines() if l.startswith("Style: HookTitle"))
+    assert int(hook_line.split(",")[-2]) == 220
+
+    # Word-highlighting animation verification
+    events = [l for l in text.splitlines() if l.startswith("Dialogue:") and "Hormozi" in l]
+    assert len(events) >= 2
+    # Ensure active word animation tags exist
+    assert any(r"\fscx" in ev for ev in events)
+    assert any(r"\c&H" in ev for ev in events)
+
+    # All narration tokens uppercase and present in dialogue lines
+    dialogue_full_text = " ".join(events)
+    for word in ["CHECK", "HIDDEN", "GARAGE", "NOBODY", "DETAIL"]:
+        assert word in dialogue_full_text
+
+
+def test_T3_shorts_ass_empty_narration_and_safe_zone_floor(tmp_path: Path, test_config: Config) -> None:
+    """_build_shorts_ass handles empty narration cleanly and enforces MarginV >= 460 floor."""
+    # Custom config with low position_y_ratio (e.g. 0.85 -> would be MarginV=288 without floor)
+    test_config._data.setdefault("captions", {})["position_y_ratio"] = 0.85
+
+    ass_file = tmp_path / "t3_empty_test.ass"
+    _build_shorts_ass(
+        ass_path=ass_file,
+        hook_title="EMPTY NARRATION SHORT",
+        credit_windows=[(0.0, 5.0, "@SoloChannel")],
+        narration_windows=[],
+        total_duration=10.0,
+        font_name="Impact",
+        config=test_config,
+    )
+    assert ass_file.is_file()
+    text = ass_file.read_text(encoding="utf-8")
+
+    # MarginV must still be >= 460
+    hormozi_line = next(l for l in text.splitlines() if l.startswith("Style: Hormozi"))
+    margin_v = int(hormozi_line.split(",")[-2])
+    assert margin_v >= 460
+
+    # No Hormozi dialogue lines emitted when narration is empty
+    dialogues = [l for l in text.splitlines() if l.startswith("Dialogue:")]
+    assert not any("Hormozi" in l for l in dialogues)
+    # HookTitle and CreditTag should still be present
+    assert any("HookTitle" in l for l in dialogues)
+    assert any("CreditTag" in l for l in dialogues)
+
+
+# ---------------------------------------------------------------------------
+# Ticket T5: Multi-Variant Titles in Short Posts
+# ---------------------------------------------------------------------------
+
+def test_T5_title_variants_in_short_post(test_config: Config, synthetic_plan: TopicPlan, tmp_path: Path) -> None:
+    """Verify write_short_post outputs 3-5 punchy curiosity-gap title variants under TITLE."""
+    from streamclipper.output.topic_post import generate_short_title_variants, write_short_post
+
+    short = synthetic_plan.shorts[0]
+    variants = generate_short_title_variants(synthetic_plan, short)
+    assert 3 <= len(variants) <= 5
+    for v in variants:
+        assert len(v.strip()) > 0
+        assert v.lower() != (short.hook_title or "").lower()
+
+    short_mp4 = tmp_path / "short_t5.mp4"
+    short_mp4.write_bytes(b"dummy")
+    post_file = write_short_post(test_config, synthetic_plan, short, short_mp4)
+
+    assert post_file.is_file()
+    text = post_file.read_text(encoding="utf-8")
+    assert "TITLE" in text
+    assert short.hook_title in text
+    assert "TITLE VARIANTS (A/B TEST)" in text
+    for v in variants:
+        assert f"- {v}" in text
+
+
+
 
 

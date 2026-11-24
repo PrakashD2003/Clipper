@@ -10,8 +10,9 @@ import subprocess
 from typing import Any
 import wave
 
+import cv2
 import numpy as np
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 
 from streamclipper.analysis.copyright_risk import CopyrightRiskDetector
 from streamclipper.assembly.captions import (
@@ -234,6 +235,37 @@ def _fit_to_canvas(clip: Any, target_w: int = 1920, target_h: int = 1080) -> Any
 # Thumbnail Generator (1280x720)
 # ---------------------------------------------------------------------------
 
+def _score_thumbnail_frame(frame: np.ndarray) -> float:
+    """Score a frame by Laplacian sharpness and brightness balance (penalize near-black/washed-out)."""
+    try:
+        if frame.ndim == 3:
+            if frame.shape[2] >= 3:
+                gray = cv2.cvtColor(frame[:, :, :3], cv2.COLOR_RGB2GRAY)
+            else:
+                gray = frame[:, :, 0]
+        elif frame.ndim == 2:
+            gray = frame
+        else:
+            return 0.0
+
+        # Laplacian sharpness variance: cv2.Laplacian(..., cv2.CV_64F).var()
+        lap_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
+        # Brightness balance: penalize near-black (< 35) or washed-out (> 220) frames
+        mean_lum = float(np.mean(gray))
+        dist = abs(mean_lum - 128.0) / 128.0
+        brightness_factor = max(0.01, 1.0 - (dist ** 2))
+        if mean_lum < 35.0:
+            brightness_factor *= max(0.01, mean_lum / 35.0)
+        elif mean_lum > 220.0:
+            brightness_factor *= max(0.01, (255.0 - mean_lum) / 35.0)
+
+        return lap_var * brightness_factor + (brightness_factor * 1e-4)
+    except Exception as exc:
+        logger.debug("Frame scoring failed: %s", exc)
+        return 0.0
+
+
 def generate_topic_thumbnail(
     frame_clip_path: Path,
     thumbnail_text: str,
@@ -241,62 +273,98 @@ def generate_topic_thumbnail(
     target_w: int = 1280,
     target_h: int = 720,
 ) -> Path:
-    """Generate 1280x720 topic video thumbnail with darkened gradient and bold text."""
+    """Generate 1280x720 topic video thumbnail with frame-scored selection, pop enhancements, and safe zone text."""
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    base_img: Image.Image | None = None
+    sample_ratios = [0.20, 0.35, 0.50, 0.65, 0.80]
+    candidate_frames: list[np.ndarray] = []
+
+    # 1. Sample 5 evenly spaced frames (20%, 35%, 50%, 65%, 80%) across the clip
     try:
         from moviepy import VideoFileClip
         with VideoFileClip(str(frame_clip_path)) as vclip:
             dur = float(vclip.duration or 1.0)
-            midpoint = max(0.01, min(dur / 2.0, max(0.01, dur - 0.05)))
-            raw_frame = vclip.get_frame(midpoint)
-            base_img = Image.fromarray(raw_frame)
+            for r in sample_ratios:
+                t = max(0.01, min(dur * r, max(0.01, dur - 0.05)))
+                raw_frame = vclip.get_frame(t)
+                if raw_frame is not None:
+                    candidate_frames.append(raw_frame)
     except Exception as exc:
-        logger.debug("Failed to extract frame for thumbnail via MoviePy: %s; trying FFmpeg", exc)
-        temp_thumb = output_path.with_name(f"{output_path.stem}_raw.jpg")
+        logger.debug("Failed to extract frames for thumbnail via MoviePy: %s; trying cv2/FFmpeg", exc)
+
+    if not candidate_frames:
         try:
-            cmd = [
-                "ffmpeg", "-y",
-                "-ss", "0.5",
-                "-i", str(frame_clip_path.resolve()),
-                "-vframes", "1",
-                "-f", "image2",
-                str(temp_thumb.resolve()),
-            ]
-            subprocess.run(cmd, check=True, capture_output=True)
-            if temp_thumb.is_file():
-                base_img = Image.open(temp_thumb).convert("RGB")
-                temp_thumb.unlink(missing_ok=True)
+            cap = cv2.VideoCapture(str(frame_clip_path.resolve()))
+            if cap.isOpened():
+                total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+                if total_frames > 0:
+                    for r in sample_ratios:
+                        target_f = max(0, min(int(total_frames * r), total_frames - 1))
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, target_f)
+                        ret, bgr = cap.read()
+                        if ret and bgr is not None:
+                            candidate_frames.append(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+                cap.release()
         except Exception:
             pass
 
-    if base_img is None:
-        base_img = Image.new("RGB", (target_w, target_h), (15, 20, 30))
-    else:
-        base_img = base_img.resize((target_w, target_h), Image.Resampling.LANCZOS)
+    if not candidate_frames:
+        temp_thumb = output_path.with_name(f"{output_path.stem}_raw.jpg")
+        try:
+            dur = _probe_duration(frame_clip_path) or 1.0
+            for r in sample_ratios:
+                t_seek = max(0.01, min(dur * r, max(0.01, dur - 0.05)))
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-ss", f"{t_seek:.2f}",
+                    "-i", str(frame_clip_path.resolve()),
+                    "-vframes", "1",
+                    "-f", "image2",
+                    str(temp_thumb.resolve()),
+                ]
+                subprocess.run(cmd, check=True, capture_output=True)
+                if temp_thumb.is_file():
+                    img = Image.open(temp_thumb).convert("RGB")
+                    candidate_frames.append(np.array(img))
+                    temp_thumb.unlink(missing_ok=True)
+        except Exception:
+            pass
 
-    # Darkened gradient: linear top-to-bottom darkening
+    # Score each frame by Laplacian sharpness + brightness balance and pick the best
+    if candidate_frames:
+        best_frame = max(candidate_frames, key=_score_thumbnail_frame)
+        base_img = Image.fromarray(best_frame)
+    else:
+        base_img = Image.new("RGB", (target_w, target_h), (15, 20, 30))
+
+    base_img = base_img.resize((target_w, target_h), Image.Resampling.LANCZOS)
+
+    # 2. Apply subtle Pillow ImageEnhance.Contrast(1.18) and ImageEnhance.Color(1.22) so frame pops at mobile size
+    base_img = ImageEnhance.Contrast(base_img).enhance(1.18)
+    base_img = ImageEnhance.Color(base_img).enhance(1.22)
+
+    # Gradient: subtle darkening across the top safe zone to make text pop
     base_rgba = base_img.convert("RGBA")
     gradient = Image.new("RGBA", (target_w, target_h), (0, 0, 0, 0))
     g_draw = ImageDraw.Draw(gradient)
-    for y in range(target_h):
-        alpha = int(40 + (160 * (y / target_h)))
-        g_draw.line([(0, y), (target_w, y)], fill=(0, 0, 0, alpha))
+    for y_coord in range(target_h):
+        factor = max(0.0, 1.0 - (y_coord / (target_h * 0.55)))
+        alpha = int(30 + 130 * factor)
+        g_draw.line([(0, y_coord), (target_w, y_coord)], fill=(0, 0, 0, alpha))
     base_rgba.alpha_composite(gradient)
     final_img = base_rgba.convert("RGB")
 
-    # Render thumbnail text (<= 5 words, very large bold, yellow/white with black stroke)
+    # 3. Cap thumbnail text to 3 words max, render in bold yellow with thick black stroke + subtle drop shadow
     draw = ImageDraw.Draw(final_img)
     words = thumbnail_text.strip().split()
-    if len(words) > 5:
-        words = words[:5]
+    if len(words) > 3:
+        words = words[:3]
     display_text = " ".join(words).upper()
 
-    # Dynamic font scaling to guarantee text fits within target_w - 120
-    max_text_w = target_w - 120
-    font_size = 86
+    # Dynamic font scaling to guarantee text fits within target_w - 140
+    max_text_w = target_w - 140
+    font_size = 92
     font = None
     while font_size >= 36:
         try:
@@ -322,20 +390,32 @@ def generate_topic_thumbnail(
     tw = bbox[2] - bbox[0]
     th = bbox[3] - bbox[1]
 
-    # Position text in bottom center with padding
-    x = max(20, (target_w - tw) // 2)
-    y = max(20, target_h - th - 80)
-    stroke_w = max(3, font_size // 12)
+    # Upper-center safe zone (never bottom-right where YouTube puts the duration badge)
+    x = max(60, (target_w - tw) // 2)
+    y = 60
+    stroke_w = max(4, font_size // 11)
+    shadow_offset = max(4, font_size // 14)
 
-    # Yellow text with thick black stroke
-    draw.text(
-        (x, y),
-        display_text,
-        font=font,
-        fill=(255, 235, 59),
-        stroke_width=stroke_w,
-        stroke_fill=(0, 0, 0),
-    )
+    if display_text:
+        # Subtle drop shadow
+        draw.text(
+            (x + shadow_offset, y + shadow_offset),
+            display_text,
+            font=font,
+            fill=(0, 0, 0),
+            stroke_width=stroke_w + 1,
+            stroke_fill=(0, 0, 0),
+        )
+
+        # Bold yellow text with thick black stroke
+        draw.text(
+            (x, y),
+            display_text,
+            font=font,
+            fill=(255, 235, 59),
+            stroke_width=stroke_w,
+            stroke_fill=(0, 0, 0),
+        )
 
     final_img.save(str(output_path), "JPEG", quality=92)
     logger.info("Saved topic thumbnail to %s (1280x720)", output_path)
@@ -616,20 +696,28 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None) 
             CompositeVideoClip,
             ImageClip,
             VideoFileClip,
+            afx,
             concatenate_videoclips,
         )
+        from moviepy.video.fx import CrossFadeIn, CrossFadeOut
         import moviepy.video.fx as vfx
 
         target_w = int(config.get("longform.width", 1920) or 1920)
         target_h = int(config.get("longform.height", 1080) or 1080)
         fps = int(config.get("longform.fps", 30) or 30)
-        card_seconds = float(config.get("longform.card_seconds", 2.5) or 2.5)
+        card_seconds = float(config.get("longform.card_seconds", 1.2) or 1.2)
+        transition_sfx_path = str(config.get("longform.transition_sfx_path", "") or "")
         broll_volume = float(config.get("longform.broll_volume", 0.12) or 0.12)
         credit_seconds = float(config.get("longform.credit_seconds", 4.0) or 4.0)
         kenburns_max_zoom = float(config.get("longform.kenburns_max_zoom", 1.08) or 1.08)
 
         # Helper to render a block to ultrafast MP4 and apply per-block loudnorm
-        def render_block_mp4(clip: Any, name: str, clips_to_close: list[Any] | None = None) -> Path:
+        def render_block_mp4(
+            clip: Any,
+            name: str,
+            clips_to_close: list[Any] | None = None,
+            normalize: bool = True,
+        ) -> Path:
             raw_out = temp_dir / f"{name}_raw.mp4"
             final_out = temp_dir / f"{name}.mp4"
             try:
@@ -648,14 +736,35 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None) 
                     for c in clips_to_close:
                         _close_clip_handles(c)
 
-            # Per-block loudnorm using narrator helper
-            try:
-                narrator.normalize_audio(raw_out, final_out)
-                raw_out.unlink(missing_ok=True)
-            except Exception as exc:
-                logger.warning("Per-block audio normalization fallback for %s: %s", name, exc)
-                if raw_out.is_file():
-                    shutil.move(str(raw_out), str(final_out))
+            if normalize:
+                # Per-block loudnorm using narrator helper
+                try:
+                    narrator.normalize_audio(raw_out, final_out)
+                    raw_out.unlink(missing_ok=True)
+                except Exception as exc:
+                    logger.warning("Per-block audio normalization fallback for %s: %s", name, exc)
+                    if raw_out.is_file():
+                        shutil.move(str(raw_out), str(final_out))
+            else:
+                # Non-normalized block (e.g. chapter card): ensure 48kHz stereo AAC stream format
+                # without destroying the configured -12dB SFX or -26dB BGM bed level via loudnorm
+                try:
+                    cmd = [
+                        "ffmpeg", "-y", "-i", str(raw_out),
+                        "-map", "0:v", "-map", "0:a:0",
+                        "-af", "aresample=48000,aformat=channel_layouts=stereo",
+                        "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+                        str(final_out),
+                    ]
+                    subprocess.run(
+                        cmd, check=True, capture_output=True, text=True,
+                        encoding="utf-8", errors="replace",
+                    )
+                    raw_out.unlink(missing_ok=True)
+                except Exception as exc:
+                    logger.warning("Audio remux fallback for non-normalized %s: %s", name, exc)
+                    if raw_out.is_file():
+                        shutil.move(str(raw_out), str(final_out))
 
             return final_out
 
@@ -752,10 +861,67 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None) 
                 card_img = _render_chapter_card_image(
                     pt_clip_path, pt.heading, target_w=target_w, target_h=target_h
                 )
-                card_clip = ImageClip(np.array(card_img)).with_duration(card_seconds)
-                card_clip = card_clip.with_audio(AudioClip(lambda t: [0.0, 0.0], duration=card_seconds))
+                card_img_clip = ImageClip(np.array(card_img)).with_duration(card_seconds)
+                clips_to_close: list[Any] = [card_img_clip]
 
-                card_file = render_block_mp4(card_clip, f"block_{block_counter:02d}_pt_{pt.index}_card")
+                sfx_attached = False
+                sfx_file = Path(transition_sfx_path) if transition_sfx_path.strip() else None
+                if sfx_file is not None and sfx_file.is_file() and sfx_file.stat().st_size > 0:
+                    try:
+                        sfx_clip = AudioFileClip(str(sfx_file))
+                        clips_to_close.append(sfx_clip)
+                        sfx_vol = 10.0 ** (-12.0 / 20.0)
+                        sfx_audio = sfx_clip.with_volume_scaled(sfx_vol)
+                        clips_to_close.append(sfx_audio)
+                        if sfx_audio.duration and sfx_audio.duration > card_seconds:
+                            sfx_audio = sfx_audio.subclipped(0, card_seconds)
+                            clips_to_close.append(sfx_audio)
+                        card_clip = card_img_clip.with_audio(sfx_audio)
+                        sfx_attached = True
+                    except Exception as sfx_exc:
+                        logger.warning(
+                            "Failed loading transition SFX '%s': %s; falling back to visual fade and BGM bed",
+                            sfx_file,
+                            sfx_exc,
+                        )
+
+                if not sfx_attached:
+                    card_faded = card_img_clip.with_effects([CrossFadeIn(0.2), CrossFadeOut(0.2)])
+                    card_clip = CompositeVideoClip([card_faded], size=(target_w, target_h)).with_duration(card_seconds)
+                    clips_to_close.extend([card_faded, card_clip])
+
+                    bgm_file = narrator._resolve_bgm_file() if hasattr(narrator, "_resolve_bgm_file") else None
+                    bgm_attached = False
+                    if bgm_file is not None and Path(bgm_file).is_file():
+                        try:
+                            bgm_clip = AudioFileClip(str(bgm_file))
+                            clips_to_close.append(bgm_clip)
+                            raw_bgm_vol = getattr(narrator, "bgm_volume_db", None)
+                            if raw_bgm_vol is None:
+                                raw_bgm_vol = float(config.get("transformation.bgm_volume_db", -26.0) or -26.0)
+                            bgm_vol = 10.0 ** (float(raw_bgm_vol) / 20.0)
+                            bgm_audio = bgm_clip.with_volume_scaled(bgm_vol)
+                            clips_to_close.append(bgm_audio)
+                            if bgm_audio.duration and bgm_audio.duration < card_seconds:
+                                bgm_audio = bgm_audio.with_effects([afx.AudioLoop(duration=card_seconds)])
+                                clips_to_close.append(bgm_audio)
+                            elif bgm_audio.duration and bgm_audio.duration > card_seconds:
+                                bgm_audio = bgm_audio.subclipped(0, card_seconds)
+                                clips_to_close.append(bgm_audio)
+                            card_clip = card_clip.with_audio(bgm_audio)
+                            bgm_attached = True
+                        except Exception as bgm_exc:
+                            logger.warning("Failed loading BGM bed '%s' for chapter card: %s", bgm_file, bgm_exc)
+
+                    if not bgm_attached:
+                        card_clip = card_clip.with_audio(AudioClip(lambda t: [0.0, 0.0], duration=card_seconds))
+
+                card_file = render_block_mp4(
+                    card_clip,
+                    f"block_{block_counter:02d}_pt_{pt.index}_card",
+                    clips_to_close=clips_to_close,
+                    normalize=False,
+                )
                 card_actual_dur = _probe_duration(card_file) or card_seconds
 
                 chap_pt.block_files.append(card_file)

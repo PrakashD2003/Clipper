@@ -215,6 +215,18 @@ def _get_config() -> Config:
     return Config()
 
 
+def _config_for_channel(channel: str | None = None) -> Config:
+    """Load the active StreamClipper configuration and apply channel profile overrides when provided.
+
+    Raises:
+        ValueError: If channel is not None/empty and is not a recognized channel profile.
+    """
+    config = _get_config()
+    if channel is not None and str(channel).strip():
+        config.apply_channel_profile(str(channel).strip())
+    return config
+
+
 def _get_cache(config: Config) -> StepCache:
     """Create a StepCache backed by the configured cache directory."""
     return StepCache(config)
@@ -1963,6 +1975,7 @@ async def _prepare_render_clip(
     narration_strict: bool = True,
     language: str = "",
     caption_style: str = "auto",
+    channel: str | None = None,
 ) -> str | dict[str, Any]:
     """Validate render_clip inputs synchronously; return an error JSON string or a prepared dict."""
     clean_url = url.strip() if isinstance(url, str) else ""
@@ -2051,7 +2064,10 @@ async def _prepare_render_clip(
             f"Invalid language: {language!r}. Supported languages: 'english', 'hinglish'."
         )
 
-    config = _get_config()
+    try:
+        config = _config_for_channel(channel)
+    except ValueError as val_exc:
+        return _json_error(str(val_exc))
     cache = _get_cache(config)
     pipeline = Pipeline(config)
     scorer = _MCPScorer(config)
@@ -2367,6 +2383,7 @@ async def render_clip(
     language: str = "",
     wait: bool = False,
     caption_style: str = "auto",
+    channel: str | None = None,
 ) -> str:
     """Render a single highlight into a final 9:16 vertical clip (mode: auto | narrative | story | breakdown | raw) with YPP transformative narration, zoom, and ASS captions+chat ticker.
 
@@ -2397,6 +2414,8 @@ async def render_clip(
 
     language: optional narration language override ("english" or "hinglish"). Defaults to ""
     (auto-detected from streamer or transcript).
+
+    channel: Optional channel profile ('en' or 'hi') to isolate output_dir, narration_language, and topic ledger while sharing the source library.
     """
     try:
         prepared = await _prepare_render_clip(
@@ -2427,6 +2446,7 @@ async def render_clip(
             narration_strict=narration_strict,
             language=language,
             caption_style=caption_style,
+            channel=channel,
         )
         if isinstance(prepared, str):
             return prepared
@@ -2560,14 +2580,17 @@ _JOB_TASKS: dict[str, asyncio.Task[Any]] = {}
 
 
 async def _prepare_render_all_selected(
-    url: str, mode: str | None, force: bool
+    url: str, mode: str | None, force: bool, channel: str | None = None
 ) -> str | dict[str, Any]:
     """Validate render_all_selected inputs; return an error JSON string or a prepared dict."""
     clean_url = url.strip() if isinstance(url, str) else ""
     if not clean_url:
         return _json_error("Invalid URL: url must be a non-empty string.")
 
-    config = _get_config()
+    try:
+        config = _config_for_channel(channel)
+    except ValueError as val_exc:
+        return _json_error(str(val_exc))
     cache = _get_cache(config)
     pipeline = Pipeline(config)
     base_mode = pipeline._resolve_base_mode(mode)
@@ -2706,7 +2729,11 @@ async def _execute_render_all_selected(
 
 @mcp.tool()
 async def render_all_selected(
-    url: str, mode: str | None = None, force: bool = False, wait: bool = False
+    url: str,
+    mode: str | None = None,
+    force: bool = False,
+    wait: bool = False,
+    channel: str | None = None,
 ) -> str:
     """Render all selected highlights stored in StepCache for a stream (asynchronous).
 
@@ -2722,9 +2749,11 @@ async def render_all_selected(
     submit_highlights); "breakdown" is only honoured for moment_type clutch, fail,
     graphics_detail or analysis (others are rendered as narrative/story and reported in
     `adjusted`).
+
+    channel: Optional channel profile ('en' or 'hi') to isolate output_dir, narration_language, and topic ledger while sharing the source library.
     """
     try:
-        prepared = await _prepare_render_all_selected(url, mode, force)
+        prepared = await _prepare_render_all_selected(url, mode, force, channel=channel)
         if isinstance(prepared, str):
             return prepared
         if wait or prepared["clips_planned"] == 0:
@@ -3281,11 +3310,13 @@ def list_library(game: str = "") -> str:
 
 
 @mcp.tool()
-def get_topic_material(game: str, max_terms: int = 40) -> str:
+def get_topic_material(game: str, max_terms: int = 40, channel: str | None = None) -> str:
     """Extract salient library evidence, terms, snippets, and stats for proposing topic videos.
 
     MCP host LLMs should review the returned terms and snippets, brainstorm 5-10 specific,
     curiosity-driven topics with search keywords, and submit them to record_topic_candidates.
+
+    channel: Optional channel profile ('en' or 'hi') to isolate output_dir, narration_language, and topic ledger while sharing the source library.
     """
     try:
         clean_game = str(game or "").strip()
@@ -3293,7 +3324,7 @@ def get_topic_material(game: str, max_terms: int = 40) -> str:
             return _json_error("game is required")
 
         from ..topics.discover import topic_material
-        config = Config()
+        config = _config_for_channel(channel)
         mat = topic_material(config, clean_game, max_terms=max_terms)
         mat["instructions"] = (
             "Propose 5–10 specific topic videos this evidence supports. "
@@ -3306,12 +3337,14 @@ def get_topic_material(game: str, max_terms: int = 40) -> str:
 
 
 @mcp.tool()
-def record_topic_candidates(game: str, candidates: Any) -> str:
+def record_topic_candidates(game: str, candidates: Any, channel: str | None = None) -> str:
     """Evaluate topic proposals against the library and ledger.
 
     Accepts a JSON string or list of {title, keywords} candidate objects.
     Evaluates evidence viability and flags topics already made or too similar to ledger entries.
     Returns evaluated TopicCandidate objects (viable first, already-made flagged).
+
+    channel: Optional channel profile ('en' or 'hi') to isolate output_dir, narration_language, and topic ledger while sharing the source library.
     """
     try:
         clean_game = str(game or "").strip()
@@ -3335,7 +3368,7 @@ def record_topic_candidates(game: str, candidates: Any) -> str:
         if not isinstance(parsed, list):
             return _json_error("candidates must be a list of objects with 'title' and 'keywords'")
 
-        config = Config()
+        config = _config_for_channel(channel)
         evaluated = []
         seen_slugs = set()
 
@@ -3379,10 +3412,12 @@ def record_topic_candidates(game: str, candidates: Any) -> str:
 
 
 @mcp.tool()
-def suggest_topics(game: str, limit: int = 10) -> str:
+def suggest_topics(game: str, limit: int = 10, channel: str | None = None) -> str:
     """Propose viable topic video ideas using the local Ollama LLM or library term clusters.
 
     Returns evaluated TopicCandidate objects with evidence counts, source diversity, and ledger flags.
+
+    channel: Optional channel profile ('en' or 'hi') to isolate output_dir, narration_language, and topic ledger while sharing the source library.
     """
     try:
         clean_game = str(game or "").strip()
@@ -3390,7 +3425,7 @@ def suggest_topics(game: str, limit: int = 10) -> str:
             return _json_error("game is required")
 
         from ..topics.discover import suggest_topics_local
-        config = Config()
+        config = _config_for_channel(channel)
         candidates = suggest_topics_local(config, clean_game, limit=limit)
         return _json_ok({
             "game": clean_game,
@@ -3403,7 +3438,7 @@ def suggest_topics(game: str, limit: int = 10) -> str:
 
 
 @mcp.tool()
-def start_topic_plan(game: str, topic: str) -> str:
+def start_topic_plan(game: str, topic: str, channel: str | None = None) -> str:
     """Start planning a topic video by generating writing material, shape, and instructions.
 
     Returns the assembled planning_material, a fresh plan_id, and prompt instructions.
@@ -3411,6 +3446,8 @@ def start_topic_plan(game: str, topic: str) -> str:
     using submit_topic_plan.
     NOTE: The client must show the complete outline, script, and clip list to the user and call
     approve_topic_plan only after the user explicitly agrees.
+
+    channel: Optional channel profile ('en' or 'hi') to isolate output_dir, narration_language, and topic ledger while sharing the source library.
     """
     try:
         clean_game = str(game or "").strip()
@@ -3424,7 +3461,7 @@ def start_topic_plan(game: str, topic: str) -> str:
         from ..topics.discover import _slugify
         from ..topics.planner import planning_material
 
-        config = Config()
+        config = _config_for_channel(channel)
         material = planning_material(config, clean_game, clean_topic)
         fresh_plan_id = f"plan_{_slugify(clean_topic)}_{uuid.uuid4().hex[:8]}"
 
@@ -3449,7 +3486,7 @@ def start_topic_plan(game: str, topic: str) -> str:
 
 
 @mcp.tool()
-def submit_topic_plan(plan_json: str | dict[str, Any]) -> str:
+def submit_topic_plan(plan_json: str | dict[str, Any], channel: str | None = None) -> str:
     """Submit a drafted TopicPlan JSON for validation, clip normalization, and persistence.
 
     Normalizes evidence clips from the library (fills url/channel/kind) and validates against
@@ -3459,6 +3496,8 @@ def submit_topic_plan(plan_json: str | dict[str, Any]) -> str:
     If valid, saves the plan and returns a human-readable outline.
     NOTE: The user approves the plan: the client must show the outline, script, and clip list to the
     user and call approve_topic_plan only after the user agrees.
+
+    channel: Optional channel profile ('en' or 'hi') to isolate output_dir, narration_language, and topic ledger while sharing the source library.
     """
     try:
         if isinstance(plan_json, str):
@@ -3476,7 +3515,7 @@ def submit_topic_plan(plan_json: str | dict[str, Any]) -> str:
         from ..topics.planner import format_plan_outline, normalize_plan_clips, save_plan
         from ..topics.validate import validate_plan
 
-        config = Config()
+        config = _config_for_channel(channel)
         plan = TopicPlan.from_dict(data)
         normalize_plan_clips(config, plan)
         if not plan.created_at:
@@ -3502,11 +3541,13 @@ def submit_topic_plan(plan_json: str | dict[str, Any]) -> str:
 
 
 @mcp.tool()
-def get_topic_plan(plan_id: str) -> str:
+def get_topic_plan(plan_id: str, channel: str | None = None) -> str:
     """Retrieve an existing TopicPlan by plan_id with validation status and human-readable outline.
 
     NOTE: The user approves the plan: the client must show the outline, script, and clip list to the
     user and call approve_topic_plan only after the user agrees.
+
+    channel: Optional channel profile ('en' or 'hi') to isolate output_dir, narration_language, and topic ledger while sharing the source library.
     """
     try:
         clean_id = str(plan_id or "").strip()
@@ -3516,7 +3557,7 @@ def get_topic_plan(plan_id: str) -> str:
         from ..topics.planner import format_plan_outline, load_plan
         from ..topics.validate import validate_plan
 
-        config = Config()
+        config = _config_for_channel(channel)
         plan = load_plan(config, clean_id)
         if plan is None:
             return _json_error(f"Topic plan '{clean_id}' not found.")
@@ -3536,12 +3577,14 @@ def get_topic_plan(plan_id: str) -> str:
 
 
 @mcp.tool()
-def update_topic_plan(plan_id: str, patch_json: str | dict[str, Any]) -> str:
+def update_topic_plan(plan_id: str, patch_json: str | dict[str, Any], channel: str | None = None) -> str:
     """Apply a JSON merge-patch to a draft TopicPlan, re-validate, and persist updates.
 
     Modifications are rejected if the plan has already been approved.
     NOTE: The user approves the plan: the client must show the outline, script, and clip list to the
     user and call approve_topic_plan only after the user agrees.
+
+    channel: Optional channel profile ('en' or 'hi') to isolate output_dir, narration_language, and topic ledger while sharing the source library.
     """
     try:
         clean_id = str(plan_id or "").strip()
@@ -3568,7 +3611,7 @@ def update_topic_plan(plan_id: str, patch_json: str | dict[str, Any]) -> str:
         )
         from ..topics.validate import validate_plan
 
-        config = Config()
+        config = _config_for_channel(channel)
         plan = load_plan(config, clean_id)
         if plan is None:
             return _json_error(f"Topic plan '{clean_id}' not found.")
@@ -3597,12 +3640,14 @@ def update_topic_plan(plan_id: str, patch_json: str | dict[str, Any]) -> str:
 
 
 @mcp.tool()
-def approve_topic_plan(plan_id: str) -> str:
+def approve_topic_plan(plan_id: str, channel: str | None = None) -> str:
     """Approve a fully-valid TopicPlan and record it in the ledger to lock it for rendering.
 
     Approve is refused if validate_plan reports any problems.
     NOTE: The user approves the plan: the client must show the outline, script, and clip list to the
     user and call approve_topic_plan only after the user explicitly agrees.
+
+    channel: Optional channel profile ('en' or 'hi') to isolate output_dir, narration_language, and topic ledger while sharing the source library.
     """
     try:
         clean_id = str(plan_id or "").strip()
@@ -3614,7 +3659,7 @@ def approve_topic_plan(plan_id: str) -> str:
         from ..topics.planner import load_plan, save_plan
         from ..topics.validate import validate_plan
 
-        config = Config()
+        config = _config_for_channel(channel)
         plan = load_plan(config, clean_id)
         if plan is None:
             return _json_error(f"Topic plan '{clean_id}' not found.")
@@ -3647,7 +3692,7 @@ def approve_topic_plan(plan_id: str) -> str:
 
 
 @mcp.tool()
-def render_topic_video(plan_id: str) -> str:
+def render_topic_video(plan_id: str, channel: str | None = None) -> str:
     """Render a 16:9 long topic video from an approved TopicPlan as a background job.
 
     Downloads evidence clips, validates copyright against cached stream audio, records YouTube
@@ -3655,6 +3700,8 @@ def render_topic_video(plan_id: str) -> str:
     and writes long_post.txt.
     Refuses unapproved plans synchronously. Clients poll get_render_status(job_id).
     NOTE: The user approves the plan: this tool must be called only after approve_topic_plan has succeeded.
+
+    channel: Optional channel profile ('en' or 'hi') to isolate output_dir, narration_language, and topic ledger while sharing the source library.
     """
     try:
         clean_id = str(plan_id or "").strip()
@@ -3662,7 +3709,7 @@ def render_topic_video(plan_id: str) -> str:
             return _json_error("plan_id is required")
 
         from ..topics.planner import load_plan
-        config = Config()
+        config = _config_for_channel(channel)
         plan = load_plan(config, clean_id)
         if plan is None:
             return _json_error(f"Topic plan '{clean_id}' not found.")
@@ -3692,7 +3739,7 @@ def render_topic_video(plan_id: str) -> str:
 
 
 @mcp.tool()
-def render_topic_shorts(plan_id: str, slots: str = "") -> str:
+def render_topic_shorts(plan_id: str, slots: str = "", channel: str | None = None) -> str:
     """Render 9:16 vertical topic Shorts (teaser and/or standalone) from an approved TopicPlan as a background job.
 
     Composes evidence clips in blur_fill layout, applies persistent hook title, @channel credit tags,
@@ -3700,6 +3747,8 @@ def render_topic_shorts(plan_id: str, slots: str = "") -> str:
     burns ASS captions, normalizes loudness (-14 LUFS), and writes post files.
     Refuses unapproved plans synchronously. Clients poll get_render_status(job_id).
     NOTE: The user approves the plan: this tool must be called only after approve_topic_plan has succeeded.
+
+    channel: Optional channel profile ('en' or 'hi') to isolate output_dir, narration_language, and topic ledger while sharing the source library.
     """
     try:
         clean_id = str(plan_id or "").strip()
@@ -3707,7 +3756,7 @@ def render_topic_shorts(plan_id: str, slots: str = "") -> str:
             return _json_error("plan_id is required")
 
         from ..topics.planner import load_plan
-        config = Config()
+        config = _config_for_channel(channel)
         plan = load_plan(config, clean_id)
         if plan is None:
             return _json_error(f"Topic plan '{clean_id}' not found.")
