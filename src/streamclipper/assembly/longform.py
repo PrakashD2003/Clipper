@@ -585,7 +585,7 @@ def _build_longform_ass(
 # Core Renderer: render_long_video
 # ---------------------------------------------------------------------------
 
-def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None) -> dict[str, Any]:
+def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None, draft: bool = False) -> dict[str, Any]:
     """Render a 16:9 long topic video from an approved TopicPlan.
 
     Performs:
@@ -600,13 +600,23 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None) 
     8. Chapters file (>= 3 chapters, first 00:00, each >= 10s), thumbnail (1280x720), and post file.
     9. Updates plan.outputs and saves plan.
     """
-    if plan.status != "approved":
+    if plan.status not in ("approved", "rendered"):
         raise ValueError(
             f"Topic plan '{plan.plan_id}' must be 'approved' to render (current: '{plan.status}')."
         )
 
-    plan.status = "rendering"
-    save_plan(config, plan)
+    render_config = config
+    if draft:
+        render_config = copy.copy(config)
+        render_config._data = copy.deepcopy(config._data)
+        render_config._data.setdefault("transformation", {})["tts_engine"] = "edge-tts"
+        render_config._data.setdefault("transformation", {})["hinglish_tts_engines"] = ["edge-tts"]
+    config = render_config
+
+    orig_status = plan.status
+    if not draft:
+        plan.status = "rendering"
+        save_plan(config, plan)
 
     out_dir = plan_dir(config, plan.game, plan.topic_id)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -789,6 +799,7 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None) 
                     audio_codec="aac",
                     preset="ultrafast",
                     ffmpeg_params=["-crf", "18"],
+                    temp_audiofile_path=str(temp_dir),
                     logger=None,
                 )
             finally:
@@ -1210,6 +1221,7 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None) 
                     audio_codec="aac",
                     preset="ultrafast",
                     ffmpeg_params=["-crf", "18"],
+                    temp_audiofile_path=str(temp_dir),
                     logger=None,
                 )
                 _close_clip_handles(comp)
@@ -1304,7 +1316,8 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None) 
         if progress and hasattr(progress, "stage"):
             progress.stage("final encode")
 
-        final_long_mp4 = out_dir / "long.mp4"
+        video_filename = "long_draft.mp4" if draft else "long.mp4"
+        final_long_mp4 = out_dir / video_filename
         codec = str(config.get("video.codec", "libx264") or "libx264").strip().lower()
         crf = int(config.get("video.crf", 23) or 23)
 
@@ -1359,11 +1372,20 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None) 
             )
 
         # 12. Update plan outputs and save
-        plan.outputs["long"] = str(final_long_mp4.resolve())
+        out_key = "long_draft" if draft else "long"
+        plan.outputs[out_key] = str(final_long_mp4.resolve())
         plan.outputs["chapters"] = str(chapters_file.resolve())
         plan.outputs["thumbnail"] = str(thumbnail_file.resolve())
-        plan.outputs["long_post"] = str(post_file.resolve())
-        plan.status = "rendered"
+        if draft:
+            draft_post = out_dir / "long_draft_post.txt"
+            if post_file.is_file():
+                import shutil
+                shutil.copy2(post_file, draft_post)
+                post_file = draft_post
+            plan.outputs["long_draft_post"] = str(post_file.resolve())
+        else:
+            plan.outputs["long_post"] = str(post_file.resolve())
+            plan.status = "rendered"
         save_plan(config, plan)
 
         return {
@@ -1377,9 +1399,11 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None) 
             "post_path": str(post_file.resolve()),
             "outputs": plan.outputs,
             "clips": [{"video_path": str(final_long_mp4.resolve()), "plan_id": plan.plan_id}],
+            "draft": draft,
         }
 
     except Exception:
-        plan.status = "failed"
-        save_plan(config, plan)
+        if not draft:
+            plan.status = "failed"
+            save_plan(config, plan)
         raise

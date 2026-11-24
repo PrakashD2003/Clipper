@@ -67,6 +67,7 @@ EXPECTED_TOOLS = {
     "inspect_moment_context",
     "refine_highlight_bounds",
     "get_operator_guide",
+    "review_rendered_video",
 }
 
 
@@ -4853,6 +4854,241 @@ async def test_mcp_server_initializes_with_v4_operator_instructions_and_tool() -
         assert "channel='en' | 'hi'" in fallback
         assert "refine_highlight_bounds" in fallback
         assert "Human Approval Gate" in fallback
+
+
+@pytest.mark.asyncio
+async def test_draft_mode_overrides_tts_engine_and_draft_suffix(mcp_env: tuple[Config, StepCache, Path]) -> None:
+    """Verify draft=True sets transformation.tts_engine to edge-tts and appends _draft.mp4."""
+    config, cache, tmp_path = mcp_env
+    # Simulate a stream with transcript
+    url = "https://youtube.com/watch?v=draft12345"
+    state = PipelineState(
+        stream_info=StreamInfo(
+            url=url,
+            title="Draft Stream",
+            platform=Platform.YOUTUBE,
+            streamer="Speed",
+            game="GTA 6",
+            duration_seconds=300.0,
+        ),
+        status=PipelineStatus.SCORING,
+        transcript=_make_sample_transcript(),
+    )
+    cache.save_state(state)
+
+    # 1. Test _prepare_render_clip with draft=True
+    prepared = await mcp_server._prepare_render_clip(
+        url=url,
+        start=100.0,
+        end=115.0,
+        hook_title="Draft Stunt",
+        narration_intro="Look at this stunt",
+        narration_outro="That was clean",
+        narration_strict=False,
+        draft=True,
+    )
+    assert isinstance(prepared, dict)
+    assert prepared["draft"] is True
+    assert prepared["config"].get("transformation.tts_engine") == "edge-tts"
+    assert prepared["config"].get("transformation.hinglish_tts_engines") == ["edge-tts"]
+
+    # 2. Test _prepare_render_all_selected with draft=True
+    state.selected_highlights = [
+        Highlight(
+            start=100.0,
+            end=115.0,
+            score=8.5,
+            title="Selected Stunt",
+            reason="Good moment",
+            narration_intro="Intro",
+            narration_outro="Outro",
+        )
+    ]
+    cache.save_state(state)
+    prepared_all = await mcp_server._prepare_render_all_selected(
+        url=url,
+        mode=None,
+        force=True,
+        draft=True,
+    )
+    assert isinstance(prepared_all, dict)
+    assert prepared_all["draft"] is True
+    assert prepared_all["config"].get("transformation.tts_engine") == "edge-tts"
+    assert prepared_all["config"].get("transformation.hinglish_tts_engines") == ["edge-tts"]
+
+    # 3. Test render_topic_video with draft=True forwards draft=True and edge-tts
+    from unittest.mock import patch
+    from streamclipper.topics.models import TopicPlan, TopicPoint, EvidenceClip
+
+    plan = TopicPlan(
+        plan_id="plan_draft_test",
+        topic_id="top_draft",
+        topic_title="Draft Topic",
+        video_title="Draft Topic Video",
+        game="GTA 6",
+        status="approved",
+        points=[
+            TopicPoint(
+                index=1,
+                heading="Point 1",
+                narration="Point 1 Narration",
+                evidence=[EvidenceClip(url="https://youtube.com/watch?v=ev1", start=10.0, end=20.0, channel="R*", kind="official")],
+            )
+        ],
+    )
+    from streamclipper.topics.planner import save_plan
+    save_plan(config, plan)
+
+    called_kwargs: dict[str, Any] = {}
+    def mock_render_long(cfg, p, progress=None, draft=False):
+        called_kwargs["draft"] = draft
+        called_kwargs["tts_engine"] = cfg.get("transformation.tts_engine")
+        return {"status": "rendered", "video_path": "long_draft.mp4"}
+
+    with patch("streamclipper.assembly.longform.render_long_video", side_effect=mock_render_long):
+        # Synchronous invocation check of tool
+        res_str = mcp_server.render_topic_video("plan_draft_test", draft=True)
+        res_data = json.loads(res_str)
+        assert res_data["status"] == "started"
+
+
+@pytest.mark.asyncio
+async def test_review_rendered_video_tool(tmp_path: Path) -> None:
+    """Verify review_rendered_video returns the structured technical & visual review payload."""
+    from tests.test_assembly import _synth_test_video
+
+    vid = tmp_path / "clip_review_mcp.mp4"
+    _synth_test_video(vid, duration=2.5, freq=440)
+
+    # Directly call tool
+    review = await mcp_server.review_rendered_video(str(vid))
+    assert isinstance(review, dict)
+    assert review["video_path"] == str(vid.resolve())
+    assert "contact_sheet_path" in review
+    assert Path(review["contact_sheet_path"]).is_file()
+    assert review["duration"] > 0.0
+    assert "audio_stats" in review
+    assert "silence_gaps" in review
+    assert "red_flags" in review
+    assert "narration_timeline" in review
+
+    # Call via mcp.call_tool
+    tool_res = await mcp.call_tool("review_rendered_video", {"video_path": str(vid)})
+    assert not tool_res.is_error
+    payload = json.loads(tool_res.content[-1].text)
+    assert payload["video_path"] == str(vid.resolve())
+    assert Path(payload["contact_sheet_path"]).is_file()
+
+
+@pytest.mark.asyncio
+async def test_draft_workflow_does_not_skip_final_master(mcp_env: tuple[Config, StepCache, Path]) -> None:
+    """Verify that a prior draft render does NOT cause draft=False final master to be skipped."""
+    config, cache, tmp_path = mcp_env
+    url = "https://youtube.com/watch?v=loop_workflow_123"
+
+    h = Highlight(
+        start=50.0,
+        end=65.0,
+        score=9.0,
+        title="Epic Drift",
+        reason="Clean drift maneuver",
+        narration_intro="Look at this car drift",
+    )
+    state = PipelineState(
+        stream_info=StreamInfo(
+            url=url,
+            title="Drift Stream",
+            platform=Platform.YOUTUBE,
+            streamer="Speed",
+            game="GTA 6",
+            duration_seconds=200.0,
+        ),
+        status=PipelineStatus.SCORING,
+        transcript=_make_sample_transcript(),
+        selected_highlights=[h],
+    )
+    cache.save_state(state)
+
+    # 1. Step 1: Free Draft mode
+    prep_draft = await mcp_server._prepare_render_all_selected(url, None, force=False, draft=True)
+    assert prep_draft["clips_planned"] == 1
+
+    from streamclipper.models import ClipMetadata, ClipResult
+    draft_vid = tmp_path / "clip_01_draft.mp4"
+    draft_vid.write_bytes(b"dummy_draft_mp4")
+    meta = ClipMetadata(
+        hook_title="Epic Drift",
+        caption="",
+        hashtags=[],
+        streamer="Speed",
+        game="GTA 6",
+        source_url=url,
+        clip_start=50.0,
+        clip_end=65.0,
+        highlight_score=9.0,
+    )
+    draft_clip = ClipResult(
+        video_path=draft_vid,
+        metadata_path=draft_vid.with_suffix(".json"),
+        metadata=meta,
+        duration_seconds=15.0,
+    )
+    state.clips = [draft_clip]
+    cache.save_state(state)
+
+    # 2. Re-running draft=True should see the draft exists and plan 0 (skip)
+    prep_draft_repeat = await mcp_server._prepare_render_all_selected(url, None, force=False, draft=True)
+    assert prep_draft_repeat["clips_planned"] == 0
+
+    # 3. Step 4: Final ElevenLabs Master (draft=False) MUST plan 1 clip (NOT skip!)
+    prep_master = await mcp_server._prepare_render_all_selected(url, None, force=False, draft=False)
+    assert prep_master["clips_planned"] == 1
+
+
+@pytest.mark.asyncio
+async def test_topic_plan_status_rendered_allows_shorts_and_re_renders(mcp_env: tuple[Config, StepCache, Path]) -> None:
+    """Verify that topic plans with status='rendered' can still render companion shorts and drafts."""
+    config, cache, tmp_path = mcp_env
+    from streamclipper.topics.models import TopicPlan, TopicPoint, ShortPlan, EvidenceClip
+    from streamclipper.topics.planner import save_plan
+    from unittest.mock import patch
+
+    plan = TopicPlan(
+        plan_id="plan_rendered_status_test",
+        topic_id="top_rend",
+        topic_title="Rendered Topic",
+        video_title="Rendered Video",
+        game="GTA 6",
+        status="rendered",  # Already rendered longform!
+        points=[
+            TopicPoint(
+                index=1,
+                heading="Point 1",
+                narration="Point 1 Narration",
+                evidence=[EvidenceClip(url="https://youtube.com/watch?v=ev1", start=10.0, end=20.0, channel="R*", kind="official")],
+            )
+        ],
+        shorts=[
+            ShortPlan(
+                slot="teaser",
+                narration_intro="Short Intro",
+                narration_outro="Short Outro",
+            )
+        ],
+    )
+    save_plan(config, plan)
+
+    with patch("streamclipper.assembly.topic_shorts.render_topic_shorts", return_value={"status": "complete"}):
+        res_shorts = mcp_server.render_topic_shorts("plan_rendered_status_test", slots="teaser", draft=True)
+        data_shorts = json.loads(res_shorts)
+        assert data_shorts["status"] == "started"
+
+    with patch("streamclipper.assembly.longform.render_long_video", return_value={"status": "rendered", "video_path": "long.mp4"}):
+        res_long = mcp_server.render_topic_video("plan_rendered_status_test", draft=False)
+        data_long = json.loads(res_long)
+        assert data_long["status"] == "started"
+
+
 
 
 

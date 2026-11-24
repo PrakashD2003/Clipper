@@ -722,7 +722,7 @@ def _next_available_clip_index(
     return idx
 
 
-def _has_rendered_clip(clips: list[ClipResult], highlight: Highlight) -> bool:
+def _has_rendered_clip(clips: list[ClipResult], highlight: Highlight, draft: bool = False) -> bool:
     """True if a clip with matching start/end (+-0.01s) already exists on disk."""
     for clip in clips:
         meta = clip.metadata
@@ -731,7 +731,9 @@ def _has_rendered_clip(clips: list[ClipResult], highlight: Highlight) -> bool:
             and abs(float(meta.clip_end) - highlight.end) <= 0.01
             and Path(clip.video_path).is_file()
         ):
-            return True
+            is_draft = Path(clip.video_path).stem.endswith("_draft")
+            if is_draft == draft:
+                return True
     return False
 
 
@@ -770,6 +772,7 @@ async def _render_single_highlight(
     notes: list[dict[str, Any]] | None = None,
     progress: JobProgress | None = None,
     caption_style: str = "auto",
+    draft: bool = False,
 ) -> tuple[ClipResult, str]:
     """Download segment(s), build offline ClipMetadata, and assemble one highlight.
 
@@ -884,6 +887,7 @@ async def _render_single_highlight(
             valid_beats=valid_beats,
             buffer_seconds=buffer_seconds,
             voice_breakdown_path=voice_breakdown_path,
+            **({"draft": draft} if draft else {}),
             **extra_kwargs,
         )
 
@@ -2124,6 +2128,7 @@ async def _prepare_render_clip(
     caption_style: str = "auto",
     channel: str | None = None,
     narration_beats: list[dict[str, Any]] | str | None = None,
+    draft: bool = False,
 ) -> str | dict[str, Any]:
     """Validate render_clip inputs synchronously; return an error JSON string or a prepared dict."""
     clean_url = url.strip() if isinstance(url, str) else ""
@@ -2218,6 +2223,9 @@ async def _prepare_render_clip(
         config = _config_for_channel(channel)
     except ValueError as val_exc:
         return _json_error(str(val_exc))
+    if draft:
+        config._data.setdefault("transformation", {})["tts_engine"] = "edge-tts"
+        config._data.setdefault("transformation", {})["hinglish_tts_engines"] = ["edge-tts"]
     cache = _get_cache(config)
     pipeline = Pipeline(config)
     scorer = _MCPScorer(config)
@@ -2399,7 +2407,7 @@ async def _prepare_render_clip(
         "breakdown_kind": clean_breakdown_kind, "breakdown_target_time": clean_target_time,
         "breakdown_roi": clean_roi, "breakdown_zoom": clean_zoom, "breakdown_focus": clean_focus,
         "callout": callout, "language": clean_language, "caption_style": clean_caption_style,
-        "narration_beats": parsed_narration_beats,
+        "narration_beats": parsed_narration_beats, "draft": bool(draft),
     }
 
 
@@ -2515,6 +2523,7 @@ async def _execute_render_clip(p: dict[str, Any], progress: JobProgress) -> dict
             notes=render_notes,
             language=final_lang,
             caption_style=caption_style_param,
+            draft=bool(p.get("draft", False)),
         )
 
         fresh_state = cache.load_state(clean_url)
@@ -2569,6 +2578,7 @@ async def render_clip(
     caption_style: str = "auto",
     channel: str | None = None,
     narration_beats: list[dict[str, Any]] | str | None = None,
+    draft: bool = False,
 ) -> str:
     """Render a single highlight into a final 9:16 vertical clip (mode: auto | narrative | story | breakdown | raw) with YPP transformative narration, zoom, and ASS captions+chat ticker.
 
@@ -2633,6 +2643,7 @@ async def render_clip(
             caption_style=caption_style,
             channel=channel,
             narration_beats=narration_beats,
+            draft=draft,
         )
         if isinstance(prepared, str):
             return prepared
@@ -2766,7 +2777,7 @@ _JOB_TASKS: dict[str, asyncio.Task[Any]] = {}
 
 
 async def _prepare_render_all_selected(
-    url: str, mode: str | None, force: bool, channel: str | None = None
+    url: str, mode: str | None, force: bool, channel: str | None = None, draft: bool = False
 ) -> str | dict[str, Any]:
     """Validate render_all_selected inputs; return an error JSON string or a prepared dict."""
     clean_url = url.strip() if isinstance(url, str) else ""
@@ -2777,6 +2788,9 @@ async def _prepare_render_all_selected(
         config = _config_for_channel(channel)
     except ValueError as val_exc:
         return _json_error(str(val_exc))
+    if draft:
+        config._data.setdefault("transformation", {})["tts_engine"] = "edge-tts"
+        config._data.setdefault("transformation", {})["hinglish_tts_engines"] = ["edge-tts"]
     cache = _get_cache(config)
     pipeline = Pipeline(config)
     base_mode = pipeline._resolve_base_mode(mode)
@@ -2792,7 +2806,7 @@ async def _prepare_render_all_selected(
     planned = sum(
         1
         for h in state.selected_highlights
-        if force or not _has_rendered_clip(existing, h)
+        if force or not _has_rendered_clip(existing, h, draft=draft)
     )
     return {
         "clean_url": clean_url,
@@ -2802,6 +2816,7 @@ async def _prepare_render_all_selected(
         "base_mode": base_mode,
         "force": force,
         "clips_planned": planned,
+        "draft": bool(draft),
     }
 
 
@@ -2839,7 +2854,7 @@ async def _execute_render_all_selected(
         total = max(1, int(p.get("clips_planned") or len(selected_highlights)))
         try:
             for idx, highlight in enumerate(selected_highlights, start=1):
-                if not force and _has_rendered_clip(existing_clips + rendered, highlight):
+                if not force and _has_rendered_clip(existing_clips + rendered, highlight, draft=bool(p.get("draft", False))):
                     skipped_count += 1
                     continue
                 if progress.cancelled:
@@ -2859,6 +2874,7 @@ async def _execute_render_all_selected(
                     language=_state_narration_language(config, state),
                     notes=adjusted_notes,
                     progress=progress,
+                    draft=bool(p.get("draft", False)),
                 )
                 if getattr(clip_result, "quarantined", False):
                     quarantined_clips.append(clip_result)
@@ -2920,6 +2936,7 @@ async def render_all_selected(
     force: bool = False,
     wait: bool = False,
     channel: str | None = None,
+    draft: bool = False,
 ) -> str:
     """Render all selected highlights stored in StepCache for a stream (asynchronous).
 
@@ -2939,7 +2956,7 @@ async def render_all_selected(
     channel: Optional channel profile ('en' or 'hi') to isolate output_dir, narration_language, and topic ledger while sharing the source library.
     """
     try:
-        prepared = await _prepare_render_all_selected(url, mode, force, channel=channel)
+        prepared = await _prepare_render_all_selected(url, mode, force, channel=channel, draft=draft)
         if isinstance(prepared, str):
             return prepared
         if wait or prepared["clips_planned"] == 0:
@@ -3878,7 +3895,7 @@ def approve_topic_plan(plan_id: str, channel: str | None = None) -> str:
 
 
 @mcp.tool()
-def render_topic_video(plan_id: str, channel: str | None = None) -> str:
+def render_topic_video(plan_id: str, channel: str | None = None, draft: bool = False) -> str:
     """Render a 16:9 long topic video from an approved TopicPlan as a background job.
 
     Downloads evidence clips, validates copyright against cached stream audio, records YouTube
@@ -3888,6 +3905,7 @@ def render_topic_video(plan_id: str, channel: str | None = None) -> str:
     NOTE: The user approves the plan: this tool must be called only after approve_topic_plan has succeeded.
 
     channel: Optional channel profile ('en' or 'hi') to isolate output_dir, narration_language, and topic ledger while sharing the source library.
+    draft: When True, uses free Edge-TTS voices and saves output as 'long_draft.mp4' with zero ElevenLabs credit usage.
     """
     try:
         clean_id = str(plan_id or "").strip()
@@ -3896,11 +3914,14 @@ def render_topic_video(plan_id: str, channel: str | None = None) -> str:
 
         from ..topics.planner import load_plan
         config = _config_for_channel(channel)
+        if draft:
+            config._data.setdefault("transformation", {})["tts_engine"] = "edge-tts"
+            config._data.setdefault("transformation", {})["hinglish_tts_engines"] = ["edge-tts"]
         plan = load_plan(config, clean_id)
         if plan is None:
             return _json_error(f"Topic plan '{clean_id}' not found.")
 
-        if plan.status != "approved":
+        if plan.status not in ("approved", "rendered"):
             return _json_error(
                 f"Topic plan '{clean_id}' is not approved (status: '{plan.status}'). "
                 "Must be approved via approve_topic_plan before rendering."
@@ -3910,7 +3931,7 @@ def render_topic_video(plan_id: str, channel: str | None = None) -> str:
 
         async def _execute_render_topic_long(progress: Any) -> dict[str, Any]:
             from ..assembly.longform import render_long_video
-            return await asyncio.to_thread(render_long_video, config, plan, progress=progress)
+            return await asyncio.to_thread(render_long_video, config, plan, progress=progress, draft=draft)
 
         return _start_render_job(
             "topic_long",
@@ -3925,7 +3946,7 @@ def render_topic_video(plan_id: str, channel: str | None = None) -> str:
 
 
 @mcp.tool()
-def render_topic_shorts(plan_id: str, slots: str = "", channel: str | None = None) -> str:
+def render_topic_shorts(plan_id: str, slots: str = "", channel: str | None = None, draft: bool = False) -> str:
     """Render 9:16 vertical topic Shorts (teaser and/or standalone) from an approved TopicPlan as a background job.
 
     Composes evidence clips in blur_fill layout, applies persistent hook title, @channel credit tags,
@@ -3935,6 +3956,7 @@ def render_topic_shorts(plan_id: str, slots: str = "", channel: str | None = Non
     NOTE: The user approves the plan: this tool must be called only after approve_topic_plan has succeeded.
 
     channel: Optional channel profile ('en' or 'hi') to isolate output_dir, narration_language, and topic ledger while sharing the source library.
+    draft: When True, uses free Edge-TTS voices and saves output as 'short_<slot>_draft.mp4' with zero ElevenLabs credit usage.
     """
     try:
         clean_id = str(plan_id or "").strip()
@@ -3943,11 +3965,14 @@ def render_topic_shorts(plan_id: str, slots: str = "", channel: str | None = Non
 
         from ..topics.planner import load_plan
         config = _config_for_channel(channel)
+        if draft:
+            config._data.setdefault("transformation", {})["tts_engine"] = "edge-tts"
+            config._data.setdefault("transformation", {})["hinglish_tts_engines"] = ["edge-tts"]
         plan = load_plan(config, clean_id)
         if plan is None:
             return _json_error(f"Topic plan '{clean_id}' not found.")
 
-        if plan.status != "approved":
+        if plan.status not in ("approved", "rendered"):
             return _json_error(
                 f"Topic plan '{clean_id}' is not approved (status: '{plan.status}'). "
                 "Must be approved via approve_topic_plan before rendering."
@@ -3959,7 +3984,7 @@ def render_topic_shorts(plan_id: str, slots: str = "", channel: str | None = Non
 
         async def _execute_render_topic_shorts(progress: Any) -> dict[str, Any]:
             from ..assembly.topic_shorts import render_topic_shorts as _render_shorts
-            return await asyncio.to_thread(_render_shorts, config, plan, slots=tuple(target_slots), progress=progress)
+            return await asyncio.to_thread(_render_shorts, config, plan, slots=tuple(target_slots), progress=progress, draft=draft)
 
         return _start_render_job(
             "topic_shorts",
@@ -3971,6 +3996,24 @@ def render_topic_shorts(plan_id: str, slots: str = "", channel: str | None = Non
     except Exception as exc:
         logger.exception("render_topic_shorts failed")
         return _json_error(str(exc))
+
+
+@mcp.tool()
+async def review_rendered_video(video_path: str, metadata_path: str | None = None) -> dict[str, Any]:
+    """Inspect a rendered video file (Short or Long-Form) for technical quality, silence gaps, and visual alignment.
+
+    Runs non-blocking via asyncio.to_thread:
+    - Probes duration, resolution, fps, audio stream presence via ffprobe.
+    - Runs FFmpeg silencedetect (>= 1.5s) and volumedetect (mean < -28dB, clipping >= 0.0dB).
+    - Checks target duration bounds (Shorts > 55s; Long-form outside 420–660s).
+    - Generates a 3x4 (12 tiles) visual review contact sheet with yellow MM:SS stamps.
+    - Loads companion metadata (<stem>.json or plan.json) for script-to-visual narration timeline.
+    """
+    clean_path = Path(str(video_path).strip())
+    clean_meta = Path(str(metadata_path).strip()) if metadata_path is not None and str(metadata_path).strip() else None
+    from ..output.reviewer import inspect_rendered_video
+    return await asyncio.to_thread(inspect_rendered_video, clean_path, clean_meta)
+
 
 
 

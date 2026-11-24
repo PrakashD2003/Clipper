@@ -244,6 +244,7 @@ def render_topic_shorts(
     *,
     slots: tuple[str, ...] | list[str] | str = ("teaser", "short_a", "short_b"),
     progress: Any = None,
+    draft: bool = False,
 ) -> dict[str, Any]:
     """Render 9:16 vertical topic Shorts from an approved TopicPlan.
 
@@ -259,10 +260,18 @@ def render_topic_shorts(
     9. Single final lossy encode with loudnorm (-14 LUFS) and ASS burn-in.
     10. Writes post files and updates plan.outputs.
     """
-    if plan.status != "approved":
+    if plan.status not in ("approved", "rendered"):
         raise ValueError(
             f"Topic plan '{plan.plan_id}' must be 'approved' to render (current: '{plan.status}')."
         )
+
+    render_config = config
+    if draft:
+        render_config = copy.copy(config)
+        render_config._data = copy.deepcopy(config._data)
+        render_config._data.setdefault("transformation", {})["tts_engine"] = "edge-tts"
+        render_config._data.setdefault("transformation", {})["hinglish_tts_engines"] = ["edge-tts"]
+    config = render_config
 
     if isinstance(slots, str):
         raw_slots = [_normalize_slot(s) for s in slots.split(",") if s.strip()]
@@ -317,7 +326,8 @@ def render_topic_shorts(
             break
 
         slot_name = _normalize_slot(short.slot)
-        filename = f"{slot_name}.mp4" if slot_name.startswith("short_") else f"short_{slot_name}.mp4"
+        base_stem = slot_name if slot_name.startswith("short_") else f"short_{slot_name}"
+        filename = f"{base_stem}_draft.mp4" if draft else f"{base_stem}.mp4"
         final_short_path = out_dir / filename
 
         if progress and hasattr(progress, "start_clip"):
@@ -612,14 +622,16 @@ def render_topic_shorts(
         post_path = write_short_post(config, plan, short, final_short_path)
 
         # 11. Update plan outputs
-        plan.outputs[slot_name] = str(final_short_path.resolve())
-        plan.outputs[f"{slot_name}_post"] = str(post_path.resolve())
+        out_slot = f"{slot_name}_draft" if draft else slot_name
+        plan.outputs[out_slot] = str(final_short_path.resolve())
+        plan.outputs[f"{out_slot}_post"] = str(post_path.resolve())
 
         rendered_item = {
             "slot": slot_name,
             "video_path": str(final_short_path.resolve()),
             "duration": _probe_duration(final_short_path) or total_duration,
             "post_path": str(post_path.resolve()),
+            "draft": draft,
         }
         rendered_shorts.append(rendered_item)
         if progress and hasattr(progress, "clip_done"):

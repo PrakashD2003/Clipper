@@ -50,14 +50,23 @@ Follow this exact sequence:
        - **Gap (2–3s):** Let the streamer's raw peak reaction pop at 100% volume without narrator talk-over.
        - **Beat 3 (Payoff / Breakdown):** Reveal why the moment is wild, funny, or mechanically impressive using concrete details from the transcript/screen.
        - **Beat 4–5 (Sharp Closer):** Land a witty 1-line punchline or bold verdict—**NO generic filler questions** (such as *"kya tumne kabhi dekha tha?"* or *"what would you do?"*).
+       - Every beat's `text` must match what is visibly on screen at `at_second` (verify against contact sheets/transcript; never praise live gameplay/controls while an intro text or menu screen is showing).
      - `hook_title`: <= 8 words, present tense, curiosity gap, no ALL CAPS, never spoils the payoff.
      - Legacy fields (`narration_intro`, `callout`, `narration_outro`) remain fully supported for backward compatibility, with progressive `narration_beats` as the standard.
      - **Mode selection & Breakdown rules:** Only pick `mode="breakdown"` when there is a genuine tactical/visual moment AND always pass exact `breakdown_focus` + `breakdown_target_time` (the exact second the object/stunt is visible on screen, never `clip_start + 1s`); otherwise use `story` or `narrative`.
      - Only populate `breakdown_kind: "zoom_spotlight"` when a specific visible object (screen, HUD detail, Easter egg) is clearly shown on screen AND `breakdown_focus` names that exact object.
      - `breakdown_commentary` + `breakdown_callout`: grounded directly in the visual stunt or spotlighted detail.
-6. **Render per channel:**
-   - English channel: `render_all_selected(url, channel="en")` (or `render_clip(..., channel="en")`)
-   - Hinglish channel (optional second pass from same cache, after rewriting scripts in natural Roman Hinglish): `render_all_selected(url, channel="hi")`
+6. **Mandatory Automated Draft & Self-Review Loop (per channel):**
+   - **Step 1 (Free Draft):** Always render first with `draft=True` (free `edge-tts`, $0 ElevenLabs):
+     `render_all_selected(url, channel="en", draft=True)` (or `render_clip(..., channel="en", draft=True)`)
+   - **Step 2 (Self-Review):** Immediately call `review_rendered_video(draft_video_path)` and visually inspect `contact_sheet_path` + `red_flags` + `narration_timeline`. Check:
+     (a) Does every spoken beat match what's visibly on screen at that `MM:SS` tile?
+     (b) Are captions readable, unobstructed, and free of `□` tofu glyphs?
+     (c) Are there any silence gaps >= 1.5s, black loading screens, or awkward crops?
+   - **Step 3 (Auto-Refine, max 2 loops):** If any issue is found, fix the script/timestamps/`sub_clips` and re-render `draft=True` (cap at 2 self-refine passes so it never loops endlessly).
+   - **Step 4 (Final ElevenLabs Master):** Only after self-review passes cleanly AND the user approves the draft/storyboard, render the final master with `draft=False` (ElevenLabs):
+     `render_all_selected(url, channel="en", draft=False)`
+   - Hinglish channel (optional second pass from same cache, after rewriting scripts in natural Roman Hinglish): repeat Steps 1–4 with `channel="hi"`.
 7. **Report to user:**
    - List each rendered `.mp4` path, duration (verifying 30–40s target), resolved mode, title variants from `*_post.txt`, and any quarantined clips.
 
@@ -83,9 +92,18 @@ This is the **primary monetization workflow**. Follow this exact sequence:
 4. **Human Approval Gate (mandatory):**
    - Show the user the plan summary (title, shape, chapter headings, estimated duration, narration ratio, and thumbnail text).
    - **Stop and wait for explicit user approval** before calling `approve_topic_plan(plan_id, channel="en")`.
-5. **Render long-form + companion Shorts:**
-   - `render_topic_video(plan_id, channel="en")`
-   - `render_topic_shorts(plan_id, channel="en")`
+5. **Mandatory Automated Draft & Self-Review Loop (Long-Form & Companion Shorts):**
+   - **Step 1 (Free Draft):** Always render first with `draft=True` (free `edge-tts`, $0 ElevenLabs):
+     `render_topic_video(plan_id, channel="en", draft=True)`
+     `render_topic_shorts(plan_id, channel="en", draft=True)`
+   - **Step 2 (Self-Review):** Immediately call `review_rendered_video(draft_video_path)` for `long_draft.mp4` and each companion short draft (e.g. `short_teaser_draft.mp4`), inspecting `contact_sheet_path` + `red_flags` + `narration_timeline`. Check:
+     (a) Does every spoken beat match what's visibly on screen at that `MM:SS` tile?
+     (b) Are captions readable, unobstructed, and free of `□` tofu glyphs?
+     (c) Are there any silence gaps >= 1.5s, black loading screens, or awkward crops?
+   - **Step 3 (Auto-Refine, max 2 loops):** If any issue is found, update the plan outline/evidence/narration via `update_topic_plan` and re-render with `draft=True` (cap at 2 self-refine passes so it never loops endlessly).
+   - **Step 4 (Final ElevenLabs Master):** Only after self-review passes cleanly AND the user approves the draft/storyboard, render the final master with `draft=False` (ElevenLabs):
+     `render_topic_video(plan_id, channel="en", draft=False)`
+     `render_topic_shorts(plan_id, channel="en", draft=False)`
 6. **Optional Hinglish adaptation:**
    - If the user wants the same topic for the Hinglish channel, draft a separate Hinglish plan (`start_topic_plan(..., channel="hi")`) using the **already-ingested library** — with culturally natural Roman Hinglish scripts, not literal robotic translation — get approval, and render with `channel="hi"`.
 7. **Final Handoff to User:**

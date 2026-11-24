@@ -391,6 +391,7 @@ class Pipeline:
         voice_outro_path: Path | None = None,
         force: bool = False,
         voice_breakdown_path: Path | None = None,
+        draft: bool = False,
     ) -> list[ClipResult]:
         """Process a single stream through the full resumable pipeline."""
         if not isinstance(url, str) or not url.strip():
@@ -537,6 +538,7 @@ class Pipeline:
                     voice_outro_path=outro_path,
                     voice_breakdown_path=breakdown_path,
                     interactive=interactive,
+                    draft=draft,
                 )
                 self.cache.save_state(state)
         except Exception:
@@ -924,6 +926,7 @@ class Pipeline:
         voice_outro_path: Path | None = None,
         voice_breakdown_path: Path | None = None,
         interactive: bool = False,
+        draft: bool = False,
     ) -> PipelineState:
         """Download highlight video segments, generate metadata, and assemble/export clips."""
         base_mode = self._resolve_base_mode(mode)
@@ -1147,6 +1150,7 @@ class Pipeline:
                     stream_info=state.stream_info,
                     caption_preset=caption_preset,
                     caption_style=getattr(highlight, "caption_style", "auto"),
+                    draft=draft,
                 )
             if clip_result is None:
                 continue
@@ -1790,11 +1794,20 @@ class Pipeline:
         stream_info: StreamInfo | None = None,
         caption_preset: int | None = None,
         caption_style: str | None = None,
+        draft: bool = False,
     ) -> ClipResult | None:
         """Run Phase 4 video assembly/export when installed, else persist raw segment + metadata.
 
         Returns None when the highlight is skipped (non-gameplay segment without a usable facecam).
         """
+        render_config = self.config
+        if draft:
+            import copy
+            render_config = copy.copy(self.config)
+            render_config._data = copy.deepcopy(self.config._data)
+            render_config._data.setdefault("transformation", {})["tts_engine"] = "edge-tts"
+            render_config._data.setdefault("transformation", {})["hinglish_tts_engines"] = ["edge-tts"]
+
         if valid_beats is not None:
             beats = valid_beats
         elif mode in ("story", "breakdown"):
@@ -1829,6 +1842,7 @@ class Pipeline:
                 segment_paths=segment_paths,
                 clip_index=clip_index,
                 valid_beats=beats,
+                draft=draft,
             )
 
         facecam = FacecamDetector(self.config).detect(
@@ -2255,8 +2269,12 @@ class Pipeline:
                     metadata.game, metadata.streamer, clip_index
                 ),
             )
+            if draft:
+                output_video_path = output_video_path.with_name(
+                    f"{output_video_path.stem}_draft{output_video_path.suffix}"
+                )
 
-            exporter = Exporter(self.config)
+            exporter = Exporter(render_config)
             export_kwargs: dict[str, Any] = {
                 "clip": composed,
                 "words": words_for_export,
@@ -2704,6 +2722,7 @@ class Pipeline:
         segment_paths: list[Path],
         clip_index: int,
         valid_beats: list[dict[str, Any]] | None = None,
+        draft: bool = False,
     ) -> ClipResult:
         """Phase 3 fallback before Phase 4 assembly exists: persist metadata JSON & transcript."""
         game_dir = _sanitize_path_segment(metadata.game, "UnknownGame")
@@ -2736,6 +2755,8 @@ class Pipeline:
         except (KeyError, ValueError, IndexError):
             raw_stem = f"clip_{clip_index:02d}"
         stem = _sanitize_path_segment(raw_stem, f"clip_{clip_index:02d}")
+        if draft:
+            stem = f"{stem}_draft"
 
         metadata_path: Path | None = None
         if self.config.get("output.save_metadata_json", True):
