@@ -1020,3 +1020,28 @@ def test_T4_models_zero_values_preserved() -> None:
     assert plan.estimated_seconds == 0.0
     assert plan.narration_seconds == 0.0
 
+
+def test_v44_validate_plan_allows_local_broll_alternates(sample_library: tuple[Config, LibraryIndex], tmp_path: Path) -> None:
+    """validate_plan accepts verified local broll clips in pt.alternates without failing library lookup."""
+    cfg, index = sample_library
+    plan = _build_valid_plan(cfg, index)
+    broll_file = tmp_path / "temp" / "broll" / "gator_0_10000_b0.mp4"
+    broll_file.parent.mkdir(parents=True, exist_ok=True)
+    broll_file.write_bytes(b"mp4data")
+
+    plan.points[0].alternates.append(
+        EvidenceClip(
+            source_id="gator",
+            url=str(broll_file),
+            channel="SwampShowcase",
+            kind="gameplay",
+            start=0.0,
+            end=10.0,
+            role="broll",
+            reason="Alligator stalking in swamp",
+        )
+    )
+    problems = validate_plan(cfg, plan)
+    assert not any("not found in library" in p for p in problems)
+
+

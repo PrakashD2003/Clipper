@@ -82,10 +82,14 @@ This is the **primary monetization workflow**. Follow this exact sequence:
 2. **Discover a high-CTR topic:**
    - `suggest_topics(game="GTA 6", channel="en")` (checks that channel's ledger so topics never repeat).
    - Present the top 3–5 concrete, curiosity-driven topic ideas to the user and let them pick one.
-3. **Draft the blueprint:**
+3. **Draft the blueprint & verify visual B-roll coverage:**
    - `start_topic_plan(game="GTA 6", topic="...", channel="en")`
+   - **Compulsory Visual Verification & B-Roll Fetch (`fetch_topic_broll`):**
+     - Visually verify (via `get_frame_sheets` / `inspect_moment_context`) that each chapter's `pt.evidence` and `pt.alternates` clips **actually show the subject on screen**, not just mention it in the transcript.
+     - Whenever the stream library lacks a real visual of the chapter's subject (e.g. an alligator, shark, underwater scuba, or GTA 5 comparison), call `fetch_topic_broll(query="...", game="GTA 6", max_clips=2, clip_seconds=10.0)`.
+     - Inspect the returned `preview_sheet_path` (3-frame strip) to confirm the footage actually shows the requested subject, then attach verified clips to `pt.alternates` (for the 7–10s multi-clip narration B-roll montage) or `pt.evidence` (via `submit_topic_plan` / `update_topic_plan`) **before** rendering `draft=True`.
    - Verify the plan before asking for approval:
-     - Every point has distinct evidence + alternate clips (so narration B-roll never repeats the evidence clip).
+     - Every point has distinct evidence + multiple visually verified alternate/B-roll clips (so narration B-roll cycles across fresh 7–10s clips and never loops a single clip or repeats the evidence clip).
      - Sentences are <= 14 words, grounded in real transcript/frame details, zero invented facts.
      - `thumbnail_text` is **<= 3 punchy words** (not a full sentence).
      - Exactly 3 Shorts: `teaser` (points to full video), `short_a` and `short_b` (standalone, zero overlap, no mention of long video).

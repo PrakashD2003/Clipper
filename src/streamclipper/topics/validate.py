@@ -6,6 +6,7 @@ clip constraints, Shorts separation, and narration style/grounding.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
 from streamclipper.config import Config
@@ -143,18 +144,37 @@ def validate_plan(config: Config, plan: TopicPlan) -> list[str]:
                 source_cache[sid] = None
         return source_cache[sid]
 
+    temp_base = Path(config.get("general.temp_dir", "./temp"))
+    broll_dir = temp_base / "broll"
+
+    def _is_local_broll_clip(clip_obj: Any) -> bool:
+        raw_url = str(getattr(clip_obj, "url", "") or "").strip()
+        if raw_url and not raw_url.lower().startswith(("http://", "https://")):
+            local_cand = raw_url[7:] if raw_url.lower().startswith("file://") else raw_url
+            p = Path(local_cand)
+            if p.is_file() and p.stat().st_size > 0:
+                return True
+        sid = str(getattr(clip_obj, "source_id", "") or "").strip()
+        if sid and broll_dir.is_dir():
+            import re as _re
+            safe_sid = _re.sub(r"[^A-Za-z0-9_-]", "_", sid)
+            for cand in broll_dir.glob(f"{safe_sid}_*"):
+                if cand.is_file() and cand.suffix.lower() in (".mp4", ".webm", ".mkv", ".mov") and cand.stat().st_size > 0:
+                    return True
+        return False
+
     for p in plan.points:
         if not (1 <= len(p.evidence) <= 2):
             problems.append(f"Point {p.index} ('{p.heading}') must have 1–2 evidence clips, found {len(p.evidence)}.")
 
         all_clips = list(p.evidence) + list(p.alternates)
         for clip in all_clips:
-            if not clip.source_id:
+            if not clip.source_id and not _is_local_broll_clip(clip):
                 problems.append(f"Point {p.index} clip missing source_id.")
                 continue
 
-            src = _get_source_safe(clip.source_id)
-            if src is None:
+            src = _get_source_safe(clip.source_id) if clip.source_id else None
+            if src is None and not _is_local_broll_clip(clip):
                 problems.append(f"Point {p.index} clip source '{clip.source_id}' not found in library.")
 
             if clip.start < 0 or clip.end <= clip.start:

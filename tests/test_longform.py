@@ -1147,3 +1147,151 @@ def test_T5_title_variants_in_post_writer(tmp_path: Path) -> None:
     for v in variants:
         assert f"- {v}" in text
 
+
+def test_v44_build_longform_ass_escapes_lines_without_double_backslash_N(tmp_path: Path) -> None:
+    """_build_longform_ass escapes each line before joining with \\N and never prints literal \\\\N."""
+    ass_path = tmp_path / "v44_multiline.ass"
+    text = "Look at {this} swamp detail while the gator stalks the boat in Vice City"
+    _build_longform_ass([(0.0, 6.0, text)], [], ass_path)
+    content = ass_path.read_text(encoding="utf-8")
+
+    assert r"\N" in content
+    assert r"\\N" not in content
+    assert "\\\u200bN" not in content
+    assert r"\{this\}" in content
+
+
+def test_v44_build_broll_montage_cycles_multiple_clips_without_back_to_back_repeat(tmp_path: Path) -> None:
+    """_build_broll_montage cycles across distinct clips using 7-10s slices instead of looping 1 clip."""
+    from streamclipper.assembly.longform import _build_broll_montage
+    from streamclipper.output.exporter import _close_clip_handles
+
+    c1 = _create_synthetic_mp4(tmp_path / "broll_1.mp4", duration=12.0, width=320, height=180)
+    c2 = _create_synthetic_mp4(tmp_path / "broll_2.mp4", duration=12.0, width=320, height=180)
+    c3 = _create_synthetic_mp4(tmp_path / "broll_3.mp4", duration=12.0, width=320, height=180)
+
+    opened: list[Any] = []
+    seen_slice_sources: list[str] = []
+
+    from moviepy import VideoFileClip as RealVideoFileClip
+    orig_subclipped = RealVideoFileClip.subclipped
+
+    def spy_subclipped(self, start_time=0, end_time=None):
+        if getattr(self, "filename", None):
+            seen_slice_sources.append((Path(self.filename).name, round(float(end_time or 0) - float(start_time or 0), 2)))
+        return orig_subclipped(self, start_time, end_time)
+
+    try:
+        with patch.object(RealVideoFileClip, "subclipped", spy_subclipped):
+            montage = _build_broll_montage(
+                [c1, c2, c3],
+                target_duration=24.0,
+                target_w=320,
+                target_h=180,
+                kenburns_max_zoom=1.05,
+                opened_clips=opened,
+            )
+        assert abs(float(montage.duration or 0.0) - 24.0) < 0.25
+        names = [name for name, _ in seen_slice_sources]
+        durations = [d for _, d in seen_slice_sources]
+        assert len(names) >= 3
+        assert set(names) == {"broll_1.mp4", "broll_2.mp4", "broll_3.mp4"}
+        # Never the same clip back-to-back
+        for i in range(len(names) - 1):
+            assert names[i] != names[i + 1]
+        # Slices are in the 7-10s range
+        for d in durations:
+            assert 6.5 <= d <= 10.0
+    finally:
+        for c in opened:
+            _close_clip_handles(c)
+
+
+def test_v44_build_broll_montage_empty_candidates_fallback(tmp_path: Path) -> None:
+    """_build_broll_montage falls back cleanly to a ColorClip when no valid files exist."""
+    from moviepy import ColorClip
+    from streamclipper.assembly.longform import _build_broll_montage
+    from streamclipper.output.exporter import _close_clip_handles
+
+    opened: list[Any] = []
+    try:
+        montage = _build_broll_montage(
+            [tmp_path / "does_not_exist.mp4"],
+            target_duration=5.0,
+            target_w=320,
+            target_h=180,
+            kenburns_max_zoom=1.05,
+            opened_clips=opened,
+        )
+        assert isinstance(montage, ColorClip)
+        assert float(montage.duration or 0.0) == 5.0
+    finally:
+        for c in opened:
+            _close_clip_handles(c)
+
+
+def test_v44_longform_uses_local_broll_in_alternates_without_ytdlp(test_config: Config, tmp_path: Path) -> None:
+    """Local broll clip paths attached to pt.alternates are used directly without calling download_segment."""
+    temp_base = Path(test_config.get("general.temp_dir", "./temp"))
+    broll_dir = temp_base / "broll"
+    local_broll = _create_synthetic_mp4(broll_dir / "gator_local_10000_20000_b0.mp4", duration=3.0, width=640, height=360)
+
+    plan = TopicPlan(
+        plan_id="plan-v44-local-broll",
+        topic_id="swamp-gators",
+        topic_title="Swamp Gators",
+        game="GTA 6",
+        shape="story",
+        status="approved",
+        cold_open="",
+        outro="",
+        points=[
+            TopicPoint(
+                index=1,
+                heading="Alligators in the Grasslands",
+                narration="Notice the massive alligator stalking along the muddy riverbank right here.",
+                evidence=[
+                    EvidenceClip(
+                        source_id="src_ev_1",
+                        url="https://youtube.com/watch?v=ev01",
+                        channel="ViceGamer",
+                        kind="stream",
+                        start=10.0,
+                        end=14.0,
+                        role="evidence",
+                    )
+                ],
+                alternates=[
+                    EvidenceClip(
+                        source_id="gator_local",
+                        url=str(local_broll),
+                        channel="SwampShowcase",
+                        kind="gameplay",
+                        start=0.0,
+                        end=3.0,
+                        role="broll",
+                    )
+                ],
+            )
+        ],
+    )
+    save_plan(test_config, plan)
+
+    download_urls: list[str] = []
+
+    def mock_download(url, start, end, out_dir, **kwargs):
+        download_urls.append(url)
+        seg = out_dir / f"seg_ev_{len(download_urls)}.mp4"
+        return _create_synthetic_mp4(seg, duration=max(1.0, end - start), width=640, height=360)
+
+    with patch("streamclipper.assembly.longform.download_segment", side_effect=mock_download), \
+         patch("streamclipper.assembly.longform.CopyrightRiskDetector.detect", return_value=("CLEAN", 0.99)), \
+         patch("streamclipper.assembly.longform.TransformativeNarrator.synthesize_speech", side_effect=_mock_synthesize):
+        res = render_long_video(test_config, plan)
+
+    assert res["status"] == "rendered"
+    assert Path(res["video_path"]).is_file()
+    # Only the remote evidence URL was downloaded; local broll alternate was NOT passed to download_segment
+    assert download_urls == ["https://youtube.com/watch?v=ev01"]
+
+

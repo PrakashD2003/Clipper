@@ -6,6 +6,7 @@ import json
 import logging
 import math
 from pathlib import Path
+import re
 import shutil
 import subprocess
 from typing import Any
@@ -24,6 +25,7 @@ from streamclipper.assembly.captions import (
 from streamclipper.assembly.narrator import TransformativeNarrator
 from streamclipper.cache import StepCache
 from streamclipper.config import Config
+from streamclipper.download.audio import _extract_youtube_id_from_url
 from streamclipper.download.video import download_segment
 from streamclipper.output.exporter import _close_clip_handles
 from streamclipper.output.topic_post import write_long_post
@@ -283,6 +285,185 @@ def _fit_to_canvas(clip: Any, target_w: int = 1920, target_h: int = 1080) -> Any
         y1 = (nh - target_h) // 2
         return scaled.cropped(x1=x1, y1=y1, x2=x1 + target_w, y2=y1 + target_h)
     return scaled
+
+
+def _resolve_local_clip_path(clip: EvidenceClip, temp_base: Path) -> Path | None:
+    """Resolve an EvidenceClip to an already-downloaded local file path if present.
+
+    Checks:
+    1. Direct local file path in ``clip.url`` (or ``file://`` URI).
+    2. Pre-downloaded B-roll files in ``<temp_base>/broll/`` matching the clip range or source_id.
+    """
+    raw_url = str(getattr(clip, "url", "") or "").strip()
+    if raw_url and not raw_url.lower().startswith(("http://", "https://")):
+        cand_str = raw_url[7:] if raw_url.lower().startswith("file://") else raw_url
+        cand_path = Path(cand_str)
+        if cand_path.is_file() and cand_path.stat().st_size > 0:
+            return cand_path
+
+    broll_dir = Path(temp_base) / "broll"
+    if broll_dir.is_dir():
+        vid = str(getattr(clip, "source_id", "") or "").strip()
+        if not vid and raw_url:
+            vid = _extract_youtube_id_from_url(raw_url) or ""
+        safe_vid = re.sub(r"[^A-Za-z0-9_-]", "_", vid) if vid else ""
+        if safe_vid:
+            start_ms = round(max(0.0, float(getattr(clip, "start", 0.0) or 0.0)) * 1000)
+            end_ms = round(max(0.0, float(getattr(clip, "end", 0.0) or 0.0)) * 1000)
+            video_exts = (".mp4", ".webm", ".mkv", ".mov")
+            for ext in video_exts:
+                exact = broll_dir / f"{safe_vid}_{start_ms}_{end_ms}_b0{ext}"
+                if exact.is_file() and exact.stat().st_size > 0:
+                    return exact
+            for cand in sorted(broll_dir.glob(f"{safe_vid}_*")):
+                if cand.is_file() and cand.suffix.lower() in video_exts and cand.stat().st_size > 0:
+                    return cand
+
+    return None
+
+
+def _build_broll_montage(
+    candidate_paths: list[Path | str],
+    target_duration: float,
+    target_w: int,
+    target_h: int,
+    kenburns_max_zoom: float,
+    opened_clips: list[Any],
+    *,
+    slice_min: float = 7.0,
+    slice_max: float = 10.0,
+    blur_radius: int = 0,
+    dim_factor: float = 1.0,
+) -> Any:
+    """Build a multi-clip non-looping B-roll montage covering target_duration.
+
+    Cycles round-robin across all distinct valid clips in ``candidate_paths``, taking
+    7–10s slices per clip (advancing each clip's cursor so repeated visits show fresh
+    segments) so the visual changes regularly and never loops the same clip back-to-back.
+    """
+    from moviepy import AudioClip, ColorClip, VideoFileClip, concatenate_videoclips
+
+    target_dur = max(0.1, float(target_duration))
+    s_min = max(1.0, float(slice_min))
+    s_max = max(s_min, float(slice_max))
+    base_slice = (s_min + s_max) / 2.0  # 8.5s default
+
+    # Deduplicate valid candidate files while preserving order
+    unique_paths: list[Path] = []
+    seen_resolved: set[str] = set()
+    for raw_p in candidate_paths or []:
+        if not raw_p:
+            continue
+        p = Path(raw_p)
+        if not p.is_file() or p.stat().st_size == 0:
+            continue
+        key = str(p.resolve()).lower()
+        if key not in seen_resolved:
+            seen_resolved.add(key)
+            unique_paths.append(p)
+
+    # Open each unique clip once
+    sources: list[dict[str, Any]] = []
+    for p in unique_paths:
+        try:
+            vclip = VideoFileClip(str(p))
+            opened_clips.append(vclip)
+            dur = float(vclip.duration or 0.0)
+            if math.isfinite(dur) and dur >= 0.2:
+                sources.append({"clip": vclip, "dur": dur, "cursor": 0.0, "path": p})
+        except Exception as exc:
+            logger.warning("Failed opening B-roll clip '%s': %s", p, exc)
+
+    if not sources:
+        fallback = ColorClip(size=(target_w, target_h), color=(20, 20, 30), duration=target_dur)
+        opened_clips.append(fallback)
+        return fallback
+
+    slices: list[Any] = []
+    accumulated = 0.0
+    src_idx = 0
+    num_sources = len(sources)
+    has_any_audio = any(s["clip"].audio is not None for s in sources)
+
+    while accumulated < target_dur - 0.02:
+        remaining = target_dur - accumulated
+        src = sources[src_idx]
+        src_idx = (src_idx + 1) % num_sources
+        dur = src["dur"]
+
+        # Reset cursor if remaining tail in this clip is too tiny
+        avail = dur - src["cursor"]
+        if avail < min(2.0, dur * 0.5) or avail <= 0.15:
+            src["cursor"] = 0.0
+            avail = dur
+
+        if remaining <= s_max:
+            desired = remaining
+        elif (remaining - base_slice) < 3.0:
+            desired = min(max(s_min * 0.5, remaining / 2.0), s_max)
+        else:
+            desired = base_slice
+
+        take = min(desired, avail, remaining)
+        if take <= 0.05:
+            src["cursor"] = 0.0
+            take = min(desired, dur, remaining)
+
+        sub_start = max(0.0, min(src["cursor"], max(0.0, dur - 0.05)))
+        sub_end = min(dur, sub_start + max(0.05, take))
+        actual_take = sub_end - sub_start
+        if actual_take <= 0.02:
+            break
+
+        src["cursor"] = sub_end
+        if src["cursor"] >= dur - 0.1:
+            src["cursor"] = 0.0
+
+        sub = src["clip"].subclipped(sub_start, sub_end)
+        opened_clips.append(sub)
+
+        fitted = _fit_to_canvas(sub, target_w, target_h)
+        if fitted is not sub:
+            opened_clips.append(fitted)
+
+        if has_any_audio and fitted.audio is None:
+            silent_a = AudioClip(lambda t: [0.0, 0.0], duration=actual_take)
+            opened_clips.append(silent_a)
+            fitted = fitted.with_audio(silent_a)
+            opened_clips.append(fitted)
+
+        zoomed_slice = _apply_ken_burns_zoom(
+            fitted,
+            max_zoom=kenburns_max_zoom,
+            blur_radius=blur_radius,
+            dim_factor=dim_factor,
+        )
+        if zoomed_slice is not fitted:
+            opened_clips.append(zoomed_slice)
+
+        slices.append(zoomed_slice)
+        accumulated += actual_take
+
+        # Guard against infinite loops on degenerate 0-duration clips
+        if len(slices) > 200:
+            break
+
+    if not slices:
+        fallback = ColorClip(size=(target_w, target_h), color=(20, 20, 30), duration=target_dur)
+        opened_clips.append(fallback)
+        return fallback
+
+    if len(slices) == 1:
+        montage = slices[0]
+    else:
+        montage = concatenate_videoclips(slices, method="compose")
+        opened_clips.append(montage)
+
+    if (montage.duration or 0.0) > target_dur:
+        montage = montage.subclipped(0.0, target_dur)
+        opened_clips.append(montage)
+
+    return montage
 
 
 # ---------------------------------------------------------------------------
@@ -636,8 +817,13 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None, 
             used_alts: set[tuple[str, float, float]] = set()
 
             for clip in pt.evidence:
+                local_clip_path = _resolve_local_clip_path(clip, temp_base)
                 clip.start = max(0.0, float(clip.start))
-                clip.end = max(clip.start + 0.1, float(clip.end))
+                if local_clip_path is not None and float(clip.end) <= clip.start:
+                    probed_dur = _probe_duration(local_clip_path) or 10.0
+                    clip.end = clip.start + probed_dur
+                else:
+                    clip.end = max(clip.start + 0.1, float(clip.end))
                 max_s = 10.0 if clip.kind == "official" else 20.0
                 if (clip.end - clip.start) > max_s:
                     clip.end = clip.start + max_s
@@ -692,7 +878,7 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None, 
                 )
             pt.evidence = valid_evidence
 
-        # 2. Download segments into <temp_dir>/topics/<plan_id>/
+        # 2. Download segments into <temp_dir>/topics/<plan_id>/ (reusing local/broll clips)
         all_clips: list[EvidenceClip] = []
         for pt in plan.points:
             all_clips.extend(pt.evidence)
@@ -704,15 +890,55 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None, 
                 progress.stage(f"downloading {idx}/{total_clips}")
             clip_key = (clip.url, round(clip.start, 2), round(clip.end, 2))
             if clip_key not in downloaded_files:
-                path = download_segment(
-                    clip.url,
-                    clip.start,
-                    clip.end,
-                    temp_dir,
-                    buffer_seconds=0.0,
-                    video_id=clip.source_id or None,
-                )
-                downloaded_files[clip_key] = path
+                local_p = _resolve_local_clip_path(clip, temp_base)
+                if local_p is not None:
+                    downloaded_files[clip_key] = local_p
+                else:
+                    path = download_segment(
+                        clip.url,
+                        clip.start,
+                        clip.end,
+                        temp_dir,
+                        buffer_seconds=0.0,
+                        video_id=clip.source_id or None,
+                    )
+                    downloaded_files[clip_key] = path
+
+        # Resolve or download alternate / B-roll clips for multi-clip narration montages
+        for pt in plan.points:
+            for alt in getattr(pt, "alternates", []) or []:
+                local_alt = _resolve_local_clip_path(alt, temp_base)
+                alt.start = max(0.0, float(alt.start))
+                if local_alt is not None and float(alt.end) <= alt.start:
+                    alt.end = alt.start + (_probe_duration(local_alt) or 10.0)
+                else:
+                    alt.end = max(alt.start + 0.1, float(alt.end))
+                alt_max = 10.0 if alt.kind == "official" else 20.0
+                if (alt.end - alt.start) > alt_max:
+                    alt.end = alt.start + alt_max
+                alt_key = (alt.url, round(alt.start, 2), round(alt.end, 2))
+                if alt_key in downloaded_files:
+                    continue
+                if local_alt is not None:
+                    downloaded_files[alt_key] = local_alt
+                elif alt.url and alt.url.strip().lower().startswith(("http://", "https://")):
+                    try:
+                        alt_path = download_segment(
+                            alt.url,
+                            alt.start,
+                            alt.end,
+                            temp_dir,
+                            buffer_seconds=0.0,
+                            video_id=alt.source_id or None,
+                        )
+                        downloaded_files[alt_key] = alt_path
+                    except Exception as exc:
+                        logger.warning(
+                            "Optional alternate clip download failed for point %d (%s): %s",
+                            pt.index,
+                            alt.url,
+                            exc,
+                        )
 
         # 3. Voice narration blocks
         narrator = TransformativeNarrator(config)
@@ -887,19 +1113,27 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None, 
             chap_co = ChapterAssembly("cold_open", "Intro")
 
             opened_co: list[Any] = []
-            broll_video = VideoFileClip(str(fallback_clip_path)) if fallback_clip_path else ColorClip(size=(target_w, target_h), color=(20, 20, 30), duration=nar_dur)
-            opened_co.append(broll_video)
-            broll_fitted = _fit_to_canvas(broll_video, target_w, target_h)
-            if (broll_fitted.duration or 0) < nar_dur:
-                loop_count = math.ceil(nar_dur / max(0.1, broll_fitted.duration or 1.0))
-                broll_fitted = concatenate_videoclips([broll_fitted] * loop_count)
-            broll_trimmed = broll_fitted.subclipped(0.0, nar_dur)
-            zoomed = _apply_ken_burns_zoom(broll_trimmed, kenburns_max_zoom)
+            co_candidates: list[Path | str] = []
+            if fallback_clip_path:
+                co_candidates.append(fallback_clip_path)
+            for p_cand in downloaded_files.values():
+                if p_cand and p_cand not in co_candidates:
+                    co_candidates.append(p_cand)
+
+            zoomed = _build_broll_montage(
+                co_candidates,
+                nar_dur,
+                target_w,
+                target_h,
+                kenburns_max_zoom,
+                opened_co,
+            )
 
             nar_audio = AudioFileClip(str(wav_path))
             opened_co.append(nar_audio)
-            if broll_trimmed.audio is not None:
-                ducked_broll_audio = broll_trimmed.audio.with_volume_scaled(broll_volume)
+            if zoomed.audio is not None:
+                ducked_broll_audio = zoomed.audio.with_volume_scaled(broll_volume)
+                opened_co.append(ducked_broll_audio)
                 mixed_audio = CompositeAudioClip([ducked_broll_audio, nar_audio])
             else:
                 mixed_audio = nar_audio
@@ -1006,86 +1240,78 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None, 
                 pt_wav, pt_dur = voiced_narrations[f"point_{pt.index}"]
 
                 opened_pt: list[Any] = []
-                # Stop back-to-back duplicate footage: do not play the exact same pt.evidence[0] segment
-                # that immediately plays next at full volume.
-                # Selection priority:
-                # (a) an unused clip from pt.alternates if downloaded/available
-                # (b) pt.evidence[1] if the point has >= 2 evidence clips (trimmed to the last half)
-                # (c) if only 1 clip exists, play a visibly distinct sub-range or dimmed/blurred Ken-Burns background
-                #     from a different point's clip so the same footage never plays twice in a row.
-                broll_source_path: Path | None = None
-                apply_dim_blur = False
-                is_same_as_first_evidence = False
-
-                # (a) unused clip from pt.alternates if downloaded/available
+                # Build a multi-clip non-looping B-roll montage for this point's narration.
+                # Stop back-to-back duplicate footage: exclude pt.evidence[0] when other clips exist.
+                # Candidate priority:
+                # (a) pt.alternates (including local/downloaded B-roll clips)
+                # (b) pt.evidence[1:] (if point has >= 2 evidence clips)
+                # (c) distinct downloaded clips from other points (alternates + evidence)
+                # (d) fallback to pt_clip_path with blur+dim only if no other clip exists
                 pt_ev_keys = {(ev.url, round(ev.start, 2), round(ev.end, 2)) for ev in pt.evidence}
+                pt_ev0_resolved = (
+                    str(Path(pt_clip_path).resolve()).lower()
+                    if pt_clip_path and Path(pt_clip_path).is_file()
+                    else ""
+                )
+
+                candidate_paths: list[Path | str] = []
+                seen_cand_keys: set[str] = set()
+
+                def _add_candidate(cand: Path | None) -> None:
+                    if not cand or not Path(cand).is_file():
+                        return
+                    r_key = str(Path(cand).resolve()).lower()
+                    if r_key == pt_ev0_resolved:
+                        return
+                    if r_key not in seen_cand_keys:
+                        seen_cand_keys.add(r_key)
+                        candidate_paths.append(Path(cand))
+
+                # (a) pt.alternates + local/broll clips
                 for alt in getattr(pt, "alternates", []) or []:
                     alt_key = (alt.url, round(alt.start, 2), round(alt.end, 2))
                     if alt_key not in pt_ev_keys:
-                        cand_path = downloaded_files.get(alt_key)
-                        if cand_path and Path(cand_path).is_file():
-                            broll_source_path = cand_path
-                            break
+                        cand_path = downloaded_files.get(alt_key) or _resolve_local_clip_path(alt, temp_base)
+                        _add_candidate(cand_path)
 
-                # (b) pt.evidence[1] if point has >= 2 evidence clips (trimmed to the last half)
-                is_ev2 = False
-                if broll_source_path is None and len(pt.evidence) >= 2:
-                    ev2 = pt.evidence[1]
-                    ev2_key = (ev2.url, round(ev2.start, 2), round(ev2.end, 2))
-                    cand_path = downloaded_files.get(ev2_key)
-                    if cand_path and Path(cand_path).is_file():
-                        broll_source_path = cand_path
-                        is_ev2 = True
+                # (b) pt.evidence[1:]
+                for ev_extra in pt.evidence[1:]:
+                    ev_key = (ev_extra.url, round(ev_extra.start, 2), round(ev_extra.end, 2))
+                    _add_candidate(downloaded_files.get(ev_key))
 
-                # (c) from a different point's clip with dimmed/blurred Ken-Burns background
-                if broll_source_path is None:
-                    for other_pt in plan.points:
-                        if other_pt.index != pt.index:
-                            for other_ev in other_pt.evidence:
-                                other_key = (other_ev.url, round(other_ev.start, 2), round(other_ev.end, 2))
-                                cand_path = downloaded_files.get(other_key)
-                                if cand_path and Path(cand_path).is_file():
-                                    broll_source_path = cand_path
-                                    apply_dim_blur = True
-                                    break
-                            if broll_source_path is not None:
-                                break
+                # (c) non-overlapping / distinct clips from other points if needed
+                for other_pt in plan.points:
+                    if other_pt.index == pt.index:
+                        continue
+                    for other_alt in getattr(other_pt, "alternates", []) or []:
+                        other_alt_key = (other_alt.url, round(other_alt.start, 2), round(other_alt.end, 2))
+                        _add_candidate(downloaded_files.get(other_alt_key) or _resolve_local_clip_path(other_alt, temp_base))
+                    for other_ev in other_pt.evidence:
+                        other_key = (other_ev.url, round(other_ev.start, 2), round(other_ev.end, 2))
+                        _add_candidate(downloaded_files.get(other_key))
 
-                # Fallback if only 1 clip exists across the whole plan
-                if broll_source_path is None:
-                    broll_source_path = pt_clip_path
-                    is_same_as_first_evidence = True
+                apply_dim_blur = False
+                if not candidate_paths:
                     apply_dim_blur = True
+                    if pt_clip_path and Path(pt_clip_path).is_file():
+                        candidate_paths.append(Path(pt_clip_path))
 
-                if broll_source_path and Path(broll_source_path).is_file():
-                    broll_video = VideoFileClip(str(broll_source_path))
-                    opened_pt.append(broll_video)
-                    raw_dur = float(broll_video.duration or 0.0)
-                    if is_ev2 and raw_dur > 0:
-                        half_start = max(0.0, raw_dur / 2.0)
-                        if half_start < raw_dur:
-                            broll_video = broll_video.subclipped(half_start, raw_dur)
-                    elif is_same_as_first_evidence and raw_dur > pt_dur * 1.5:
-                        sub_start = max(0.0, raw_dur - pt_dur)
-                        broll_video = broll_video.subclipped(sub_start, raw_dur)
-                else:
-                    broll_video = ColorClip(size=(target_w, target_h), color=(20, 20, 30), duration=pt_dur)
-                    opened_pt.append(broll_video)
-
-                broll_fitted = _fit_to_canvas(broll_video, target_w, target_h)
-                if (broll_fitted.duration or 0) < pt_dur:
-                    loop_count = math.ceil(pt_dur / max(0.1, broll_fitted.duration or 1.0))
-                    broll_fitted = concatenate_videoclips([broll_fitted] * loop_count)
-                broll_trimmed = broll_fitted.subclipped(0.0, pt_dur)
-                if apply_dim_blur:
-                    zoomed = _apply_ken_burns_zoom(broll_trimmed, max_zoom=kenburns_max_zoom, blur_radius=6, dim_factor=0.65)
-                else:
-                    zoomed = _apply_ken_burns_zoom(broll_trimmed, max_zoom=kenburns_max_zoom)
+                zoomed = _build_broll_montage(
+                    candidate_paths,
+                    pt_dur,
+                    target_w,
+                    target_h,
+                    kenburns_max_zoom,
+                    opened_pt,
+                    blur_radius=6 if apply_dim_blur else 0,
+                    dim_factor=0.65 if apply_dim_blur else 1.0,
+                )
 
                 pt_audio = AudioFileClip(str(pt_wav))
                 opened_pt.append(pt_audio)
-                if broll_trimmed.audio is not None:
-                    ducked_broll_audio = broll_trimmed.audio.with_volume_scaled(broll_volume)
+                if zoomed.audio is not None:
+                    ducked_broll_audio = zoomed.audio.with_volume_scaled(broll_volume)
+                    opened_pt.append(ducked_broll_audio)
                     mixed_audio = CompositeAudioClip([ducked_broll_audio, pt_audio])
                 else:
                     mixed_audio = pt_audio
@@ -1149,19 +1375,27 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None, 
             chap_out = ChapterAssembly("outro", "Outro")
 
             opened_out: list[Any] = []
-            broll_video = VideoFileClip(str(fallback_clip_path)) if fallback_clip_path else ColorClip(size=(target_w, target_h), color=(20, 20, 30), duration=out_dur)
-            opened_out.append(broll_video)
-            broll_fitted = _fit_to_canvas(broll_video, target_w, target_h)
-            if (broll_fitted.duration or 0) < out_dur:
-                loop_count = math.ceil(out_dur / max(0.1, broll_fitted.duration or 1.0))
-                broll_fitted = concatenate_videoclips([broll_fitted] * loop_count)
-            broll_trimmed = broll_fitted.subclipped(0.0, out_dur)
-            zoomed = _apply_ken_burns_zoom(broll_trimmed, kenburns_max_zoom)
+            out_candidates: list[Path | str] = []
+            if fallback_clip_path:
+                out_candidates.append(fallback_clip_path)
+            for p_cand in downloaded_files.values():
+                if p_cand and p_cand not in out_candidates:
+                    out_candidates.append(p_cand)
+
+            zoomed = _build_broll_montage(
+                out_candidates,
+                out_dur,
+                target_w,
+                target_h,
+                kenburns_max_zoom,
+                opened_out,
+            )
 
             out_audio = AudioFileClip(str(out_wav))
             opened_out.append(out_audio)
-            if broll_trimmed.audio is not None:
-                ducked_broll_audio = broll_trimmed.audio.with_volume_scaled(broll_volume)
+            if zoomed.audio is not None:
+                ducked_broll_audio = zoomed.audio.with_volume_scaled(broll_volume)
+                opened_out.append(ducked_broll_audio)
                 mixed_audio = CompositeAudioClip([ducked_broll_audio, out_audio])
             else:
                 mixed_audio = out_audio

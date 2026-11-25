@@ -68,6 +68,7 @@ EXPECTED_TOOLS = {
     "refine_highlight_bounds",
     "get_operator_guide",
     "review_rendered_video",
+    "fetch_topic_broll",
 }
 
 
@@ -5092,6 +5093,59 @@ async def test_topic_plan_status_rendered_allows_shorts_and_re_renders(mcp_env: 
         res_long = await mcp_server.render_topic_video("plan_rendered_status_test", draft=False)
         data_long = json.loads(res_long)
         assert data_long["status"] == "started"
+
+
+@pytest.mark.asyncio
+async def test_fetch_topic_broll_mcp_tool(
+    mcp_env: tuple[Config, StepCache, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """fetch_topic_broll MCP tool runs in thread, returns preview images and structured JSON."""
+    _, _, tmp_path = mcp_env
+    clip_file = tmp_path / "temp" / "broll" / "gator_10000_20000_b0.mp4"
+    preview_file = tmp_path / "temp" / "broll" / "gator_10000_20000_b0_preview.jpg"
+    clip_file.parent.mkdir(parents=True, exist_ok=True)
+    clip_file.write_bytes(b"mp4bytes")
+    from PIL import Image as PILImage
+    PILImage.new("RGB", (1278, 240), (30, 60, 30)).save(preview_file, "JPEG")
+
+    fake_clips = [
+        {
+            "source_id": "gator",
+            "clip_path": str(clip_file),
+            "url": "https://www.youtube.com/watch?v=gator",
+            "channel": "SwampShowcase",
+            "title": "GTA 6 Alligator Swamp Gameplay",
+            "kind": "gameplay",
+            "role": "broll",
+            "start": 10.0,
+            "end": 20.0,
+            "duration": 10.0,
+            "video_duration": 120.0,
+            "preview_sheet_path": str(preview_file),
+            "query": "GTA 6 alligator swamp gameplay",
+        }
+    ]
+
+    from streamclipper.topics import broll as broll_mod
+    monkeypatch.setattr(broll_mod, "fetch_topic_broll", lambda *a, **kw: fake_clips)
+
+    res = await mcp.call_tool(
+        "fetch_topic_broll",
+        {"query": "alligator swamp gameplay", "game": "GTA 6", "max_clips": 2, "clip_seconds": 10.0},
+    )
+    assert getattr(res, "is_error", False) is False
+    assert len(res.content) == 2
+    assert getattr(res.content[0], "type", "") == "image"
+    data = _extract_json(res)
+    assert data["count"] == 1
+    assert data["clips"][0]["clip_path"] == str(clip_file)
+    assert data["clips"][0]["preview_sheet_path"] == str(preview_file)
+    assert data["clips"][0]["channel"] == "SwampShowcase"
+
+    bad_res = await mcp.call_tool("fetch_topic_broll", {"query": "   "})
+    bad_data = _extract_json(bad_res)
+    assert "error" in bad_data
+
 
 
 

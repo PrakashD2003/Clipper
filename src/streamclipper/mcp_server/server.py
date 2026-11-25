@@ -3999,6 +3999,63 @@ async def render_topic_shorts(plan_id: str, slots: str = "", channel: str | None
 
 
 @mcp.tool()
+async def fetch_topic_broll(
+    query: str,
+    game: str = "GTA 6",
+    max_clips: int = 2,
+    clip_seconds: float = 10.0,
+) -> Any:
+    """Search YouTube for short, clean gameplay B-roll clips, download targeted segments, and extract 3-frame preview strips.
+
+    Use this whenever the stream library lacks a real on-screen visual of a chapter subject
+    (e.g. 'GTA 6 alligator swamp gameplay', 'GTA 6 underwater sharks scuba').
+    Visually inspect the returned preview_sheet_path images before attaching verified clips to
+    pt.alternates or pt.evidence.
+    """
+    try:
+        clean_q = str(query or "").strip()
+        if not clean_q:
+            return _json_error("query is required")
+        if int(max_clips) <= 0:
+            return _json_error("max_clips must be > 0")
+        if float(clip_seconds) <= 0:
+            return _json_error("clip_seconds must be > 0")
+
+        from ..topics.broll import fetch_topic_broll as _fetch_broll
+
+        config = _get_config()
+        clean_game = str(game or "GTA 6").strip() or "GTA 6"
+        clips = await asyncio.to_thread(
+            _fetch_broll,
+            config,
+            clean_q,
+            game=clean_game,
+            max_clips=int(max_clips),
+            clip_seconds=float(clip_seconds),
+        )
+        payload = {
+            "query": clean_q,
+            "game": clean_game,
+            "clips": clips,
+            "count": len(clips),
+        }
+        contents: list[Any] = []
+        for item in clips:
+            prev_str = str(item.get("preview_sheet_path") or "").strip()
+            if prev_str:
+                prev_p = Path(prev_str)
+                if prev_p.is_file():
+                    contents.append(Image(path=prev_p))
+        if contents:
+            contents.append(_json_ok(payload))
+            return contents
+        return _json_ok(payload)
+    except Exception as exc:
+        logger.exception("fetch_topic_broll failed")
+        return _json_error(str(exc))
+
+
+@mcp.tool()
 async def review_rendered_video(video_path: str, metadata_path: str | None = None) -> dict[str, Any]:
     """Inspect a rendered video file (Short or Long-Form) for technical quality, silence gaps, and visual alignment.
 
