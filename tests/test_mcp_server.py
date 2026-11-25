@@ -4375,11 +4375,8 @@ async def test_server_instructions_updated_with_compulsory_visual_and_grounding(
     assert "ASYNCHRONOUS" in instructions
     assert "never fall back" in instructions
 
-    # Verify synchronization with instructions.md if present
-    instructions_file = Path(r"C:\Users\praka\.gemini\antigravity\mcp\streamclipper\instructions.md")
-    if instructions_file.is_file():
-        file_text = instructions_file.read_text(encoding="utf-8").strip()
-        assert file_text == instructions.strip()
+    # Active MCPServer instructions load from the v4 operator guide in docs/
+    assert mcp.instructions == mcp_server._load_operator_guide()
 
 
 @pytest.mark.asyncio
