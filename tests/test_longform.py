@@ -324,6 +324,17 @@ def test_T5_cards_only_for_numbered_countdown(tmp_path: Path) -> None:
     assert "Official footage: Rockstar Games" in content
 
 
+def test_build_longform_ass_preserves_intentional_ass_linebreak(tmp_path: Path) -> None:
+    """Verify multi-line chunks emit real \\N breaks instead of escaped zero-width text."""
+    ass_path = tmp_path / "multiline.ass"
+    long_line = "Alpha beta gamma delta epsilon zeta eta theta iota kappa"
+    _build_longform_ass([(0.0, 5.0, long_line)], [], ass_path)
+    content = ass_path.read_text(encoding="utf-8")
+
+    assert r"\N" in content
+    assert "\\\u200bN" not in content
+
+
 def test_T5_credits_text_including_official(tmp_path: Path) -> None:
     """Verify official footage credit format and streamer @channel format."""
     ass_path = tmp_path / "credits.ass"

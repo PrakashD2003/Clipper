@@ -559,7 +559,7 @@ def _build_longform_ass(
             abs_end = min(win_end, win_start + c_end)
             if abs_end <= abs_start:
                 continue
-            escaped = _escape_ass_text(c_text)
+            escaped = r"\N".join(_escape_ass_text(part) for part in c_text.split(r"\N"))
             events.append(
                 f"Dialogue: 0,{_sec_to_ass_time(abs_start)},{_sec_to_ass_time(abs_end)},"
                 f"Narration16x9,,0,0,0,,{escaped}"
