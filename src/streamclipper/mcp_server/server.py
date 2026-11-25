@@ -4010,7 +4010,8 @@ async def fetch_topic_broll(
     Use this whenever the stream library lacks a real on-screen visual of a chapter subject
     (e.g. 'GTA 6 alligator swamp gameplay', 'GTA 6 underwater sharks scuba').
     Visually inspect the returned preview_sheet_path images before attaching verified clips to
-    pt.alternates or pt.evidence.
+    pt.alternates or pt.evidence (pass source_id, url=clip['url'] or clip['clip_path'], channel,
+    kind='gameplay', role='broll', start, end).
     """
     try:
         clean_q = str(query or "").strip()

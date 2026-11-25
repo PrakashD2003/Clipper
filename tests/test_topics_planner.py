@@ -1044,4 +1044,18 @@ def test_v44_validate_plan_allows_local_broll_alternates(sample_library: tuple[C
     problems = validate_plan(cfg, plan)
     assert not any("not found in library" in p for p in problems)
 
+    # Also accepts local broll clip when default start=0.0, end=0.0 is omitted
+    plan.points[0].alternates.append(
+        EvidenceClip(
+            source_id="gator",
+            url=str(broll_file),
+            channel="SwampShowcase",
+            kind="gameplay",
+            role="broll",
+            reason="Alligator close-up",
+        )
+    )
+    problems_zero = validate_plan(cfg, plan)
+    assert not any("invalid timestamps" in p for p in problems_zero)
+
 

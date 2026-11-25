@@ -64,6 +64,19 @@ def test_broll_candidate_scoring_prefers_clean_gameplay_and_rejects_live() -> No
     assert ok_c is True and ok_r is True
     assert score_c > score_r
 
+    vertical_short = {
+        "id": "vert1",
+        "title": "GTA 6 Alligator Swamp Gameplay 4K No Commentary",
+        "duration": 45,
+        "width": 1080,
+        "height": 1920,
+        "webpage_url": "https://www.youtube.com/shorts/vert1",
+        "view_count": 500000,
+    }
+    ok_v, score_v = _score_broll_candidate(vertical_short)
+    assert ok_v is True
+    assert score_c > score_v
+
 
 def test_pick_segment_bounds_uses_heatmap_or_midpoint() -> None:
     with_heatmap = {

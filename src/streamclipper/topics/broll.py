@@ -95,8 +95,25 @@ def _score_broll_candidate(entry: dict[str, Any]) -> tuple[bool, float]:
             score += 20.0
     elif 0.0 < duration < 15.0:
         score -= 50.0
+    elif duration > 1800.0:
+        score -= 50.0
     elif duration > 600.0:
         score -= 30.0
+
+    # Prefer 16:9 landscape gameplay; strongly penalize vertical Shorts
+    raw_url = str(entry.get("webpage_url") or entry.get("url") or "").lower()
+    if "/shorts/" in raw_url:
+        score -= 80.0
+    try:
+        w = float(entry.get("width") or 0.0)
+        h = float(entry.get("height") or 0.0)
+        if w > 0.0 and h > 0.0:
+            if h > w:
+                score -= 80.0
+            elif w >= h:
+                score += 10.0
+    except (TypeError, ValueError):
+        pass
 
     title = str(entry.get("title") or "").lower()
     for term in _POSITIVE_BROLL_TERMS:
@@ -191,6 +208,7 @@ def _extract_preview_strip(
     ratios = [0.15, 0.50, 0.85][: max(1, num_frames)]
     sampled: list[tuple[float, Image.Image]] = []
 
+    cap = None
     try:
         cap = cv2.VideoCapture(str(clip_path.resolve()))
         if cap.isOpened():
@@ -206,9 +224,14 @@ def _extract_preview_strip(
                         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
                         ts = (dur * r) if dur > 0 else (r * 10.0)
                         sampled.append((ts, Image.fromarray(rgb)))
-            cap.release()
     except Exception as exc:
         logger.debug("OpenCV preview extraction failed for %s: %s", clip_path, exc)
+    finally:
+        if cap is not None:
+            try:
+                cap.release()
+            except Exception:
+                pass
 
     if len(sampled) < len(ratios):
         sampled.clear()
@@ -227,18 +250,20 @@ def _extract_preview_strip(
             for idx, r in enumerate(ratios):
                 t_seek = max(0.05, min(dur * r, max(0.05, dur - 0.1)))
                 tmp_frame = preview_path.with_name(f"{preview_path.stem}_f{idx}.jpg")
-                cmd = [
-                    "ffmpeg", "-y",
-                    "-ss", f"{t_seek:.2f}",
-                    "-i", str(clip_path.resolve()),
-                    "-vframes", "1",
-                    "-f", "image2",
-                    str(tmp_frame.resolve()),
-                ]
-                subprocess.run(cmd, check=True, capture_output=True)
-                if tmp_frame.is_file():
-                    with Image.open(tmp_frame) as im:
-                        sampled.append((t_seek, im.convert("RGB")))
+                try:
+                    cmd = [
+                        "ffmpeg", "-y",
+                        "-ss", f"{t_seek:.2f}",
+                        "-i", str(clip_path.resolve()),
+                        "-vframes", "1",
+                        "-f", "image2",
+                        str(tmp_frame.resolve()),
+                    ]
+                    subprocess.run(cmd, check=True, capture_output=True)
+                    if tmp_frame.is_file():
+                        with Image.open(tmp_frame) as im:
+                            sampled.append((t_seek, im.convert("RGB")))
+                finally:
                     tmp_frame.unlink(missing_ok=True)
         except Exception as exc:
             logger.debug("FFmpeg preview extraction failed for %s: %s", clip_path, exc)
@@ -325,7 +350,7 @@ def fetch_topic_broll(
             info = ydl.extract_info(search_term, download=False)
         if isinstance(info, dict) and isinstance(info.get("entries"), list):
             entries = [e for e in info["entries"] if isinstance(e, dict)]
-    except (yt_dlp.utils.DownloadError, yt_dlp.utils.ExtractorError) as exc:
+    except (yt_dlp.utils.DownloadError, yt_dlp.utils.ExtractorError, OSError) as exc:
         logger.warning("B-roll yt-dlp search failed for %r: %s", search_term, exc)
         return []
 

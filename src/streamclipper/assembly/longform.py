@@ -427,7 +427,11 @@ def _build_broll_montage(
             opened_clips.append(fitted)
 
         if has_any_audio and fitted.audio is None:
-            silent_a = AudioClip(lambda t: [0.0, 0.0], duration=actual_take)
+            silent_a = AudioClip(
+                lambda t: np.zeros((len(t), 2)) if hasattr(t, "__len__") else [0.0, 0.0],
+                duration=actual_take,
+                fps=48000,
+            )
             opened_clips.append(silent_a)
             fitted = fitted.with_audio(silent_a)
             opened_clips.append(fitted)
@@ -846,14 +850,18 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None, 
                     )
                     swapped = False
                     for alt in pt.alternates:
-                        alt_key = (alt.url, round(alt.start, 2), round(alt.end, 2))
-                        if alt_key in used_alts:
-                            continue
+                        local_alt_swap = _resolve_local_clip_path(alt, temp_base)
                         alt.start = max(0.0, float(alt.start))
-                        alt.end = max(alt.start + 0.1, float(alt.end))
+                        if local_alt_swap is not None and float(alt.end) <= alt.start:
+                            alt.end = alt.start + (_probe_duration(local_alt_swap) or 10.0)
+                        else:
+                            alt.end = max(alt.start + 0.1, float(alt.end))
                         alt_max = 10.0 if alt.kind == "official" else 20.0
                         if (alt.end - alt.start) > alt_max:
                             alt.end = alt.start + alt_max
+                        alt_key = (alt.url, round(alt.start, 2), round(alt.end, 2))
+                        if alt_key in used_alts:
+                            continue
                         alt_risk = "UNKNOWN"
                         try:
                             alt_state = step_cache.load_state(alt.url)
@@ -1219,7 +1227,13 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None, 
                             logger.warning("Failed loading BGM bed '%s' for chapter card: %s", bgm_file, bgm_exc)
 
                     if not bgm_attached:
-                        card_clip = card_clip.with_audio(AudioClip(lambda t: [0.0, 0.0], duration=card_seconds))
+                        silent_card_a = AudioClip(
+                            lambda t: np.zeros((len(t), 2)) if hasattr(t, "__len__") else [0.0, 0.0],
+                            duration=card_seconds,
+                            fps=48000,
+                        )
+                        clips_to_close.append(silent_card_a)
+                        card_clip = card_clip.with_audio(silent_card_a)
 
                 card_file = render_block_mp4(
                     card_clip,
@@ -1280,15 +1294,16 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None, 
                     _add_candidate(downloaded_files.get(ev_key))
 
                 # (c) non-overlapping / distinct clips from other points if needed
-                for other_pt in plan.points:
-                    if other_pt.index == pt.index:
-                        continue
-                    for other_alt in getattr(other_pt, "alternates", []) or []:
-                        other_alt_key = (other_alt.url, round(other_alt.start, 2), round(other_alt.end, 2))
-                        _add_candidate(downloaded_files.get(other_alt_key) or _resolve_local_clip_path(other_alt, temp_base))
-                    for other_ev in other_pt.evidence:
-                        other_key = (other_ev.url, round(other_ev.start, 2), round(other_ev.end, 2))
-                        _add_candidate(downloaded_files.get(other_key))
+                if len(candidate_paths) < 2:
+                    for other_pt in plan.points:
+                        if other_pt.index == pt.index:
+                            continue
+                        for other_alt in getattr(other_pt, "alternates", []) or []:
+                            other_alt_key = (other_alt.url, round(other_alt.start, 2), round(other_alt.end, 2))
+                            _add_candidate(downloaded_files.get(other_alt_key) or _resolve_local_clip_path(other_alt, temp_base))
+                        for other_ev in other_pt.evidence:
+                            other_key = (other_ev.url, round(other_ev.start, 2), round(other_ev.end, 2))
+                            _add_candidate(downloaded_files.get(other_key))
 
                 apply_dim_blur = False
                 if not candidate_paths:
@@ -1345,7 +1360,13 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None, 
                 ev_trimmed = ev_fitted.subclipped(0.0, ev_actual_dur)
 
                 if ev_trimmed.audio is None:
-                    ev_trimmed = ev_trimmed.with_audio(AudioClip(lambda t: [0.0, 0.0], duration=ev_actual_dur))
+                    silent_ev_a = AudioClip(
+                        lambda t: np.zeros((len(t), 2)) if hasattr(t, "__len__") else [0.0, 0.0],
+                        duration=ev_actual_dur,
+                        fps=48000,
+                    )
+                    opened_ev.append(silent_ev_a)
+                    ev_trimmed = ev_trimmed.with_audio(silent_ev_a)
 
                 ev_block_file = render_block_mp4(ev_trimmed, f"block_{block_counter:02d}_pt_{pt.index}_ev_{ev_idx}", clips_to_close=opened_ev)
                 actual_ev_dur = _probe_duration(ev_block_file) or ev_actual_dur
@@ -1376,11 +1397,11 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None, 
 
             opened_out: list[Any] = []
             out_candidates: list[Path | str] = []
-            if fallback_clip_path:
-                out_candidates.append(fallback_clip_path)
-            for p_cand in downloaded_files.values():
+            for p_cand in reversed(list(downloaded_files.values())):
                 if p_cand and p_cand not in out_candidates:
                     out_candidates.append(p_cand)
+            if fallback_clip_path and fallback_clip_path not in out_candidates:
+                out_candidates.append(fallback_clip_path)
 
             zoomed = _build_broll_montage(
                 out_candidates,

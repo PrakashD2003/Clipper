@@ -1295,3 +1295,114 @@ def test_v44_longform_uses_local_broll_in_alternates_without_ytdlp(test_config: 
     assert download_urls == ["https://youtube.com/watch?v=ev01"]
 
 
+def test_v44_mixed_silent_and_audio_broll_montage_renders_cleanly(test_config: Config, tmp_path: Path) -> None:
+    """_build_broll_montage mixes silent gameplay B-roll and stream clips with audio without AudioClip errors."""
+    from streamclipper.assembly.longform import _build_broll_montage
+    from streamclipper.output.exporter import _close_clip_handles
+
+    silent_mp4 = tmp_path / "silent_gameplay.mp4"
+    subprocess.run(
+        [
+            "ffmpeg", "-y",
+            "-f", "lavfi", "-i", "testsrc=duration=10:size=320x180:rate=30",
+            "-c:v", "libx264", "-preset", "ultrafast",
+            str(silent_mp4.resolve()),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    audio_mp4 = _create_synthetic_mp4(tmp_path / "stream_audio.mp4", duration=10.0, width=320, height=180)
+    out_mp4 = tmp_path / "mixed_out.mp4"
+
+    opened: list[Any] = []
+    try:
+        montage = _build_broll_montage(
+            [silent_mp4, audio_mp4],
+            target_duration=16.0,
+            target_w=320,
+            target_h=180,
+            kenburns_max_zoom=1.05,
+            opened_clips=opened,
+        )
+        assert montage.audio is not None
+        assert getattr(montage.audio, "fps", None) is not None
+        montage.write_videofile(
+            str(out_mp4),
+            fps=30,
+            codec="libx264",
+            audio_codec="aac",
+            preset="ultrafast",
+            temp_audiofile_path=str(tmp_path),
+            logger=None,
+        )
+        assert out_mp4.is_file() and out_mp4.stat().st_size > 0
+    finally:
+        for c in opened:
+            _close_clip_handles(c)
+
+
+def test_v44_point_with_two_verified_alternates_skips_off_topic_points(test_config: Config, tmp_path: Path) -> None:
+    """When a point already has >= 2 distinct point-specific B-roll clips, other points' clips are not mixed in."""
+    from streamclipper.assembly import longform as lf_mod
+
+    temp_base = Path(test_config.get("general.temp_dir", "./temp"))
+    broll_dir = temp_base / "broll"
+    g1 = _create_synthetic_mp4(broll_dir / "gator1_0_5000_b0.mp4", duration=4.0, width=320, height=180)
+    g2 = _create_synthetic_mp4(broll_dir / "gator2_0_5000_b0.mp4", duration=4.0, width=320, height=180)
+
+    plan = TopicPlan(
+        plan_id="plan-v44-on-topic",
+        topic_id="on-topic-broll",
+        topic_title="On Topic Broll",
+        game="GTA 6",
+        shape="story",
+        status="approved",
+        cold_open="",
+        outro="",
+        points=[
+            TopicPoint(
+                index=1,
+                heading="Swamp Gators",
+                narration="Watch the alligator moving slowly through the swamp grass.",
+                evidence=[
+                    EvidenceClip(source_id="ev1", url="https://youtube.com/watch?v=ev1", channel="A", kind="stream", start=10.0, end=14.0),
+                ],
+                alternates=[
+                    EvidenceClip(source_id="gator1", url=str(g1), channel="B", kind="gameplay", start=0.0, end=4.0, role="broll"),
+                    EvidenceClip(source_id="gator2", url=str(g2), channel="C", kind="gameplay", start=0.0, end=4.0, role="broll"),
+                ],
+            ),
+            TopicPoint(
+                index=2,
+                heading="City Cars",
+                narration="Sports cars racing down Ocean Drive at night.",
+                evidence=[
+                    EvidenceClip(source_id="ev2", url="https://youtube.com/watch?v=ev2_cars", channel="D", kind="stream", start=20.0, end=24.0),
+                ],
+            ),
+        ],
+    )
+    save_plan(test_config, plan)
+
+    seen_montage_calls: list[list[str]] = []
+    orig_montage = lf_mod._build_broll_montage
+
+    def spy_montage(candidate_paths, *args, **kwargs):
+        seen_montage_calls.append([Path(p).name for p in candidate_paths])
+        return orig_montage(candidate_paths, *args, **kwargs)
+
+    def mock_download(url, start, end, out_dir, **kwargs):
+        tag = url.split("v=")[-1]
+        return _create_synthetic_mp4(out_dir / f"dl_{tag}.mp4", duration=max(1.0, end - start), width=320, height=180)
+
+    with patch("streamclipper.assembly.longform.download_segment", side_effect=mock_download), \
+         patch("streamclipper.assembly.longform.CopyrightRiskDetector.detect", return_value=("CLEAN", 0.99)), \
+         patch("streamclipper.assembly.longform.TransformativeNarrator.synthesize_speech", side_effect=_mock_synthesize), \
+         patch.object(lf_mod, "_build_broll_montage", side_effect=spy_montage):
+        res = render_long_video(test_config, plan)
+
+    assert res["status"] == "rendered"
+    # Point 1 montage (first call) must use only gator1 & gator2, NOT dl_ev2_cars.mp4
+    assert seen_montage_calls[0] == ["gator1_0_5000_b0.mp4", "gator2_0_5000_b0.mp4"]
+
+

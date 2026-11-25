@@ -147,21 +147,40 @@ def validate_plan(config: Config, plan: TopicPlan) -> list[str]:
     temp_base = Path(config.get("general.temp_dir", "./temp"))
     broll_dir = temp_base / "broll"
 
-    def _is_local_broll_clip(clip_obj: Any) -> bool:
+    def _resolve_local_broll_path(clip_obj: Any) -> Path | None:
         raw_url = str(getattr(clip_obj, "url", "") or "").strip()
         if raw_url and not raw_url.lower().startswith(("http://", "https://")):
             local_cand = raw_url[7:] if raw_url.lower().startswith("file://") else raw_url
             p = Path(local_cand)
             if p.is_file() and p.stat().st_size > 0:
-                return True
+                return p
         sid = str(getattr(clip_obj, "source_id", "") or "").strip()
         if sid and broll_dir.is_dir():
             import re as _re
             safe_sid = _re.sub(r"[^A-Za-z0-9_-]", "_", sid)
-            for cand in broll_dir.glob(f"{safe_sid}_*"):
+            for cand in sorted(broll_dir.glob(f"{safe_sid}_*")):
                 if cand.is_file() and cand.suffix.lower() in (".mp4", ".webm", ".mkv", ".mov") and cand.stat().st_size > 0:
-                    return True
-        return False
+                    return cand
+        return None
+
+    def _probe_local_duration_safe(file_path: Path) -> float:
+        try:
+            import subprocess as _sp
+            res = _sp.run(
+                [
+                    "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                    "-of", "default=noprint_wrappers=1:nokey=1", str(file_path.resolve()),
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                val = float(res.stdout.strip())
+                if val > 0:
+                    return val
+        except Exception:
+            pass
+        return 10.0
 
     for p in plan.points:
         if not (1 <= len(p.evidence) <= 2):
@@ -169,17 +188,25 @@ def validate_plan(config: Config, plan: TopicPlan) -> list[str]:
 
         all_clips = list(p.evidence) + list(p.alternates)
         for clip in all_clips:
-            if not clip.source_id and not _is_local_broll_clip(clip):
+            local_broll = _resolve_local_broll_path(clip)
+            if not clip.source_id and local_broll is None:
                 problems.append(f"Point {p.index} clip missing source_id.")
                 continue
 
             src = _get_source_safe(clip.source_id) if clip.source_id else None
-            if src is None and not _is_local_broll_clip(clip):
+            if src is None and local_broll is None:
                 problems.append(f"Point {p.index} clip source '{clip.source_id}' not found in library.")
 
-            if clip.start < 0 or clip.end <= clip.start:
+            if clip.start < 0:
                 problems.append(f"Point {p.index} clip '{clip.source_id}' has invalid timestamps ({clip.start}–{clip.end}).")
                 continue
+
+            if clip.end <= clip.start:
+                if local_broll is not None:
+                    clip.end = clip.start + min(_probe_local_duration_safe(local_broll), max_clip)
+                else:
+                    problems.append(f"Point {p.index} clip '{clip.source_id}' has invalid timestamps ({clip.start}–{clip.end}).")
+                    continue
 
             dur = clip.end - clip.start
             is_official = (clip.kind == "official") or (src is not None and getattr(src, "kind", "") == "official")
