@@ -1,6 +1,7 @@
 """Long-form 16:9 topic video assembly: blocks, narration mixing, chapters, thumbnail, and ASS burn-in."""
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import math

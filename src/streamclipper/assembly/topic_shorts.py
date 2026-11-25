@@ -3,6 +3,7 @@ credit tags, narration ducking, and single lossy encode.
 """
 from __future__ import annotations
 
+import copy
 import logging
 import math
 from pathlib import Path
