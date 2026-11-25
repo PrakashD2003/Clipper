@@ -113,6 +113,15 @@ This is the **primary monetization workflow**. Follow this exact sequence:
      3. Link `short_teaser.mp4` to the long video via YouTube Studio's **Related Video** setting.
      4. Check `assets/LICENSES.md` if any CC-BY background music credit is needed in the description.
 
+### Long-Form Editorial Standard (Topic-First, Zero Streamer Recap)
+
+Apply these rules whenever drafting, reviewing, or editing a `TopicPlan` (`start_topic_plan`, `submit_topic_plan`, `update_topic_plan`):
+
+- **Analyze the game/topic, NOT the streamer:** Footage is visual evidence—the lower-third `@channel` credit already attributes the clip. Avoid mentioning streamer names in narration (at most once in the entire video if genuinely relevant). NEVER write play-by-play reaction recaps (*"Mythpat ne bola..."*, *"CarryMinati ka reaction..."*, *"Speed asked chat..."*, *"chat spammed..."*).
+- **Substance in every chapter:** Explain *how* and *why* the mechanic, AI behavior, physics, lighting, or world detail works, what makes it impressive or broken, and how it compares to previous games (e.g. GTA 5 vs. GTA 6) or player expectations—strictly grounded in what's visible in the evidence clips.
+- **Smooth curiosity transitions:** Never open chapters with repetitive filler (*"Ab aate hain..."*, *"Ab baat karte hain..."*, *"Chalo ab..."*, *"Next up..."*) and avoid overusing *"bro"*. End each chapter with a clean bridge that teases the next point.
+- **Tight companion Shorts:** Keep the 3 companion Shorts focused on the topic/mechanic (30–40s target), not streamer name-drops, and keep `thumbnail_text` to **2–3 bold words max**.
+
 ---
 
 ## 4. Scriptwriting Quality Bar (Anti-"AI Slop" Rules)
