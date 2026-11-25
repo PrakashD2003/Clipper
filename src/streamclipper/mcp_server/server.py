@@ -3895,7 +3895,7 @@ def approve_topic_plan(plan_id: str, channel: str | None = None) -> str:
 
 
 @mcp.tool()
-def render_topic_video(plan_id: str, channel: str | None = None, draft: bool = False) -> str:
+async def render_topic_video(plan_id: str, channel: str | None = None, draft: bool = False) -> str:
     """Render a 16:9 long topic video from an approved TopicPlan as a background job.
 
     Downloads evidence clips, validates copyright against cached stream audio, records YouTube
@@ -3946,7 +3946,7 @@ def render_topic_video(plan_id: str, channel: str | None = None, draft: bool = F
 
 
 @mcp.tool()
-def render_topic_shorts(plan_id: str, slots: str = "", channel: str | None = None, draft: bool = False) -> str:
+async def render_topic_shorts(plan_id: str, slots: str = "", channel: str | None = None, draft: bool = False) -> str:
     """Render 9:16 vertical topic Shorts (teaser and/or standalone) from an approved TopicPlan as a background job.
 
     Composes evidence clips in blur_fill layout, applies persistent hook title, @channel credit tags,

@@ -430,7 +430,8 @@ def test_T6_1080x1920_output_with_audio(test_config: Config, synthetic_plan: Top
     assert post_path.is_file()
 
 
-def test_T6_mcp_tool_starts_job(test_config: Config, synthetic_plan: TopicPlan) -> None:
+@pytest.mark.asyncio
+async def test_T6_mcp_tool_starts_job(test_config: Config, synthetic_plan: TopicPlan) -> None:
     """MCP render_topic_shorts starts background job and refuses unapproved plans synchronously."""
     from streamclipper.mcp_server.server import mcp
 
@@ -443,7 +444,7 @@ def test_T6_mcp_tool_starts_job(test_config: Config, synthetic_plan: TopicPlan) 
     save_plan(test_config, synthetic_plan)
 
     with patch("streamclipper.mcp_server.server.Config", return_value=test_config):
-        res_unapproved = tool.fn(plan_id=synthetic_plan.plan_id)
+        res_unapproved = await tool.fn(plan_id=synthetic_plan.plan_id)
         assert "is not approved" in res_unapproved
 
     # Approved plan starts job
@@ -452,7 +453,7 @@ def test_T6_mcp_tool_starts_job(test_config: Config, synthetic_plan: TopicPlan) 
 
     with patch("streamclipper.mcp_server.server.Config", return_value=test_config), \
          patch("streamclipper.mcp_server.server._start_render_job", return_value=json.dumps({"status": "queued", "kind": "topic_shorts", "job_id": "job-123"})) as mock_start:
-        res_approved = tool.fn(plan_id=synthetic_plan.plan_id)
+        res_approved = await tool.fn(plan_id=synthetic_plan.plan_id)
         payload = json.loads(res_approved)
         assert payload.get("status") == "queued"
         assert payload.get("kind") == "topic_shorts"

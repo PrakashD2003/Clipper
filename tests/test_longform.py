@@ -512,7 +512,8 @@ def test_T5_block_order_story_crossfade(test_config: Config, synthetic_plan: Top
     assert synthetic_plan.status == "rendered"
 
 
-def test_T5_mcp_tool_starts_job_and_refuses_unapproved(test_config: Config, synthetic_plan: TopicPlan) -> None:
+@pytest.mark.asyncio
+async def test_T5_mcp_tool_starts_job_and_refuses_unapproved(test_config: Config, synthetic_plan: TopicPlan) -> None:
     """MCP render_topic_video refuses unapproved plans synchronously and starts a job on approved."""
     from streamclipper.mcp_server.server import mcp
 
@@ -526,7 +527,7 @@ def test_T5_mcp_tool_starts_job_and_refuses_unapproved(test_config: Config, synt
     tool = tools["render_topic_video"]
 
     with patch("streamclipper.mcp_server.server.Config", return_value=test_config):
-        raw_res = tool.fn(plan_id=synthetic_plan.plan_id)
+        raw_res = await tool.fn(plan_id=synthetic_plan.plan_id)
         res = json.loads(raw_res)
         assert "error" in res
         assert "not approved" in res["error"].lower()
@@ -537,7 +538,7 @@ def test_T5_mcp_tool_starts_job_and_refuses_unapproved(test_config: Config, synt
 
     with patch("streamclipper.mcp_server.server.Config", return_value=test_config), \
          patch("streamclipper.mcp_server.server._start_render_job", return_value=json.dumps({"status": "started", "job_id": "job-123"})) as mock_start:
-        raw_approved_res = tool.fn(plan_id=synthetic_plan.plan_id)
+        raw_approved_res = await tool.fn(plan_id=synthetic_plan.plan_id)
         approved_res = json.loads(raw_approved_res)
         assert approved_res.get("status") == "started"
         assert approved_res.get("job_id") == "job-123"

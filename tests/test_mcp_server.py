@@ -4789,8 +4789,11 @@ def test_mcp_topic_tools_channel_profile_isolation(tmp_path: Path) -> None:
         assert "hi_topic_1" not in en_topic_ids
 
 
-def test_mcp_topic_tools_unknown_channel_error() -> None:
+@pytest.mark.asyncio
+async def test_mcp_topic_tools_unknown_channel_error() -> None:
     """Verify topic tools return a clear JSON error when passed an unknown channel name."""
+    import inspect
+
     tools_and_calls = [
         lambda: mcp_server.suggest_topics("GTA 6", channel="bad_channel"),
         lambda: mcp_server.start_topic_plan("GTA 6", "Topic", channel="bad_channel"),
@@ -4806,6 +4809,8 @@ def test_mcp_topic_tools_unknown_channel_error() -> None:
 
     for call_fn in tools_and_calls:
         res = call_fn()
+        if inspect.isawaitable(res):
+            res = await res
         parsed = json.loads(res)
         assert "error" in parsed, f"Expected error in {res}"
         assert "Unknown channel profile" in parsed["error"]
@@ -4946,8 +4951,8 @@ async def test_draft_mode_overrides_tts_engine_and_draft_suffix(mcp_env: tuple[C
         return {"status": "rendered", "video_path": "long_draft.mp4"}
 
     with patch("streamclipper.assembly.longform.render_long_video", side_effect=mock_render_long):
-        # Synchronous invocation check of tool
-        res_str = mcp_server.render_topic_video("plan_draft_test", draft=True)
+        # Async invocation check of tool
+        res_str = await mcp_server.render_topic_video("plan_draft_test", draft=True)
         res_data = json.loads(res_str)
         assert res_data["status"] == "started"
 
@@ -5079,12 +5084,12 @@ async def test_topic_plan_status_rendered_allows_shorts_and_re_renders(mcp_env: 
     save_plan(config, plan)
 
     with patch("streamclipper.assembly.topic_shorts.render_topic_shorts", return_value={"status": "complete"}):
-        res_shorts = mcp_server.render_topic_shorts("plan_rendered_status_test", slots="teaser", draft=True)
+        res_shorts = await mcp_server.render_topic_shorts("plan_rendered_status_test", slots="teaser", draft=True)
         data_shorts = json.loads(res_shorts)
         assert data_shorts["status"] == "started"
 
     with patch("streamclipper.assembly.longform.render_long_video", return_value={"status": "rendered", "video_path": "long.mp4"}):
-        res_long = mcp_server.render_topic_video("plan_rendered_status_test", draft=False)
+        res_long = await mcp_server.render_topic_video("plan_rendered_status_test", draft=False)
         data_long = json.loads(res_long)
         assert data_long["status"] == "started"
 
