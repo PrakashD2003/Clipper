@@ -67,8 +67,8 @@ def _format_timestamp_url(url: str, start_seconds: float) -> str:
 
 
 def _clean_point_label_for_title(raw_heading: str) -> str:
-    """Strip countdown numbers (#1, #2) and verbose colon subtitles from point headings for A/B titles."""
-    label = re.sub(r"^\s*#\d+[\s:.\-–—]*", "", str(raw_heading or "")).strip()
+    """Strip countdown numbers (#1, 1., #2) and verbose colon subtitles from point headings for A/B titles."""
+    label = re.sub(r"^\s*(?:#\d+|\d+[.)])[\s:.\-–—]*", "", str(raw_heading or "")).strip()
     if ":" in label:
         head = label.split(":", 1)[0].strip()
         if head:

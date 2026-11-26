@@ -191,8 +191,14 @@ def test_v45_fetch_topic_broll_appends_no_commentary_and_skips_countdown_reactio
 
     assert _is_excluded_broll_title("Top 10 Details You Missed in GTA 6") is True
     assert _is_excluded_broll_title("Top 20 Hidden Secrets in GTA 6") is True
+    assert _is_excluded_broll_title("22 Hidden Details in GTA 6") is True
+    assert _is_excluded_broll_title("15 Things You Didn't Know About GTA 6") is True
+    assert _is_excluded_broll_title("10 Details You Missed in GTA 6 Trailer 2") is True
     assert _is_excluded_broll_title("GTA 6 Vehicles Ranked") is True
     assert _is_excluded_broll_title("15 Things You Missed in GTA 6 Trailer 2") is True
+    assert _is_excluded_broll_title("GTA 6 Trailer 2 Breakdown") is True
+    assert _is_excluded_broll_title("GTA 6 Gameplay Analysis") is True
+    assert _is_excluded_broll_title("GTA 6 Map Explained") is True
     assert _is_excluded_broll_title("GTA 6 Honest Review & Impressions") is True
     assert _is_excluded_broll_title("Streamer Reaction to GTA 6") is True
     assert _is_excluded_broll_title("GTA 6 Swamp Gameplay 4K No Commentary") is False
@@ -201,6 +207,8 @@ def test_v45_fetch_topic_broll_appends_no_commentary_and_skips_countdown_reactio
     seen_terms: list[str] = []
     fake_entries = [
         {"id": "top20", "title": "Top 20 Things You Missed in GTA 6", "duration": 180, "view_count": 999999},
+        {"id": "cnt22", "title": "22 Hidden Details in GTA 6", "duration": 180, "view_count": 950000},
+        {"id": "brk1", "title": "GTA 6 Trailer 2 Breakdown & Analysis", "duration": 180, "view_count": 910000},
         {"id": "top10", "title": "Top 10 GTA 6 Interiors Ranked", "duration": 160, "view_count": 888888},
         {"id": "review1", "title": "GTA 6 Graphics Review", "duration": 200, "view_count": 777777},
         {"id": "react1", "title": "GTA 6 Trailer 2 Reaction", "duration": 150, "view_count": 666666},

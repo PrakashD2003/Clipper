@@ -476,10 +476,16 @@ def _build_broll_montage(
 
 _COMMENTARY_TITLE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\btop\s*\d+\b", re.IGNORECASE),
+    re.compile(
+        r"\b\d+\s+(?:things|details|secrets|facts|reasons|easter\s+eggs|mistakes|hidden\s+details)\b",
+        re.IGNORECASE,
+    ),
     re.compile(r"\branked\b", re.IGNORECASE),
-    re.compile(r"\bthings\s+you\s+missed\b", re.IGNORECASE),
-    re.compile(r"\bdetails\s+you\s+missed\b", re.IGNORECASE),
-    re.compile(r"\bsecrets\s+you\s+missed\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:things|details|secrets|facts|everything)\s+you\s+(?:missed|didn'?t\s+know|didn'?t\s+notice)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\beverything\s+you\s+need\s+to\s+know\b", re.IGNORECASE),
     re.compile(r"\breview(?:s|ing)?\b", re.IGNORECASE),
     re.compile(r"\bbreakdown\b", re.IGNORECASE),
     re.compile(r"\banalysis\b", re.IGNORECASE),
@@ -490,17 +496,24 @@ _COMMENTARY_TITLE_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 _COMMENTARY_CHANNELS: frozenset[str] = frozenset({
     "ign",
+    "ign entertainment",
     "gamespot",
     "gameranx",
     "digital foundry",
     "whatculture",
     "whatculture gaming",
     "watchmojo",
+    "watchmojo.com",
     "screenrant",
+    "screen rant",
     "kotaku",
+    "polygon",
     "pc gamer",
     "eurogamer",
     "outside xbox",
+    "thegamer",
+    "gamexplain",
+    "legacykillahd",
     "mrbossftw",
     "rockstar games",
 })
@@ -1647,8 +1660,23 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None, 
                 ev_video = VideoFileClip(str(ev_path)) if ev_path else ColorClip(size=(target_w, target_h), color=(10, 10, 10), duration=ev_dur)
                 opened_ev.append(ev_video)
                 ev_fitted = _fit_to_canvas(ev_video, target_w, target_h)
-                ev_actual_dur = min(ev_dur, float(ev_fitted.duration or ev_dur))
-                ev_trimmed = ev_fitted.subclipped(0.0, ev_actual_dur)
+                if ev_fitted is not ev_video:
+                    opened_ev.append(ev_fitted)
+                ev_total_dur = float(ev_fitted.duration or ev_dur)
+                ev_sub_start = 0.0
+                if ev_path and ev_clip.start > 0.0:
+                    try:
+                        resolved_ev = Path(ev_path).resolve()
+                        in_temp_segments = temp_dir.resolve() in resolved_ev.parents
+                        in_broll_dir = (temp_base / "broll").resolve() in resolved_ev.parents
+                        if not in_temp_segments and not in_broll_dir and ev_total_dur > ev_clip.start + 0.1:
+                            ev_sub_start = float(ev_clip.start)
+                    except OSError:
+                        pass
+                ev_actual_dur = min(ev_dur, max(0.1, ev_total_dur - ev_sub_start))
+                ev_trimmed = ev_fitted.subclipped(ev_sub_start, ev_sub_start + ev_actual_dur)
+                if ev_trimmed is not ev_fitted:
+                    opened_ev.append(ev_trimmed)
 
                 if ev_trimmed.audio is None:
                     silent_ev_a = AudioClip(
@@ -1668,8 +1696,15 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None, 
                 chap_pt.credit_events.append((rel_t, rel_t + actual_cred_dur, cred_text))
                 rel_t += actual_ev_dur
 
-            chap_pt.duration = rel_t
-            chapters_assembled.append(chap_pt)
+            if chap_pt.block_files:
+                chap_pt.duration = rel_t
+                chapters_assembled.append(chap_pt)
+            else:
+                logger.warning(
+                    "Skipping empty chapter %d ('%s') with no narration or reaction blocks.",
+                    pt.index,
+                    pt.heading,
+                )
 
         # --- Chapter: Outro ---
         if "outro" in voiced_narrations:
@@ -1735,6 +1770,10 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None, 
         # 5. Concatenate intermediate blocks into full video
         # In story shape: 0.4s crossfade marks chapters!
         # In numbered/countdown: standard concat demuxer (hard cuts).
+        if not chapters_assembled:
+            raise RuntimeError(
+                f"Topic plan '{plan.plan_id}' produced no video blocks (missing narration and reaction clips)."
+            )
         concat_video = temp_dir / "concatenated.mp4"
         chapters_data: list[tuple[float, str]] = []
         narration_windows: list[tuple[float, float, str]] = []

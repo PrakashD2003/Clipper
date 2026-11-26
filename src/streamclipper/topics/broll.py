@@ -51,11 +51,26 @@ _NEGATIVE_BROLL_TERMS: tuple[str, ...] = (
 
 _EXCLUDED_BROLL_TITLE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\btop\s*\d+\b", re.IGNORECASE),
+    re.compile(
+        r"\b\d+\s+(?:things|details|secrets|facts|reasons|easter\s+eggs|mistakes|hidden\s+details|changes|upgrades)\b",
+        re.IGNORECASE,
+    ),
     re.compile(r"\branked\b", re.IGNORECASE),
-    re.compile(r"\bthings\s+you\s+missed\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:things|details|secrets|facts|everything)\s+you\s+(?:missed|didn'?t\s+know|didn'?t\s+notice)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\beverything\s+you\s+need\s+to\s+know\b", re.IGNORECASE),
     re.compile(r"\breview(?:s|ing)?\b", re.IGNORECASE),
     re.compile(r"\breaction(?:s)?\b", re.IGNORECASE),
     re.compile(r"\breact(?:s|ing)\b", re.IGNORECASE),
+    re.compile(r"\bbreakdown\b", re.IGNORECASE),
+    re.compile(r"\banalysis\b", re.IGNORECASE),
+    re.compile(r"\bexplained\b", re.IGNORECASE),
+    re.compile(r"\bvideo\s+essay\b", re.IGNORECASE),
+    re.compile(r"\bbefore\s+you\s+buy\b", re.IGNORECASE),
+    re.compile(r"\bfacecam\b", re.IGNORECASE),
+    re.compile(r"\bpodcast\b", re.IGNORECASE),
 )
 
 
@@ -373,7 +388,7 @@ def fetch_topic_broll(
     broll_dir = temp_base / "broll"
     broll_dir.mkdir(parents=True, exist_ok=True)
 
-    search_n = max(8, limit * 4)
+    search_n = max(10, limit * 5)
     search_term = f"ytsearch{search_n}:{search_query}"
 
     ydl_opts: dict[str, Any] = {

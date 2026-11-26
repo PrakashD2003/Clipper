@@ -1623,3 +1623,100 @@ def test_v45_long_title_variants_strips_point_numbers_and_colons() -> None:
         assert "Why #" not in v
 
 
+def test_v45_narrated_essay_story_empty_narration_chapter_does_not_crash(test_config: Config, tmp_path: Path) -> None:
+    """In story + narrated_essay mode, a point with empty narration and no reaction is skipped instead of crashing ffmpeg."""
+    vid = _create_synthetic_mp4(tmp_path / "ev_story.mp4", duration=2.0, width=320, height=180)
+    plan = TopicPlan(
+        plan_id="plan-v45-empty-story-pt",
+        topic_id="empty-story-pt",
+        topic_title="Empty Story Point",
+        game="GTA 6",
+        shape="story",
+        status="approved",
+        cold_open="Welcome to the story breakdown.",
+        outro="Thanks for watching.",
+        points=[
+            TopicPoint(
+                index=1,
+                heading="Visual Only Point",
+                narration="",
+                evidence=[
+                    EvidenceClip(
+                        source_id="ev_empty_pt",
+                        url=str(vid),
+                        channel="RawPlayer",
+                        kind="stream",
+                        start=0.0,
+                        end=2.0,
+                        role="evidence",
+                    )
+                ],
+            ),
+            TopicPoint(
+                index=2,
+                heading="Narrated Point",
+                narration="Notice the dynamic lighting across Vice Beach.",
+                evidence=[
+                    EvidenceClip(
+                        source_id="ev_nar_pt",
+                        url=str(vid),
+                        channel="RawPlayer",
+                        kind="stream",
+                        start=0.0,
+                        end=2.0,
+                        role="evidence",
+                    )
+                ],
+            ),
+        ],
+    )
+    save_plan(test_config, plan)
+
+    with patch("streamclipper.assembly.longform.CopyrightRiskDetector.detect", return_value=("CLEAN", 0.99)), \
+         patch("streamclipper.assembly.longform.TransformativeNarrator.synthesize_speech", side_effect=_mock_synthesize):
+        res = render_long_video(test_config, plan)
+
+    assert res["status"] == "rendered"
+    assert Path(res["video_path"]).is_file()
+
+
+def test_v45_external_commentary_catches_numeric_countdown_titles(tmp_path: Path) -> None:
+    """_is_external_commentary_clip catches numeric countdowns like '22 Hidden Details' and '15 Things You Didn't Know'."""
+    from streamclipper.assembly.longform import _is_external_commentary_clip
+
+    clip_22 = EvidenceClip(
+        source_id="c22",
+        url="https://youtube.com/watch?v=c22",
+        channel="SomeYouTuber",
+        kind="stream",
+        start=0.0,
+        end=10.0,
+        role="reaction",
+        reason="22 Hidden Details in GTA 6",
+    )
+    clip_15 = EvidenceClip(
+        source_id="c15",
+        url="https://youtube.com/watch?v=c15",
+        channel="SomeYouTuber",
+        kind="stream",
+        start=0.0,
+        end=10.0,
+        role="reaction",
+        reason="15 Things You Didn't Know About GTA 6",
+    )
+    clip_clean = EvidenceClip(
+        source_id="clean_s",
+        url="https://youtube.com/watch?v=clean_s",
+        channel="IShowSpeed",
+        kind="stream",
+        start=0.0,
+        end=5.0,
+        role="reaction",
+        reason="Streamer gasped at the alligator",
+    )
+
+    assert _is_external_commentary_clip(clip_22, temp_base=tmp_path) is True
+    assert _is_external_commentary_clip(clip_15, temp_base=tmp_path) is True
+    assert _is_external_commentary_clip(clip_clean, temp_base=tmp_path) is False
+
+
