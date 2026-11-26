@@ -280,6 +280,9 @@ topics:
   short_max_seconds: 180
 
 longform:
+  style: "narrated_essay"              # narrated_essay (narration-driven montage + <=6s reaction punch) | classic (legacy full-volume evidence dump)
+  max_un_narrated_seconds: 6.0
+  broll_cut_seconds: 6.5
   width: 1920
   height: 1080
   fps: 30

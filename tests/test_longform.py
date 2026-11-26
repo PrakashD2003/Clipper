@@ -1342,9 +1342,10 @@ def test_v44_mixed_silent_and_audio_broll_montage_renders_cleanly(test_config: C
 
 
 def test_v44_point_with_two_verified_alternates_skips_off_topic_points(test_config: Config, tmp_path: Path) -> None:
-    """When a point already has >= 2 distinct point-specific B-roll clips, other points' clips are not mixed in."""
+    """In classic mode, when a point has >= 2 distinct B-roll clips, other points' clips are not mixed in."""
     from streamclipper.assembly import longform as lf_mod
 
+    _set_cfg(test_config, "longform.style", "classic")
     temp_base = Path(test_config.get("general.temp_dir", "./temp"))
     broll_dir = temp_base / "broll"
     g1 = _create_synthetic_mp4(broll_dir / "gator1_0_5000_b0.mp4", duration=4.0, width=320, height=180)
@@ -1404,5 +1405,221 @@ def test_v44_point_with_two_verified_alternates_skips_off_topic_points(test_conf
     assert res["status"] == "rendered"
     # Point 1 montage (first call) must use only gator1 & gator2, NOT dl_ev2_cars.mp4
     assert seen_montage_calls[0] == ["gator1_0_5000_b0.mp4", "gator2_0_5000_b0.mp4"]
+
+
+# ---------------------------------------------------------------------------
+# v4.5 Tests: narrated_essay mode & A/B Title Cleanup
+# ---------------------------------------------------------------------------
+
+def test_v45_config_defaults_narrated_essay() -> None:
+    """Config defaults to longform.style='narrated_essay', max_un_narrated_seconds=6.0, broll_cut_seconds=6.5."""
+    cfg = Config()
+    assert cfg.get("longform.style") == "narrated_essay"
+    assert cfg.get("longform.max_un_narrated_seconds") == 6.0
+    assert cfg.get("longform.broll_cut_seconds") == 6.5
+
+
+def test_v45_narrated_essay_folds_evidence_and_caps_reaction_at_6s(test_config: Config, tmp_path: Path) -> None:
+    """narrated_essay folds evidence+alternates into montage, skips non-reaction dumps, caps reaction <= 6s."""
+    from streamclipper.assembly import longform as lf_mod
+
+    temp_base = Path(test_config.get("general.temp_dir", "./temp"))
+    broll_dir = temp_base / "broll"
+    alt1_mp4 = _create_synthetic_mp4(broll_dir / "alt1_0_5000_b0.mp4", duration=5.0, width=320, height=180)
+
+    plan = TopicPlan(
+        plan_id="plan-v45-essay",
+        topic_id="essay-pacing",
+        topic_title="Essay Pacing Test",
+        game="GTA 6",
+        shape="story",
+        status="approved",
+        cold_open="",
+        outro="",
+        points=[
+            # Point 1: evidence only + alternate broll (NO reaction) -> 0 post-narration blocks
+            TopicPoint(
+                index=1,
+                heading="Swamp Ecosystem",
+                narration="Look at how the swamp wildlife reacts dynamically around the boat.",
+                evidence=[
+                    EvidenceClip(source_id="ev1", url="https://youtube.com/watch?v=ev1", channel="SwampCam", kind="stream", start=0.0, end=18.0, role="evidence"),
+                ],
+                alternates=[
+                    EvidenceClip(source_id="alt1", url=str(alt1_mp4), channel="RawPlays", kind="gameplay", start=0.0, end=5.0, role="broll"),
+                ],
+            ),
+            # Point 2: evidence + 18s genuine streamer reaction -> 1 post-narration block capped at <= 6.0s
+            TopicPoint(
+                index=2,
+                heading="Bridge Chase",
+                narration="Police cruisers swarm the bridge right as the getaway driver floors it.",
+                evidence=[
+                    EvidenceClip(source_id="ev2", url="https://youtube.com/watch?v=ev2", channel="ViceDriver", kind="stream", start=0.0, end=15.0, role="evidence"),
+                    EvidenceClip(source_id="react2", url="https://youtube.com/watch?v=react2", channel="IShowSpeed", kind="stream", start=0.0, end=18.0, role="reaction"),
+                ],
+            ),
+            # Point 3: external commentary YouTuber tagged role="reaction" -> skipped completely
+            TopicPoint(
+                index=3,
+                heading="Night Reflections",
+                narration="Neon puddle reflections light up the entire boulevard in real time.",
+                evidence=[
+                    EvidenceClip(source_id="ev3", url="https://youtube.com/watch?v=ev3", channel="NeonDrive", kind="stream", start=0.0, end=14.0, role="evidence"),
+                    EvidenceClip(source_id="react3", url="https://youtube.com/watch?v=react3", channel="Gameranx", kind="stream", start=0.0, end=16.0, role="reaction", reason="Top 10 review commentary"),
+                ],
+            ),
+        ],
+    )
+    save_plan(test_config, plan)
+
+    seen_montage_calls: list[list[str]] = []
+    orig_montage = lf_mod._build_broll_montage
+
+    def spy_montage(candidate_paths, *args, **kwargs):
+        seen_montage_calls.append([Path(p).name for p in candidate_paths])
+        return orig_montage(candidate_paths, *args, **kwargs)
+
+    rendered_blocks: dict[str, float] = {}
+    from moviepy import VideoClip
+    orig_write = VideoClip.write_videofile
+
+    def spy_write(self, filename, *args, **kwargs):
+        stem = Path(filename).stem.replace("_raw", "")
+        rendered_blocks[stem] = float(self.duration or 0.0)
+        return orig_write(self, filename, *args, **kwargs)
+
+    def mock_download(url, start, end, out_dir, **kwargs):
+        tag = url.split("v=")[-1]
+        return _create_synthetic_mp4(out_dir / f"dl_{tag}.mp4", duration=max(1.0, end - start), width=320, height=180)
+
+    with patch("streamclipper.assembly.longform.download_segment", side_effect=mock_download), \
+         patch("streamclipper.assembly.longform.CopyrightRiskDetector.detect", return_value=("CLEAN", 0.99)), \
+         patch("streamclipper.assembly.longform.TransformativeNarrator.synthesize_speech", side_effect=_mock_synthesize), \
+         patch.object(lf_mod, "_build_broll_montage", side_effect=spy_montage), \
+         patch.object(VideoClip, "write_videofile", spy_write):
+        res = render_long_video(test_config, plan)
+
+    assert res["status"] == "rendered"
+    assert Path(res["video_path"]).is_file()
+
+    # Point 1 montage folded ev1 + alt1 and excluded Point 2/3 off-topic clips
+    assert seen_montage_calls[0] == ["dl_ev1.mp4", "alt1_0_5000_b0.mp4"]
+
+    # Point 1 and Point 3 must have ZERO un-narrated post-chapter evidence blocks
+    ev_blocks_pt1 = [k for k in rendered_blocks if "_pt_1_ev_" in k]
+    ev_blocks_pt2 = [(k, v) for k, v in rendered_blocks.items() if "_pt_2_ev_" in k]
+    ev_blocks_pt3 = [k for k in rendered_blocks if "_pt_3_ev_" in k]
+
+    assert ev_blocks_pt1 == []
+    assert len(ev_blocks_pt2) == 1
+    assert ev_blocks_pt2[0][1] <= 6.0 + 1e-6
+    assert ev_blocks_pt3 == []
+
+
+def test_v45_narrated_essay_cycles_cuts_around_6_5s_and_emits_montage_credits(
+    test_config: Config, tmp_path: Path
+) -> None:
+    """narrated_essay cycles cuts every ~6.5s and attaches lower-third @channel credits over the montage."""
+    from streamclipper.assembly import longform as lf_mod
+
+    plan = TopicPlan(
+        plan_id="plan-v45-credits",
+        topic_id="montage-credits",
+        topic_title="Montage Credits Test",
+        game="GTA 6",
+        shape="story",
+        status="approved",
+        cold_open="",
+        outro="",
+        points=[
+            TopicPoint(
+                index=1,
+                heading="Harbor Boats",
+                narration=(
+                    "First look at the harbor waves crashing hard against the wooden dock. "
+                    "Notice how every single boat bobs independently as wakes roll across the bay. "
+                    "Even distant cargo ships leave realistic foam trails across the water surface."
+                ),
+                evidence=[
+                    EvidenceClip(source_id="s1", url="https://youtube.com/watch?v=boat1", channel="HarborPlays", kind="stream", start=0.0, end=12.0, role="evidence"),
+                    EvidenceClip(source_id="s2", url="https://youtube.com/watch?v=boat2", channel="RockstarGames", kind="official", start=0.0, end=10.0, role="evidence"),
+                ],
+                alternates=[
+                    EvidenceClip(source_id="s3", url="https://youtube.com/watch?v=boat3", channel="OceanShowcase", kind="gameplay", start=0.0, end=12.0, role="broll"),
+                ],
+            ),
+        ],
+    )
+    save_plan(test_config, plan)
+
+    captured_slice_params: list[tuple[float, float]] = []
+    captured_segments: list[tuple[str, float, float]] = []
+    orig_montage = lf_mod._build_broll_montage
+
+    def spy_montage(*args, **kwargs):
+        captured_slice_params.append((kwargs.get("slice_min", 0.0), kwargs.get("slice_max", 0.0)))
+        seg_log = kwargs.get("segment_log")
+        res = orig_montage(*args, **kwargs)
+        if seg_log:
+            for p, st, et in seg_log:
+                captured_segments.append((Path(p).name, round(st, 2), round(et, 2)))
+        return res
+
+    captured_credits: list[tuple[float, float, str]] = []
+    orig_build_ass = lf_mod._build_longform_ass
+
+    def spy_build_ass(nar_wins, cred_wins, out_ass, **kwargs):
+        captured_credits.extend(cred_wins)
+        return orig_build_ass(nar_wins, cred_wins, out_ass, **kwargs)
+
+    def long_mock_synth(text, out_path, **kwargs):
+        # Force ~20s narration so multiple ~6.5s cuts happen
+        return _ensure_synthetic_wav(Path(out_path), duration_seconds=20.0)
+
+    def mock_download(url, start, end, out_dir, **kwargs):
+        tag = url.split("v=")[-1]
+        return _create_synthetic_mp4(out_dir / f"dl_{tag}.mp4", duration=max(1.0, end - start), width=320, height=180)
+
+    with patch("streamclipper.assembly.longform.download_segment", side_effect=mock_download), \
+         patch("streamclipper.assembly.longform.CopyrightRiskDetector.detect", return_value=("CLEAN", 0.99)), \
+         patch("streamclipper.assembly.longform.TransformativeNarrator.synthesize_speech", side_effect=long_mock_synth), \
+         patch.object(lf_mod, "_build_broll_montage", side_effect=spy_montage), \
+         patch.object(lf_mod, "_build_longform_ass", side_effect=spy_build_ass):
+        res = render_long_video(test_config, plan)
+
+    assert res["status"] == "rendered"
+    assert captured_slice_params[0] == (6.0, 7.0)
+    assert len(captured_segments) >= 3
+    for _, st, et in captured_segments:
+        assert 4.0 <= (et - st) <= 7.0
+
+    credit_texts = [c[2] for c in captured_credits]
+    assert "@HarborPlays" in credit_texts
+    assert "Official footage: RockstarGames" in credit_texts
+    assert "@OceanShowcase" in credit_texts
+
+
+def test_v45_long_title_variants_strips_point_numbers_and_colons() -> None:
+    """generate_long_title_variants cleans '#1 Lighting & Visuals: ...' so it never injects '#1 ...:' verbatim."""
+    from streamclipper.output.topic_post import generate_long_title_variants
+
+    plan = TopicPlan(
+        plan_id="plan-v45-title",
+        topic_id="lighting-visuals",
+        topic_title="GTA 6 Lighting Upgrades",
+        game="GTA 6",
+        video_title="How GTA 6 Lighting Looks So Real",
+        thumbnail_text="NEXT GEN LIGHTING",
+        points=[
+            TopicPoint(index=1, heading="#1 Lighting & Visuals: Raytraced Reflections Everywhere", narration="Test 1."),
+            TopicPoint(index=2, heading="#2 Water Physics: Dynamic Ocean Waves", narration="Test 2."),
+        ],
+    )
+    variants = generate_long_title_variants(plan)
+    assert any("Why Lighting & Visuals Changes Everything in GTA 6" == v for v in variants)
+    for v in variants:
+        assert "#1" not in v
+        assert "Why #" not in v
 
 

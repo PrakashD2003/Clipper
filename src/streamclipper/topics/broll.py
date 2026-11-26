@@ -42,7 +42,53 @@ _NEGATIVE_BROLL_TERMS: tuple[str, ...] = (
     "facecam",
     "podcast",
     "stream vod",
+    "top 10",
+    "top 20",
+    "ranked",
+    "things you missed",
+    "review",
 )
+
+_EXCLUDED_BROLL_TITLE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\btop\s*\d+\b", re.IGNORECASE),
+    re.compile(r"\branked\b", re.IGNORECASE),
+    re.compile(r"\bthings\s+you\s+missed\b", re.IGNORECASE),
+    re.compile(r"\breview(?:s|ing)?\b", re.IGNORECASE),
+    re.compile(r"\breaction(?:s)?\b", re.IGNORECASE),
+    re.compile(r"\breact(?:s|ing)\b", re.IGNORECASE),
+)
+
+
+def _is_excluded_broll_title(title: str) -> bool:
+    """Return True for countdown, review, reaction, or commentary titles unsuitable as raw B-roll."""
+    clean = str(title or "").strip()
+    if not clean:
+        return False
+    low = clean.lower()
+    for pat in _EXCLUDED_BROLL_TITLE_PATTERNS:
+        if pat.search(low):
+            return True
+    if "commentary" in low and "no commentary" not in low:
+        return True
+    return False
+
+
+def _enrich_broll_search_query(query: str, game: str = "GTA 6") -> str:
+    """Ensure gameplay B-roll searches include game context and 'no commentary'."""
+    clean_query = str(query or "").strip()
+    clean_game = str(game or "").strip()
+    if clean_game and clean_game.lower() not in clean_query.lower():
+        search_query = f"{clean_game} {clean_query}"
+    else:
+        search_query = clean_query
+
+    q_low = search_query.lower()
+    if "no commentary" not in q_low:
+        if "gameplay" in q_low:
+            search_query = f"{search_query} no commentary"
+        else:
+            search_query = f"{search_query} no commentary gameplay"
+    return search_query
 
 
 def _resolve_watch_url(entry: dict[str, Any], video_id: str) -> str:
@@ -122,6 +168,8 @@ def _score_broll_candidate(entry: dict[str, Any]) -> tuple[bool, float]:
     for term in _NEGATIVE_BROLL_TERMS:
         if term in title:
             score -= 25.0
+    if _is_excluded_broll_title(title):
+        score -= 80.0
     if re.search(r"\blive\b", title):
         score -= 20.0
     if re.search(r"\bvod\b", title):
@@ -313,11 +361,7 @@ def fetch_topic_broll(
     if not clean_query:
         raise ValueError("query is required")
 
-    clean_game = str(game or "").strip()
-    if clean_game and clean_game.lower() not in clean_query.lower():
-        search_query = f"{clean_game} {clean_query}"
-    else:
-        search_query = clean_query
+    search_query = _enrich_broll_search_query(clean_query, game=game)
 
     limit = int(max_clips)
     if limit <= 0:
@@ -359,6 +403,10 @@ def fetch_topic_broll(
     for entry in entries:
         ok, score = _score_broll_candidate(entry)
         if not ok:
+            continue
+        title_str = str(entry.get("title") or "")
+        if _is_excluded_broll_title(title_str):
+            logger.debug("Skipping countdown/commentary/reaction B-roll candidate: %r", title_str)
             continue
         vid = str(entry.get("id") or "").strip()
         if not vid or vid in seen_ids:

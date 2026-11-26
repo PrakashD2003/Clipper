@@ -27,6 +27,7 @@ from streamclipper.cache import StepCache
 from streamclipper.config import Config
 from streamclipper.download.audio import _extract_youtube_id_from_url
 from streamclipper.download.video import download_segment
+from streamclipper.library.index import LibraryIndex
 from streamclipper.output.exporter import _close_clip_handles
 from streamclipper.output.topic_post import write_long_post
 from streamclipper.topics.models import EvidenceClip, TopicPlan, TopicPoint
@@ -334,6 +335,7 @@ def _build_broll_montage(
     slice_max: float = 10.0,
     blur_radius: int = 0,
     dim_factor: float = 1.0,
+    segment_log: list[tuple[Path, float, float]] | None = None,
 ) -> Any:
     """Build a multi-clip non-looping B-roll montage covering target_duration.
 
@@ -446,6 +448,8 @@ def _build_broll_montage(
             opened_clips.append(zoomed_slice)
 
         slices.append(zoomed_slice)
+        if segment_log is not None:
+            segment_log.append((src["path"], accumulated, min(target_dur, accumulated + actual_take)))
         accumulated += actual_take
 
         # Guard against infinite loops on degenerate 0-duration clips
@@ -468,6 +472,175 @@ def _build_broll_montage(
         opened_clips.append(montage)
 
     return montage
+
+
+_COMMENTARY_TITLE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\btop\s*\d+\b", re.IGNORECASE),
+    re.compile(r"\branked\b", re.IGNORECASE),
+    re.compile(r"\bthings\s+you\s+missed\b", re.IGNORECASE),
+    re.compile(r"\bdetails\s+you\s+missed\b", re.IGNORECASE),
+    re.compile(r"\bsecrets\s+you\s+missed\b", re.IGNORECASE),
+    re.compile(r"\breview(?:s|ing)?\b", re.IGNORECASE),
+    re.compile(r"\bbreakdown\b", re.IGNORECASE),
+    re.compile(r"\banalysis\b", re.IGNORECASE),
+    re.compile(r"\bexplained\b", re.IGNORECASE),
+    re.compile(r"\bvideo\s+essay\b", re.IGNORECASE),
+    re.compile(r"\bbefore\s+you\s+buy\b", re.IGNORECASE),
+)
+
+_COMMENTARY_CHANNELS: frozenset[str] = frozenset({
+    "ign",
+    "gamespot",
+    "gameranx",
+    "digital foundry",
+    "whatculture",
+    "whatculture gaming",
+    "watchmojo",
+    "screenrant",
+    "kotaku",
+    "pc gamer",
+    "eurogamer",
+    "outside xbox",
+    "mrbossftw",
+    "rockstar games",
+})
+
+
+def _format_clip_credit(clip: EvidenceClip, game: str) -> str:
+    """Format lower-third attribution credit string for an EvidenceClip."""
+    if getattr(clip, "kind", "stream") == "official":
+        raw_ch = (clip.channel or "").strip().lstrip("@")
+        return f"Official footage: {raw_ch}" if raw_ch else f"Official {game} footage"
+    ch_clean = (clip.channel or "").strip().lstrip("@")
+    return f"@{ch_clean}" if ch_clean else "@Unknown"
+
+
+def _is_external_commentary_clip(
+    clip: EvidenceClip,
+    *,
+    temp_base: Path,
+    step_cache: StepCache | None = None,
+    library_index: LibraryIndex | None = None,
+    resolved_path: Path | None = None,
+) -> bool:
+    """Return True if a reaction clip appears to come from an external commentary YouTuber or non-stream source."""
+    clip_kind = str(getattr(clip, "kind", "stream") or "stream").strip().lower()
+    if clip_kind != "stream":
+        return True
+
+    if resolved_path is not None:
+        try:
+            broll_root = (Path(temp_base) / "broll").resolve()
+            if broll_root in Path(resolved_path).resolve().parents:
+                return True
+        except OSError:
+            pass
+
+    channel_low = str(getattr(clip, "channel", "") or "").strip().lstrip("@").lower()
+    if channel_low in _COMMENTARY_CHANNELS or "commentary" in channel_low:
+        return True
+
+    reason_low = str(getattr(clip, "reason", "") or "").strip().lower()
+    if "external commentary" in reason_low or "commentary youtuber" in reason_low:
+        return True
+    for pat in _COMMENTARY_TITLE_PATTERNS:
+        if pat.search(reason_low):
+            return True
+
+    source_titles: list[str] = []
+    if step_cache is not None and getattr(clip, "url", ""):
+        try:
+            state = step_cache.load_state(clip.url)
+            if state is not None and getattr(state, "stream_info", None) is not None:
+                st_title = str(getattr(state.stream_info, "title", "") or "").strip()
+                if st_title:
+                    source_titles.append(st_title)
+        except Exception:
+            pass
+
+    if library_index is not None:
+        try:
+            src = library_index.get_source(clip.source_id) if getattr(clip, "source_id", "") else None
+            if src is not None:
+                src_kind = str(getattr(src, "kind", "") or "").strip().lower()
+                if src_kind and src_kind != "stream":
+                    return True
+                src_title = str(getattr(src, "title", "") or "").strip()
+                if src_title:
+                    source_titles.append(src_title)
+        except Exception:
+            pass
+
+    for title in source_titles:
+        t_low = title.lower()
+        if "commentary" in t_low and "no commentary" not in t_low:
+            return True
+        for pat in _COMMENTARY_TITLE_PATTERNS:
+            if pat.search(t_low):
+                return True
+
+    return False
+
+
+def _select_narrated_essay_reaction_clip(
+    pt: TopicPoint,
+    *,
+    temp_base: Path,
+    downloaded_files: dict[tuple[str, float, float], Path],
+    step_cache: StepCache,
+    library_index: LibraryIndex,
+) -> EvidenceClip | None:
+    """Return at most ONE genuine streamer reaction clip for post-narration punch, or None."""
+    for clip in pt.evidence:
+        if str(getattr(clip, "role", "") or "").strip().lower() != "reaction":
+            continue
+        clip_key = (clip.url, round(clip.start, 2), round(clip.end, 2))
+        resolved_path = downloaded_files.get(clip_key)
+        if _is_external_commentary_clip(
+            clip,
+            temp_base=temp_base,
+            step_cache=step_cache,
+            library_index=library_index,
+            resolved_path=resolved_path,
+        ):
+            logger.info(
+                "Skipping un-narrated reaction block for point %d clip '%s' (external commentary/non-stream).",
+                pt.index,
+                clip.source_id or clip.channel,
+            )
+            continue
+        return clip
+    return None
+
+
+def _emit_montage_credits(
+    chap: Any,
+    segment_log: list[tuple[Path, float, float]],
+    rel_offset: float,
+    block_dur: float,
+    credit_seconds: float,
+    pt_path_to_clip: dict[str, EvidenceClip],
+    global_path_to_clip: dict[str, EvidenceClip],
+    game: str,
+) -> None:
+    """Emit lower-third @channel credit windows whenever each source clip appears in a montage."""
+    prev_seg_key = ""
+    for seg_path, seg_st, seg_et in segment_log:
+        s_st = max(0.0, min(float(seg_st), float(block_dur)))
+        s_et = max(s_st, min(float(seg_et), float(block_dur)))
+        if (s_et - s_st) <= 0.1:
+            continue
+        seg_key = str(Path(seg_path).resolve()).lower()
+        if seg_key == prev_seg_key:
+            continue
+        src_clip = pt_path_to_clip.get(seg_key) or global_path_to_clip.get(seg_key)
+        if src_clip is None:
+            continue
+        cred_text = _format_clip_credit(src_clip, game)
+        actual_cred_dur = min(float(credit_seconds), s_et - s_st)
+        if actual_cred_dur > 0.1:
+            chap.credit_events.append((rel_offset + s_st, rel_offset + s_st + actual_cred_dur, cred_text))
+            prev_seg_key = seg_key
 
 
 # ---------------------------------------------------------------------------
@@ -892,6 +1065,12 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None, 
             all_clips.extend(pt.evidence)
 
         downloaded_files: dict[tuple[str, float, float], Path] = {}
+        global_path_to_clip: dict[str, EvidenceClip] = {}
+
+        def _register_clip_path(p: Path | None, c: EvidenceClip) -> None:
+            if p and Path(p).is_file():
+                global_path_to_clip.setdefault(str(Path(p).resolve()).lower(), c)
+
         total_clips = len(all_clips)
         for idx, clip in enumerate(all_clips, start=1):
             if progress and hasattr(progress, "stage"):
@@ -911,6 +1090,7 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None, 
                         video_id=clip.source_id or None,
                     )
                     downloaded_files[clip_key] = path
+            _register_clip_path(downloaded_files.get(clip_key), clip)
 
         # Resolve or download alternate / B-roll clips for multi-clip narration montages
         for pt in plan.points:
@@ -926,9 +1106,11 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None, 
                     alt.end = alt.start + alt_max
                 alt_key = (alt.url, round(alt.start, 2), round(alt.end, 2))
                 if alt_key in downloaded_files:
+                    _register_clip_path(downloaded_files.get(alt_key), alt)
                     continue
                 if local_alt is not None:
                     downloaded_files[alt_key] = local_alt
+                    _register_clip_path(local_alt, alt)
                 elif alt.url and alt.url.strip().lower().startswith(("http://", "https://")):
                     try:
                         alt_path = download_segment(
@@ -940,6 +1122,7 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None, 
                             video_id=alt.source_id or None,
                         )
                         downloaded_files[alt_key] = alt_path
+                        _register_clip_path(alt_path, alt)
                     except Exception as exc:
                         logger.warning(
                             "Optional alternate clip download failed for point %d (%s): %s",
@@ -1008,6 +1191,13 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None, 
         broll_volume = float(config.get("longform.broll_volume", 0.12) or 0.12)
         credit_seconds = float(config.get("longform.credit_seconds", 4.0) or 4.0)
         kenburns_max_zoom = float(config.get("longform.kenburns_max_zoom", 1.08) or 1.08)
+        longform_style = str(config.get("longform.style", "narrated_essay") or "narrated_essay").strip().lower()
+        is_narrated_essay = (longform_style != "classic")
+        max_un_narrated_seconds = max(0.5, float(config.get("longform.max_un_narrated_seconds", 6.0) or 6.0))
+        broll_cut_seconds = max(1.0, float(config.get("longform.broll_cut_seconds", 6.5) or 6.5))
+        essay_slice_min = max(2.0, broll_cut_seconds - 0.5)
+        essay_slice_max = max(essay_slice_min + 0.5, broll_cut_seconds + 0.5)
+        library_index = LibraryIndex(config)
 
         # Resolve BGM track once near start of block assembly
         bgm_file = narrator._resolve_bgm_file() if hasattr(narrator, "_resolve_bgm_file") else None
@@ -1128,6 +1318,7 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None, 
                 if p_cand and p_cand not in co_candidates:
                     co_candidates.append(p_cand)
 
+            co_segments: list[tuple[Path, float, float]] = []
             zoomed = _build_broll_montage(
                 co_candidates,
                 nar_dur,
@@ -1135,6 +1326,9 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None, 
                 target_h,
                 kenburns_max_zoom,
                 opened_co,
+                slice_min=essay_slice_min if is_narrated_essay else 7.0,
+                slice_max=essay_slice_max if is_narrated_essay else 10.0,
+                segment_log=co_segments if is_narrated_essay else None,
             )
 
             nar_audio = AudioFileClip(str(wav_path))
@@ -1154,6 +1348,17 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None, 
 
             chap_co.block_files.append(block_file)
             chap_co.narration_events.append((0.0, actual_dur, plan.cold_open))
+            if is_narrated_essay and co_segments:
+                _emit_montage_credits(
+                    chap_co,
+                    co_segments,
+                    0.0,
+                    actual_dur,
+                    credit_seconds,
+                    {},
+                    global_path_to_clip,
+                    plan.game,
+                )
             chap_co.duration = actual_dur
             chapters_assembled.append(chap_co)
             total_narration_dur += actual_dur
@@ -1168,6 +1373,23 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None, 
                 downloaded_files.get((pt_first_clip.url, round(pt_first_clip.start, 2), round(pt_first_clip.end, 2)))
                 if pt_first_clip else fallback_clip_path
             ) or fallback_clip_path
+
+            pt_path_to_clip: dict[str, EvidenceClip] = {}
+            for c_item in list(pt.evidence) + list(getattr(pt, "alternates", []) or []):
+                c_key = (c_item.url, round(c_item.start, 2), round(c_item.end, 2))
+                c_path = downloaded_files.get(c_key) or _resolve_local_clip_path(c_item, temp_base)
+                if c_path and Path(c_path).is_file():
+                    pt_path_to_clip.setdefault(str(Path(c_path).resolve()).lower(), c_item)
+
+            selected_reaction_clip: EvidenceClip | None = None
+            if is_narrated_essay:
+                selected_reaction_clip = _select_narrated_essay_reaction_clip(
+                    pt,
+                    temp_base=temp_base,
+                    downloaded_files=downloaded_files,
+                    step_cache=step_cache,
+                    library_index=library_index,
+                )
 
             # Chapter Card (Numbered or Countdown shapes only)
             if plan.shape != "story":
@@ -1254,63 +1476,109 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None, 
                 pt_wav, pt_dur = voiced_narrations[f"point_{pt.index}"]
 
                 opened_pt: list[Any] = []
-                # Build a multi-clip non-looping B-roll montage for this point's narration.
-                # Stop back-to-back duplicate footage: exclude pt.evidence[0] when other clips exist.
-                # Candidate priority:
-                # (a) pt.alternates (including local/downloaded B-roll clips)
-                # (b) pt.evidence[1:] (if point has >= 2 evidence clips)
-                # (c) distinct downloaded clips from other points (alternates + evidence)
-                # (d) fallback to pt_clip_path with blur+dim only if no other clip exists
-                pt_ev_keys = {(ev.url, round(ev.start, 2), round(ev.end, 2)) for ev in pt.evidence}
-                pt_ev0_resolved = (
-                    str(Path(pt_clip_path).resolve()).lower()
-                    if pt_clip_path and Path(pt_clip_path).is_file()
-                    else ""
-                )
-
                 candidate_paths: list[Path | str] = []
                 seen_cand_keys: set[str] = set()
-
-                def _add_candidate(cand: Path | None) -> None:
-                    if not cand or not Path(cand).is_file():
-                        return
-                    r_key = str(Path(cand).resolve()).lower()
-                    if r_key == pt_ev0_resolved:
-                        return
-                    if r_key not in seen_cand_keys:
-                        seen_cand_keys.add(r_key)
-                        candidate_paths.append(Path(cand))
-
-                # (a) pt.alternates + local/broll clips
-                for alt in getattr(pt, "alternates", []) or []:
-                    alt_key = (alt.url, round(alt.start, 2), round(alt.end, 2))
-                    if alt_key not in pt_ev_keys:
-                        cand_path = downloaded_files.get(alt_key) or _resolve_local_clip_path(alt, temp_base)
-                        _add_candidate(cand_path)
-
-                # (b) pt.evidence[1:]
-                for ev_extra in pt.evidence[1:]:
-                    ev_key = (ev_extra.url, round(ev_extra.start, 2), round(ev_extra.end, 2))
-                    _add_candidate(downloaded_files.get(ev_key))
-
-                # (c) non-overlapping / distinct clips from other points if needed
-                if len(candidate_paths) < 2:
-                    for other_pt in plan.points:
-                        if other_pt.index == pt.index:
-                            continue
-                        for other_alt in getattr(other_pt, "alternates", []) or []:
-                            other_alt_key = (other_alt.url, round(other_alt.start, 2), round(other_alt.end, 2))
-                            _add_candidate(downloaded_files.get(other_alt_key) or _resolve_local_clip_path(other_alt, temp_base))
-                        for other_ev in other_pt.evidence:
-                            other_key = (other_ev.url, round(other_ev.start, 2), round(other_ev.end, 2))
-                            _add_candidate(downloaded_files.get(other_key))
-
                 apply_dim_blur = False
-                if not candidate_paths:
-                    apply_dim_blur = True
-                    if pt_clip_path and Path(pt_clip_path).is_file():
-                        candidate_paths.append(Path(pt_clip_path))
 
+                if is_narrated_essay:
+                    # In narrated_essay mode, fold all of pt.evidence + pt.alternates into the
+                    # narration montage (excluding only a selected post-narration reaction punch
+                    # unless no other footage exists).
+                    reaction_resolved = ""
+                    if selected_reaction_clip is not None:
+                        r_key_tuple = (
+                            selected_reaction_clip.url,
+                            round(selected_reaction_clip.start, 2),
+                            round(selected_reaction_clip.end, 2),
+                        )
+                        r_p = downloaded_files.get(r_key_tuple) or _resolve_local_clip_path(selected_reaction_clip, temp_base)
+                        if r_p and Path(r_p).is_file():
+                            reaction_resolved = str(Path(r_p).resolve()).lower()
+
+                    def _add_essay_candidate(cand: Path | None) -> None:
+                        if not cand or not Path(cand).is_file():
+                            return
+                        r_key = str(Path(cand).resolve()).lower()
+                        if reaction_resolved and r_key == reaction_resolved:
+                            return
+                        if r_key not in seen_cand_keys:
+                            seen_cand_keys.add(r_key)
+                            candidate_paths.append(Path(cand))
+
+                    for ev_clip_item in pt.evidence:
+                        if selected_reaction_clip is not None and ev_clip_item is selected_reaction_clip:
+                            continue
+                        ev_key = (ev_clip_item.url, round(ev_clip_item.start, 2), round(ev_clip_item.end, 2))
+                        _add_essay_candidate(downloaded_files.get(ev_key) or _resolve_local_clip_path(ev_clip_item, temp_base))
+
+                    for alt in getattr(pt, "alternates", []) or []:
+                        alt_key = (alt.url, round(alt.start, 2), round(alt.end, 2))
+                        _add_essay_candidate(downloaded_files.get(alt_key) or _resolve_local_clip_path(alt, temp_base))
+
+                    if len(candidate_paths) < 2:
+                        for other_pt in plan.points:
+                            if other_pt.index == pt.index:
+                                continue
+                            for other_alt in getattr(other_pt, "alternates", []) or []:
+                                other_alt_key = (other_alt.url, round(other_alt.start, 2), round(other_alt.end, 2))
+                                _add_essay_candidate(downloaded_files.get(other_alt_key) or _resolve_local_clip_path(other_alt, temp_base))
+                            for other_ev in other_pt.evidence:
+                                other_key = (other_ev.url, round(other_ev.start, 2), round(other_ev.end, 2))
+                                _add_essay_candidate(downloaded_files.get(other_key))
+
+                    if not candidate_paths:
+                        apply_dim_blur = True
+                        if pt_clip_path and Path(pt_clip_path).is_file():
+                            candidate_paths.append(Path(pt_clip_path))
+                else:
+                    # Classic mode: exclude pt.evidence[0] when other clips exist to prevent back-to-back repeat
+                    pt_ev_keys = {(ev.url, round(ev.start, 2), round(ev.end, 2)) for ev in pt.evidence}
+                    pt_ev0_resolved = (
+                        str(Path(pt_clip_path).resolve()).lower()
+                        if pt_clip_path and Path(pt_clip_path).is_file()
+                        else ""
+                    )
+
+                    def _add_candidate(cand: Path | None) -> None:
+                        if not cand or not Path(cand).is_file():
+                            return
+                        r_key = str(Path(cand).resolve()).lower()
+                        if r_key == pt_ev0_resolved:
+                            return
+                        if r_key not in seen_cand_keys:
+                            seen_cand_keys.add(r_key)
+                            candidate_paths.append(Path(cand))
+
+                    # (a) pt.alternates + local/broll clips
+                    for alt in getattr(pt, "alternates", []) or []:
+                        alt_key = (alt.url, round(alt.start, 2), round(alt.end, 2))
+                        if alt_key not in pt_ev_keys:
+                            cand_path = downloaded_files.get(alt_key) or _resolve_local_clip_path(alt, temp_base)
+                            _add_candidate(cand_path)
+
+                    # (b) pt.evidence[1:]
+                    for ev_extra in pt.evidence[1:]:
+                        ev_key = (ev_extra.url, round(ev_extra.start, 2), round(ev_extra.end, 2))
+                        _add_candidate(downloaded_files.get(ev_key))
+
+                    # (c) non-overlapping / distinct clips from other points if needed
+                    if len(candidate_paths) < 2:
+                        for other_pt in plan.points:
+                            if other_pt.index == pt.index:
+                                continue
+                            for other_alt in getattr(other_pt, "alternates", []) or []:
+                                other_alt_key = (other_alt.url, round(other_alt.start, 2), round(other_alt.end, 2))
+                                _add_candidate(downloaded_files.get(other_alt_key) or _resolve_local_clip_path(other_alt, temp_base))
+                            for other_ev in other_pt.evidence:
+                                other_key = (other_ev.url, round(other_ev.start, 2), round(other_ev.end, 2))
+                                _add_candidate(downloaded_files.get(other_key))
+
+                    if not candidate_paths:
+                        apply_dim_blur = True
+                        if pt_clip_path and Path(pt_clip_path).is_file():
+                            candidate_paths.append(Path(pt_clip_path))
+
+                pt_segments: list[tuple[Path, float, float]] = []
                 zoomed = _build_broll_montage(
                     candidate_paths,
                     pt_dur,
@@ -1318,8 +1586,11 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None, 
                     target_h,
                     kenburns_max_zoom,
                     opened_pt,
+                    slice_min=essay_slice_min if is_narrated_essay else 7.0,
+                    slice_max=essay_slice_max if is_narrated_essay else 10.0,
                     blur_radius=6 if apply_dim_blur else 0,
                     dim_factor=0.65 if apply_dim_blur else 1.0,
+                    segment_log=pt_segments if is_narrated_essay else None,
                 )
 
                 pt_audio = AudioFileClip(str(pt_wav))
@@ -1339,11 +1610,29 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None, 
 
                 chap_pt.block_files.append(nar_block_file)
                 chap_pt.narration_events.append((rel_t, rel_t + nar_actual_dur, pt.narration))
+                if is_narrated_essay and pt_segments:
+                    _emit_montage_credits(
+                        chap_pt,
+                        pt_segments,
+                        rel_t,
+                        nar_actual_dur,
+                        credit_seconds,
+                        pt_path_to_clip,
+                        global_path_to_clip,
+                        plan.game,
+                    )
                 total_narration_dur += nar_actual_dur
                 rel_t += nar_actual_dur
 
-            # Evidence Clips (full volume, original audio)
-            for ev_idx, ev_clip in enumerate(pt.evidence, start=1):
+            # Post-narration full-volume clips:
+            # In narrated_essay mode, play AT MOST ONE short (<= max_un_narrated_seconds) clip ONLY if
+            # role == "reaction" (and not an external commentary YouTuber). Skip completely otherwise.
+            if is_narrated_essay:
+                post_clips = [selected_reaction_clip] if selected_reaction_clip is not None else []
+            else:
+                post_clips = list(pt.evidence)
+
+            for ev_idx, ev_clip in enumerate(post_clips, start=1):
                 block_counter += 1
                 if progress and hasattr(progress, "stage"):
                     progress.stage(f"rendering block {block_counter}")
@@ -1353,6 +1642,8 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None, 
 
                 opened_ev: list[Any] = []
                 ev_dur = max(0.1, ev_clip.end - ev_clip.start)
+                if is_narrated_essay:
+                    ev_dur = min(ev_dur, max_un_narrated_seconds)
                 ev_video = VideoFileClip(str(ev_path)) if ev_path else ColorClip(size=(target_w, target_h), color=(10, 10, 10), duration=ev_dur)
                 opened_ev.append(ev_video)
                 ev_fitted = _fit_to_canvas(ev_video, target_w, target_h)
@@ -1372,14 +1663,7 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None, 
                 actual_ev_dur = _probe_duration(ev_block_file) or ev_actual_dur
                 chap_pt.block_files.append(ev_block_file)
 
-                # Lower-third credit
-                if ev_clip.kind == "official":
-                    raw_ch = (ev_clip.channel or "").strip().lstrip("@")
-                    cred_text = f"Official footage: {raw_ch}" if raw_ch else f"Official {plan.game} footage"
-                else:
-                    ch_clean = (ev_clip.channel or "").strip().lstrip("@")
-                    cred_text = f"@{ch_clean}" if ch_clean else "@Unknown"
-
+                cred_text = _format_clip_credit(ev_clip, plan.game)
                 actual_cred_dur = min(credit_seconds, actual_ev_dur)
                 chap_pt.credit_events.append((rel_t, rel_t + actual_cred_dur, cred_text))
                 rel_t += actual_ev_dur
@@ -1403,6 +1687,7 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None, 
             if fallback_clip_path and fallback_clip_path not in out_candidates:
                 out_candidates.append(fallback_clip_path)
 
+            out_segments: list[tuple[Path, float, float]] = []
             zoomed = _build_broll_montage(
                 out_candidates,
                 out_dur,
@@ -1410,6 +1695,9 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None, 
                 target_h,
                 kenburns_max_zoom,
                 opened_out,
+                slice_min=essay_slice_min if is_narrated_essay else 7.0,
+                slice_max=essay_slice_max if is_narrated_essay else 10.0,
+                segment_log=out_segments if is_narrated_essay else None,
             )
 
             out_audio = AudioFileClip(str(out_wav))
@@ -1429,6 +1717,17 @@ def render_long_video(config: Config, plan: TopicPlan, *, progress: Any = None, 
 
             chap_out.block_files.append(block_file)
             chap_out.narration_events.append((0.0, out_actual_dur, plan.outro))
+            if is_narrated_essay and out_segments:
+                _emit_montage_credits(
+                    chap_out,
+                    out_segments,
+                    0.0,
+                    out_actual_dur,
+                    credit_seconds,
+                    {},
+                    global_path_to_clip,
+                    plan.game,
+                )
             chap_out.duration = out_actual_dur
             chapters_assembled.append(chap_out)
             total_narration_dur += out_actual_dur

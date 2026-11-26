@@ -179,3 +179,66 @@ def test_fetch_topic_broll_edge_cases(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="query is required"):
         fetch_topic_broll(cfg, "   ")
     assert fetch_topic_broll(cfg, "alligator", max_clips=0) == []
+
+
+def test_v45_fetch_topic_broll_appends_no_commentary_and_skips_countdown_reaction_titles(tmp_path: Path) -> None:
+    """fetch_topic_broll appends 'no commentary' to queries and skips countdown/review/reaction titles."""
+    from streamclipper.topics.broll import _enrich_broll_search_query, _is_excluded_broll_title
+
+    assert _enrich_broll_search_query("vice city driving", game="GTA 6") == "GTA 6 vice city driving no commentary gameplay"
+    assert _enrich_broll_search_query("swamp gameplay", game="GTA 6") == "GTA 6 swamp gameplay no commentary"
+    assert _enrich_broll_search_query("GTA 6 swamp no commentary", game="GTA 6") == "GTA 6 swamp no commentary"
+
+    assert _is_excluded_broll_title("Top 10 Details You Missed in GTA 6") is True
+    assert _is_excluded_broll_title("Top 20 Hidden Secrets in GTA 6") is True
+    assert _is_excluded_broll_title("GTA 6 Vehicles Ranked") is True
+    assert _is_excluded_broll_title("15 Things You Missed in GTA 6 Trailer 2") is True
+    assert _is_excluded_broll_title("GTA 6 Honest Review & Impressions") is True
+    assert _is_excluded_broll_title("Streamer Reaction to GTA 6") is True
+    assert _is_excluded_broll_title("GTA 6 Swamp Gameplay 4K No Commentary") is False
+
+    cfg = _make_cfg(tmp_path)
+    seen_terms: list[str] = []
+    fake_entries = [
+        {"id": "top20", "title": "Top 20 Things You Missed in GTA 6", "duration": 180, "view_count": 999999},
+        {"id": "top10", "title": "Top 10 GTA 6 Interiors Ranked", "duration": 160, "view_count": 888888},
+        {"id": "review1", "title": "GTA 6 Graphics Review", "duration": 200, "view_count": 777777},
+        {"id": "react1", "title": "GTA 6 Trailer 2 Reaction", "duration": 150, "view_count": 666666},
+        {
+            "id": "clean_raw",
+            "title": "GTA 6 Night Driving 4K No Commentary Gameplay",
+            "duration": 120.0,
+            "view_count": 15000,
+            "channel": "RawGameplays",
+            "webpage_url": "https://www.youtube.com/watch?v=clean_raw",
+        },
+    ]
+
+    class MockYDL:
+        def __init__(self, opts: dict[str, Any]) -> None:
+            self.opts = opts
+
+        def __enter__(self) -> "MockYDL":
+            return self
+
+        def __exit__(self, *args: Any) -> None:
+            pass
+
+        def extract_info(self, term: str, download: bool = False) -> dict[str, Any]:
+            seen_terms.append(term)
+            return {"entries": fake_entries}
+
+    def mock_download_segment(url: str, start: float, end: float, out_dir: Path, **kwargs: Any) -> Path:
+        vid = kwargs.get("video_id") or "vid"
+        target = Path(out_dir) / f"{vid}_{round(start * 1000)}_{round(end * 1000)}_b0.mp4"
+        return _create_test_mp4(target, duration=3.0)
+
+    with patch("streamclipper.topics.broll.yt_dlp.YoutubeDL", MockYDL), \
+         patch("streamclipper.topics.broll.download_segment", side_effect=mock_download_segment):
+        results = fetch_topic_broll(cfg, "night driving", game="GTA 6", max_clips=3, clip_seconds=10.0)
+
+    assert len(seen_terms) == 1
+    assert "no commentary gameplay" in seen_terms[0].lower()
+    assert len(results) == 1
+    assert results[0]["source_id"] == "clean_raw"
+    assert Path(results[0]["preview_sheet_path"]).is_file()

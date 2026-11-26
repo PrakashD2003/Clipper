@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+import re
 from typing import Any
 import urllib.parse
 
@@ -65,6 +66,19 @@ def _format_timestamp_url(url: str, start_seconds: float) -> str:
         return f"{clean_url}{sep}t={t_sec}s"
 
 
+def _clean_point_label_for_title(raw_heading: str) -> str:
+    """Strip countdown numbers (#1, #2) and verbose colon subtitles from point headings for A/B titles."""
+    label = re.sub(r"^\s*#\d+[\s:.\-–—]*", "", str(raw_heading or "")).strip()
+    if ":" in label:
+        head = label.split(":", 1)[0].strip()
+        if head:
+            label = head
+    words = label.split()
+    if len(words) > 6:
+        label = " ".join(words[:6])
+    return label.strip(" :-–—.,!?")
+
+
 def generate_long_title_variants(plan: TopicPlan) -> list[str]:
     """Generate 3–5 punchy curiosity-gap title variants for YouTube Studio A/B testing."""
     primary = (plan.video_title or plan.topic_title or "Topic Video").strip()
@@ -91,7 +105,8 @@ def generate_long_title_variants(plan: TopicPlan) -> list[str]:
     # 3. Point-based or numbered breakdown
     if plan.points and len(plan.points) >= 2:
         candidates.append(f"{len(plan.points)} Insane Secrets Hidden Inside {game}")
-        first_pt = (getattr(plan.points[0], "heading", None) or getattr(plan.points[0], "title", None) or "").strip()
+        raw_first_pt = (getattr(plan.points[0], "heading", None) or getattr(plan.points[0], "title", None) or "").strip()
+        first_pt = _clean_point_label_for_title(raw_first_pt)
         if first_pt:
             candidates.append(f"Why {first_pt} Changes Everything in {game}")
     else:
